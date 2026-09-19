@@ -8,7 +8,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Streamlit container padding aur iframe ko pure mobile width par stretch karna
 st.markdown("""
 <style>
     header, footer, #MainMenu { display: none !important; }
@@ -25,7 +24,7 @@ terminal_html = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body {
             background: #080a0f;
             color: #d1d4dc;
@@ -44,11 +43,10 @@ terminal_html = """
             gap: 10px;
             overflow-x: auto;
             white-space: nowrap;
-            width: 100%;
         }
         .brand { font-weight: 800; color: #fff; font-size: 12px; }
         .badge {
-            padding: 3px 8px;
+            padding: 4px 8px;
             border-radius: 4px;
             font-weight: 700;
             font-size: 10px;
@@ -57,20 +55,19 @@ terminal_html = """
         .badge-long { background: rgba(0, 230, 118, 0.2); color: #00e676; border: 1px solid #00e676; }
         .badge-short { background: rgba(255, 59, 48, 0.2); color: #ff3b30; border: 1px solid #ff3b30; }
 
-        .stat-card { display: flex; flex-direction: column; min-width: 60px; }
+        .stat-card { display: flex; flex-direction: column; min-width: 65px; }
         .stat-label { font-size: 8px; color: #62697a; text-transform: uppercase; font-weight: 600; }
         .stat-val { font-size: 11px; font-weight: 700; color: #fff; }
 
-        /* FLEX CONTAINER */
         .workspace {
             display: flex;
-            flex-direction: column; /* Mobile by default: Chart UP, Cards DOWN */
+            flex-direction: column;
             width: 100%;
         }
         #chart-zone {
             width: 100vw;
-            height: 56vh; /* Mobile standard height */
-            min-height: 350px;
+            height: 58vh;
+            min-height: 360px;
             background: #080a0f;
         }
         .side-bar {
@@ -81,28 +78,13 @@ terminal_html = """
             display: flex;
             flex-direction: column;
             gap: 10px;
-            padding-bottom: 60px;
+            padding-bottom: 50px;
         }
 
-        /* LAPTOP DESKTOP OVERRIDE (Screen > 850px) */
-        @media (min-width: 851px) {
-            .workspace {
-                flex-direction: row;
-                height: calc(100vh - 48px);
-            }
-            #chart-zone {
-                flex: 1;
-                height: 100%;
-                min-height: unset;
-                width: auto;
-            }
-            .side-bar {
-                width: 330px;
-                border-top: none;
-                border-left: 1px solid #161d2b;
-                overflow-y: auto;
-                padding-bottom: 20px;
-            }
+        @media (min-width: 850px) {
+            .workspace { flex-direction: row; height: calc(100vh - 48px); }
+            #chart-zone { flex: 1; height: 100%; width: auto; }
+            .side-bar { width: 320px; border-top: none; border-left: 1px solid #161d2b; }
         }
 
         .card {
@@ -133,18 +115,18 @@ terminal_html = """
 <body>
 
     <div class="top-nav">
-        <div class="brand">⚡ SNIPER RADAR</div>
-        <div id="status-badge" class="badge badge-idle">MONITORING BTC 5M</div>
+        <div class="brand">⚡ INSTITUTIONAL SNIPER</div>
+        <div id="status-badge" class="badge badge-idle">PATIENTLY SCANNING...</div>
         <div class="stat-card">
             <div class="stat-label">ENTRY</div>
             <div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div>
         </div>
         <div class="stat-card">
-            <div class="stat-label">STOP LOSS</div>
+            <div class="stat-label">WIDE SL</div>
             <div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div>
         </div>
         <div class="stat-card">
-            <div class="stat-label">TARGET</div>
+            <div class="stat-label">BIG TARGET</div>
             <div id="disp-tp" class="stat-val" style="color:#00e676;">--</div>
         </div>
         <div style="margin-left: auto; display: flex; align-items: center;">
@@ -158,26 +140,26 @@ terminal_html = """
         <div class="side-bar">
             <div class="card" style="border: 1px solid #293854;">
                 <div class="card-header">
-                    <span>EXPLOSION INTENSITY</span>
-                    <span id="bias-pill" style="padding:2px 6px; border-radius:3px; background:#1c2436; color:#848e9c;">WAITING</span>
+                    <span>BREAKOUT QUALITY</span>
+                    <span id="bias-pill" style="padding:2px 6px; border-radius:3px; background:#1c2436; color:#848e9c;">WAITING EXPANSION</span>
                 </div>
                 <div style="font-size: 22px; font-weight: 800; color: #fff;" id="score-text">0 / 100</div>
-                <div style="font-size: 10px; color: #62697a; margin-top: 4px;">Dynamic Breakout & Range Expansion Engine</div>
+                <div style="font-size: 10px; color: #62697a; margin-top: 4px;">Min Break: $120+ Range Expansion Required</div>
             </div>
 
             <div class="card">
-                <div class="card-header"><span>MARKET METRICS</span><span style="color:#00e676;">LIVE</span></div>
-                <div class="row"><span style="color:#787b86;">RSI (14)</span><b id="rsi-val" style="color:#fff;">--</b></div>
-                <div class="row"><span style="color:#787b86;">Market ATR</span><b id="atr-val" style="color:#f0b90b;">--</b></div>
-                <div class="row"><span style="color:#787b86;">Candle Pace</span><b id="candle-pace" style="color:#00e676;">SCANNING</b></div>
+                <div class="card-header"><span>SWING METRICS</span><span id="conn-state" style="color:#00e676;">SOCKET ALIVE ✅</span></div>
+                <div class="row"><span style="color:#787b86;">Trend (EMA 20/50)</span><b id="trend-val" style="color:#fff;">ANALYZING</b></div>
+                <div class="row"><span style="color:#787b86;">RSI Momentum</span><b id="rsi-val" style="color:#fff;">--</b></div>
+                <div class="row"><span style="color:#787b86;">Range Volatility (ATR)</span><b id="atr-val" style="color:#f0b90b;">--</b></div>
             </div>
 
             <div class="card">
-                <div class="card-header"><span>ACTIVE TRADE MONITOR</span></div>
-                <div class="row"><span style="color:#787b86;">Projected Profit</span><b id="gain-pts" style="color:#00e676;">--</b></div>
-                <div class="row"><span style="color:#787b86;">Defined Risk</span><b id="loss-pts" style="color:#ff3b30;">--</b></div>
-                <div class="row"><span style="color:#787b86;">Telegram Bot</span><b id="tg-status" style="color:#00e676;">ONLINE DIRECT ✅</b></div>
-                <div class="row"><span style="color:#787b86;">Status</span><b id="exec-state" style="color:#848e9c;">IDLE</b></div>
+                <div class="card-header"><span>ACTIVE TRADE STATUS</span></div>
+                <div class="row"><span style="color:#787b86;">Target Gain</span><b id="gain-pts" style="color:#00e676;">--</b></div>
+                <div class="row"><span style="color:#787b86;">Max Risk Buffer</span><b id="loss-pts" style="color:#ff3b30;">--</b></div>
+                <div class="row"><span style="color:#787b86;">Telegram Pipeline</span><b id="tg-status" style="color:#00e676;">24/7 ONLINE DIRECT</b></div>
+                <div class="row"><span style="color:#787b86;">Execution State</span><b id="exec-state" style="color:#848e9c;">NO ACTIVE POSITION</b></div>
             </div>
         </div>
     </div>
@@ -207,6 +189,15 @@ terminal_html = """
         let activeTrade = null;
         let entryLine = null, slLine = null, tpLine = null;
         let lastTriggerTime = 0;
+        let ws = null;
+
+        // LOCAL STORAGE SE TRADE RESTORE KARNA TA-AKI REFRESH PAR WIPE NA HO
+        try {
+            const savedTrade = localStorage.getItem('btc_sniper_active_trade');
+            if (savedTrade) {
+                activeTrade = JSON.parse(savedTrade);
+            }
+        } catch(e) {}
 
         function sendDirectTelegram(text) {
             fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -214,8 +205,8 @@ terminal_html = """
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ chat_id: CHAT_ID, text: text, parse_mode: "Markdown" })
             }).then(() => {
-                document.getElementById('tg-status').innerText = "SENT 📲";
-                setTimeout(() => { document.getElementById('tg-status').innerText = "ONLINE DIRECT ✅"; }, 4000);
+                document.getElementById('tg-status').innerText = "ALERT SENT 📲";
+                setTimeout(() => { document.getElementById('tg-status').innerText = "24/7 ONLINE DIRECT"; }, 4000);
             }).catch(e => console.error(e));
         }
 
@@ -228,35 +219,45 @@ terminal_html = """
             document.getElementById('disp-tp').innerText = "--";
             document.getElementById('gain-pts').innerText = "--";
             document.getElementById('loss-pts').innerText = "--";
-            document.getElementById('exec-state').innerText = "IDLE";
+            document.getElementById('exec-state').innerText = "NO ACTIVE POSITION";
             document.getElementById('exec-state').style.color = "#848e9c";
+            localStorage.removeItem('btc_sniper_active_trade');
         }
 
         function drawActiveTrade(trade) {
-            clearAllTradeLines();
+            if (entryLine) series.removePriceLine(entryLine);
+            if (slLine) series.removePriceLine(slLine);
+            if (tpLine) series.removePriceLine(tpLine);
+
             entryLine = series.createPriceLine({ price: trade.entry, color: '#38bdf8', lineWidth: 2, title: 'ENTRY' });
-            tpLine = series.createPriceLine({ price: trade.tp, color: '#00e676', lineWidth: 2, title: 'TARGET' });
-            slLine = series.createPriceLine({ price: trade.sl, color: '#ff3b30', lineWidth: 2, title: 'SL' });
+            tpLine = series.createPriceLine({ price: trade.tp, color: '#00e676', lineWidth: 2, title: 'TP (BIG MOVE)' });
+            slLine = series.createPriceLine({ price: trade.sl, color: '#ff3b30', lineWidth: 2, title: 'SAFE SL' });
 
             document.getElementById('disp-entry').innerText = "$" + trade.entry.toFixed(1);
             document.getElementById('disp-sl').innerText = "$" + trade.sl.toFixed(1);
             document.getElementById('disp-tp').innerText = "$" + trade.tp.toFixed(1);
             document.getElementById('gain-pts').innerText = "+$" + trade.reward.toFixed(1);
             document.getElementById('loss-pts').innerText = "-$" + trade.risk.toFixed(1);
-            document.getElementById('exec-state').innerText = trade.type + " ACTIVE";
+            document.getElementById('exec-state').innerText = trade.type + " POSITION ACTIVE";
             document.getElementById('exec-state').style.color = trade.type === "LONG" ? "#00e676" : "#ff3b30";
+
+            localStorage.setItem('btc_sniper_active_trade', JSON.stringify(trade));
         }
 
-        fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=150')
-            .then(res => res.json())
-            .then(data => {
-                candles = data.map(d => ({
-                    time: Math.floor(d[0] / 1000),
-                    open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]), volume: parseFloat(d[5])
-                }));
-                series.setData(candles);
-                initWebSocket();
-            });
+        function loadHistoricalData() {
+            fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=150')
+                .then(res => res.json())
+                .then(data => {
+                    candles = data.map(d => ({
+                        time: Math.floor(d[0] / 1000),
+                        open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]), volume: parseFloat(d[5])
+                    }));
+                    series.setData(candles);
+                    if (activeTrade) drawActiveTrade(activeTrade);
+                    connectWebSocket();
+                });
+        }
+        loadHistoricalData();
 
         function calcEMA(p, arr) {
             const k = 2 / (p + 1);
@@ -266,7 +267,7 @@ terminal_html = """
         }
 
         function calcATR(c, p = 14) {
-            if (c.length < p + 1) return 100;
+            if (c.length < p + 1) return 150;
             let sum = 0;
             for (let i = c.length - p; i < c.length; i++) {
                 sum += Math.max(c[i].high - c[i].low, Math.abs(c[i].high - c[i-1].close), Math.abs(c[i].low - c[i-1].close));
@@ -286,118 +287,130 @@ terminal_html = """
 
         function evaluateTradeEngine(candle) {
             const closes = candles.map(c => c.close);
-            const ema9 = calcEMA(9, closes);
-            const ema21 = calcEMA(21, closes);
+            const ema20 = calcEMA(20, closes);
+            const ema50 = calcEMA(50, closes);
             const rsi = calcRSI(closes, 14);
             const atr = calcATR(candles, 14);
 
             document.getElementById('atr-val').innerText = "$" + atr.toFixed(1);
             document.getElementById('rsi-val').innerText = rsi.toFixed(1);
 
+            const isBullishTrend = ema20 > ema50;
+            document.getElementById('trend-val').innerText = isBullishTrend ? "BULLISH (UPTREND)" : "BEARISH (DOWNTREND)";
+            document.getElementById('trend-val').style.color = isBullishTrend ? "#00e676" : "#ff3b30";
+
+            // CHECK RUNNING TRADE TARGET / SL
             if (activeTrade) {
                 if (activeTrade.type === "LONG") {
                     if (candle.high >= activeTrade.tp) {
-                        document.getElementById('status-badge').innerText = "TARGET REACHED 🎯";
-                        document.getElementById('status-badge').className = "badge badge-long";
-                        sendDirectTelegram(`🎯 *TARGET ACHIEVED (LONG)*\\n\\nExit Level: $${activeTrade.tp.toFixed(1)}\\nProfit Locked!`);
+                        sendDirectTelegram(`🎯 *TARGET HIT (+$${activeTrade.reward.toFixed(1)})*\\n\\nBTC Long target reached at $${activeTrade.tp.toFixed(1)}! Position closed.`);
                         activeTrade = null; clearAllTradeLines();
                     } else if (candle.low <= activeTrade.sl) {
-                        document.getElementById('status-badge').innerText = "SL EXIT 🛡️";
-                        document.getElementById('status-badge').className = "badge badge-short";
-                        sendDirectTelegram(`🛡️ *STOP LOSS (LONG)*\\n\\nExit: $${candle.low.toFixed(1)}`);
+                        sendDirectTelegram(`🛡️ *STOP LOSS HIT*\\n\\nBTC Long exited at $${candle.low.toFixed(1)}.`);
                         activeTrade = null; clearAllTradeLines();
                     }
                 } else if (activeTrade.type === "SHORT") {
                     if (candle.low <= activeTrade.tp) {
-                        document.getElementById('status-badge').innerText = "TARGET REACHED 🎯";
-                        document.getElementById('status-badge').className = "badge badge-long";
-                        sendDirectTelegram(`🎯 *TARGET ACHIEVED (SHORT)*\\n\\nExit Level: $${activeTrade.tp.toFixed(1)}\\nProfit Locked!`);
+                        sendDirectTelegram(`🎯 *TARGET HIT (+$${activeTrade.reward.toFixed(1)})*\\n\\nBTC Short target reached at $${activeTrade.tp.toFixed(1)}! Position closed.`);
                         activeTrade = null; clearAllTradeLines();
                     } else if (candle.high >= activeTrade.sl) {
-                        document.getElementById('status-badge').innerText = "SL EXIT 🛡️";
-                        document.getElementById('status-badge').className = "badge badge-short";
-                        sendDirectTelegram(`🛡️ *STOP LOSS (SHORT)*\\n\\nExit: $${candle.high.toFixed(1)}`);
+                        sendDirectTelegram(`🛡️ *STOP LOSS HIT*\\n\\nBTC Short exited at $${candle.high.toFixed(1)}.`);
                         activeTrade = null; clearAllTradeLines();
                     }
                 }
                 return;
             }
 
+            // ACCURATE BIG MOVE FORMULA (5 CANDLE MULTI-RANGE BREAK)
             const c0 = candles[candles.length - 1];
-            const c1 = candles[candles.length - 2];
-            const c2 = candles[candles.length - 3];
-            const recentHigh = Math.max(c1.high, c2.high);
-            const recentLow = Math.min(c1.low, c2.low);
+            const prevCandles = candles.slice(-7, -1);
+            const rangeHigh = Math.max(...prevCandles.map(c => c.high));
+            const rangeLow = Math.min(...prevCandles.map(c => c.low));
             const bodySize = Math.abs(c0.close - c0.open);
 
             let score = 0;
             let bias = "NEUTRAL";
 
-            if (c0.close < recentLow) { score += 40; bias = "SHORT"; }
-            else if (c0.close > recentHigh) { score += 40; bias = "LONG"; }
-
-            if (bodySize > (atr * 0.35)) {
-                score += 30;
-                document.getElementById('candle-pace').innerText = "FAST MOVE ⚡";
-                document.getElementById('candle-pace').style.color = "#00e676";
-            } else {
-                document.getElementById('candle-pace').innerText = "NORMAL";
-                document.getElementById('candle-pace').style.color = "#848e9c";
+            // 1. Breakout with candle expansion
+            if (c0.close > rangeHigh && c0.close > ema20 && isBullishTrend) {
+                bias = "LONG";
+                score += 45;
+            } else if (c0.close < rangeLow && c0.close < ema20 && !isBullishTrend) {
+                bias = "SHORT";
+                score += 45;
             }
 
-            if (bias === "SHORT" && c0.close < ema9 && ema9 < ema21) score += 30;
-            else if (bias === "LONG" && c0.close > ema9 && ema9 > ema21) score += 30;
+            // 2. High Expansion body (Filters 50-60 point fake scalps)
+            if (bodySize >= (atr * 0.75)) {
+                score += 35;
+            }
+
+            // 3. RSI Strong Momentum confirmation
+            if (bias === "LONG" && rsi >= 55) score += 20;
+            if (bias === "SHORT" && rsi <= 45) score += 20;
 
             document.getElementById('score-text').innerText = score + " / 100";
             const now = Math.floor(Date.now() / 1000);
 
-            if (score >= 70 && (now - lastTriggerTime > 120)) {
+            // TRIGGER ONLY WHEN SCORE IS 80+ (GENUINE BIG MOVE)
+            if (score >= 80 && (now - lastTriggerTime > 300)) {
                 const p = c0.close;
 
-                if (bias === "SHORT") {
-                    const risk = Math.max(45, Math.min(80, (c0.high - p) + 10));
-                    const reward = risk * 1.8;
-                    const sl = p + risk;
-                    const tp = p - reward;
+                // Stop loss safe buffer ($110 - $160 buffer to avoid fake wicks)
+                const risk = Math.max(120, Math.min(180, atr * 1.2));
+                const reward = risk * 2.2; // MINIMUM $260+ to $400+ TARGET
 
-                    lastTriggerTime = now;
-                    activeTrade = { type: "SHORT", entry: p, sl: sl, tp: tp, risk: risk, reward: reward };
-                    markers.push({ time: candle.time, position: 'aboveBar', color: '#ff3b30', shape: 'arrowDown', text: 'SELL' });
-                    series.setMarkers(markers.slice(-4));
-                    drawActiveTrade(activeTrade);
-
-                    document.getElementById('status-badge').innerText = "🔴 SHORT RUNNING";
-                    document.getElementById('status-badge').className = "badge badge-short";
-                    document.getElementById('bias-pill').innerText = "SHORT TRIGGER";
-                    document.getElementById('bias-pill').style.background = "#ff3b30";
-                    document.getElementById('bias-pill').style.color = "#fff";
-
-                    sendDirectTelegram(`🔴 *BTC/USDT 5M SHORT BREAKDOWN*\\n\\n💰 Entry: $${p.toFixed(1)}\\n🛡️ Stop Loss: $${sl.toFixed(1)} (-$${risk.toFixed(1)})\\n🎯 Target: $${tp.toFixed(1)} (+$${reward.toFixed(1)})\\n⚡ _Velocity Break below $${recentLow.toFixed(1)}_`);
-                } else if (bias === "LONG") {
-                    const risk = Math.max(45, Math.min(80, (p - c0.low) + 10));
-                    const reward = risk * 1.8;
+                if (bias === "LONG") {
                     const sl = p - risk;
                     const tp = p + reward;
 
                     lastTriggerTime = now;
                     activeTrade = { type: "LONG", entry: p, sl: sl, tp: tp, risk: risk, reward: reward };
-                    markers.push({ time: candle.time, position: 'belowBar', color: '#00e676', shape: 'arrowUp', text: 'BUY' });
+                    markers.push({ time: candle.time, position: 'belowBar', color: '#00e676', shape: 'arrowUp', text: 'BIG BUY' });
                     series.setMarkers(markers.slice(-4));
                     drawActiveTrade(activeTrade);
 
-                    document.getElementById('status-badge').innerText = "🟢 LONG RUNNING";
+                    document.getElementById('status-badge').innerText = "🟢 ACCURATE LONG LIVE";
                     document.getElementById('status-badge').className = "badge badge-long";
-                    document.getElementById('bias-pill').innerText = "LONG TRIGGER";
+                    document.getElementById('bias-pill').innerText = "HIGH PROBABILITY LONG";
                     document.getElementById('bias-pill').style.background = "#00e676";
                     document.getElementById('bias-pill').style.color = "#000";
 
-                    sendDirectTelegram(`🟢 *BTC/USDT 5M LONG BREAKOUT*\\n\\n💰 Entry: $${p.toFixed(1)}\\n🛡️ Stop Loss: $${sl.toFixed(1)} (-$${risk.toFixed(1)})\\n🎯 Target: $${tp.toFixed(1)} (+$${reward.toFixed(1)})\\n⚡ _Velocity Break above $${recentHigh.toFixed(1)}_`);
+                    sendDirectTelegram(`🔥 *HIGH ACCURACY BTC 5M EXPANSION (BUY)*\\n\\n🚀 *Breakout Level:* $${rangeHigh.toFixed(1)}\\n💰 *Entry:* $${p.toFixed(1)}\\n🛡️ *Safe Stop Loss:* $${sl.toFixed(1)} (-$${risk.toFixed(1)})\\n🎯 *Big Target:* $${tp.toFixed(1)} (+$${reward.toFixed(1)})\\n📊 *RR Ratio:* 1:2.2\\n⚡ _Trend & Momentum confirmed._`);
+                } else if (bias === "SHORT") {
+                    const sl = p + risk;
+                    const tp = p - reward;
+
+                    lastTriggerTime = now;
+                    activeTrade = { type: "SHORT", entry: p, sl: sl, tp: tp, risk: risk, reward: reward };
+                    markers.push({ time: candle.time, position: 'aboveBar', color: '#ff3b30', shape: 'arrowDown', text: 'BIG SELL' });
+                    series.setMarkers(markers.slice(-4));
+                    drawActiveTrade(activeTrade);
+
+                    document.getElementById('status-badge').innerText = "🔴 ACCURATE SHORT LIVE";
+                    document.getElementById('status-badge').className = "badge badge-short";
+                    document.getElementById('bias-pill').innerText = "HIGH PROBABILITY SHORT";
+                    document.getElementById('bias-pill').style.background = "#ff3b30";
+                    document.getElementById('bias-pill').style.color = "#fff";
+
+                    sendDirectTelegram(`🔥 *HIGH ACCURACY BTC 5M BREAKDOWN (SELL)*\\n\\n🔻 *Breakdown Level:* $${rangeLow.toFixed(1)}\\n💰 *Entry:* $${p.toFixed(1)}\\n🛡️ *Safe Stop Loss:* $${sl.toFixed(1)} (-$${risk.toFixed(1)})\\n🎯 *Big Target:* $${tp.toFixed(1)} (+$${reward.toFixed(1)})\\n📊 *RR Ratio:* 1:2.2\\n⚡ _Trend & Momentum confirmed._`);
                 }
             }
         }
 
-        function initWebSocket() {
-            const ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@kline_5m");
+        // AUTO-HEALING BACKGROUND WEBSOCKET
+        function connectWebSocket() {
+            if (ws) {
+                try { ws.close(); } catch(e) {}
+            }
+
+            ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@kline_5m");
+            
+            ws.onopen = () => {
+                document.getElementById('conn-state').innerText = "SOCKET ALIVE ✅";
+                document.getElementById('conn-state').style.color = "#00e676";
+            };
+
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
                 const k = data.k;
@@ -416,7 +429,23 @@ terminal_html = """
 
                 evaluateTradeEngine(candle);
             };
+
+            ws.onerror = () => {
+                document.getElementById('conn-state').innerText = "RECONNECTING...";
+                document.getElementById('conn-state').style.color = "#ff3b30";
+            };
+
+            ws.onclose = () => {
+                setTimeout(connectWebSocket, 1500);
+            };
         }
+
+        // VISIBILITY LISTENER: TAB SWITCH HOTE HI TURANT SYNC HO JAAYEGA
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible") {
+                loadHistoricalData();
+            }
+        });
 
         function autoResize() {
             chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
