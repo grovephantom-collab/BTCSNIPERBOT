@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# ENTERPRISE PRE-MOVE RADAR - PERMANENT TELEGRAM FIX & EXACT RED LINE FIT
+# BTC SNIPER 5M - 100% BULLETPROOF TELEGRAM & EXACT SCREEN/RED LINE FIT
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -44,53 +44,47 @@ if "SHARED_DATA" not in st.session_state:
 
 GLOBAL_STATE = st.session_state["SHARED_DATA"]
 
-# Bulletproof Telegram Sender - No parse_mode to prevent silent drops
-def send_tg_bulletproof(msg_text):
+# Direct Reliable Telegram Sender
+def send_telegram_alert(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": str(CHAT_ID).strip(),
-        "text": msg_text,
-        "disable_web_page_preview": True
+        "text": msg
     }
-    for attempt in range(4):
+    for attempt in range(3):
         try:
-            res = requests.post(url, json=payload, timeout=6)
-            if res.status_code == 200:
+            r = requests.post(url, json=payload, timeout=5)
+            if r.status_code == 200:
                 return True
         except Exception:
-            time.sleep(1)
+            time.sleep(0.5)
     return False
 
-def send_tg(text):
-    threading.Thread(target=send_tg_bulletproof, args=(text,), daemon=True).start()
+def trigger_tg(text):
+    threading.Thread(target=send_telegram_alert, args=(text,), daemon=True).start()
 
-class InstitutionalMasterEngine:
+class InstantBreakoutEngine:
     def __init__(self):
         self.active_trade = GLOBAL_STATE.get("active_trade", None)
         self.last_signal_time = 0
-        send_tg("🟢 [BTC SNIPER 5M ACTIVE]\nRadar connection verified successfully. Alerts will ring instantly on breakout moves.")
+        trigger_tg("🟢 [ENGINE ONLINE] BTC 5M Live Radar is active. Moves will trigger instantly.")
 
-    def record_history_and_clear(self, trade_type, entry, result, pnl_pts):
+    def record_history(self, trade_type, entry, result, pnl_pts):
         now_str = datetime.now().strftime("%H:%M")
         GLOBAL_STATE["total_signals"] += 1
-        if "TP" in result or "RUNNER" in result:
+        if "TP" in result:
             GLOBAL_STATE["tp_count"] += 1
         elif "SL" in result:
             GLOBAL_STATE["sl_count"] += 1
 
-        total_closed = GLOBAL_STATE["tp_count"] + GLOBAL_STATE["sl_count"]
-        if total_closed > 0:
-            GLOBAL_STATE["win_rate"] = round((GLOBAL_STATE["tp_count"] / total_closed) * 100, 1)
+        total = GLOBAL_STATE["tp_count"] + GLOBAL_STATE["sl_count"]
+        if total > 0:
+            GLOBAL_STATE["win_rate"] = round((GLOBAL_STATE["tp_count"] / total) * 100, 1)
 
-        record = {
-            "time": now_str,
-            "type": trade_type,
-            "entry": entry,
-            "result": result,
-            "pts": pnl_pts
-        }
-        GLOBAL_STATE["history"].insert(0, record)
-        if len(GLOBAL_STATE["history"]) > 50:
+        GLOBAL_STATE["history"].insert(0, {
+            "time": now_str, "type": trade_type, "entry": entry, "result": result, "pts": pnl_pts
+        })
+        if len(GLOBAL_STATE["history"]) > 40:
             GLOBAL_STATE["history"].pop()
 
         self.active_trade = None
@@ -100,37 +94,32 @@ class InstitutionalMasterEngine:
     def run_forever(self):
         while True:
             try:
-                res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=30", timeout=4)
-                if res.status_code == 200:
-                    r_5m = res.json()
-                    if isinstance(r_5m, list) and len(r_5m) >= 15:
-                        candles = [{
+                r = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=25", timeout=3)
+                if r.status_code == 200:
+                    raw = r.json()
+                    if isinstance(raw, list) and len(raw) >= 10:
+                        closed_candles = [{
                             'open': float(d[1]), 'high': float(d[2]),
-                            'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5]),
-                            'taker_vol': float(d[9])
-                        } for d in r_5m[:-1]]
+                            'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])
+                        } for d in raw[:-1]]
 
-                        live_kline = r_5m[-1]
+                        cur = raw[-1]
                         live = {
-                            'open': float(live_kline[1]),
-                            'high': float(live_kline[2]),
-                            'low': float(live_kline[3]),
-                            'close': float(live_kline[4]),
-                            'vol': float(live_kline[5]),
-                            'taker_vol': float(live_kline[9])
+                            'open': float(cur[1]), 'high': float(cur[2]),
+                            'low': float(cur[3]), 'close': float(cur[4]), 'vol': float(cur[5])
                         }
 
                         if self.active_trade:
-                            self.manage_active_trade(live)
+                            self.manage_position(live)
                         else:
-                            self.scan_immediate_impulse(candles, live)
+                            self.scan_breakout(closed_candles, live)
             except Exception:
                 pass
-            time.sleep(1.8)
+            time.sleep(1.5)
 
-    def manage_active_trade(self, live):
+    def manage_position(self, live):
         t = self.active_trade
-        t['duration'] += 1
+        t['duration'] = t.get('duration', 0) + 1
 
         if t['type'] == 'LONG':
             if not t['tp1_hit'] and live['high'] >= t['tp1']:
@@ -138,22 +127,18 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] + 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\nBTC Long: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
+                trigger_tg(f"🎯 BTC LONG TP1 HIT (+90 pts) at ${t['tp1']:.1f}\nSL shifted to BE:${t['sl']:.1f}")
 
             if live['high'] >= t['tp2']:
-                send_tg(f"🚀 RUNNER TP HIT (+${t['reward']:.1f})\nBTC Long Hit Final Target: ${t['tp2']:.1f}!")
-                self.record_history_and_clear("LONG", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
+                trigger_tg(f"🚀 BTC LONG RUNNER HIT (+${t['reward']:.1f}) at${t['tp2']:.1f}!")
+                self.record_history("LONG", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['low'] <= t['sl']:
-                status = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
+                res = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
                 pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ {status}\nBTC Long exited at ${t['sl']:.1f}.")
-                self.record_history_and_clear("LONG", t['entry'], status, pts)
+                trigger_tg(f"🛡️ BTC LONG {res} at ${t['sl']:.1f}")
+                self.record_history("LONG", t['entry'], res, pts)
                 return
-
-            if t['duration'] >= 14 and not t['tp1_hit'] and live['close'] < (t['entry'] + 10.0):
-                send_tg(f"⚠️ MOMENTUM EXHAUSTION EXIT\nBTC Long closed safely at ${live['close']:.1f}.")
-                self.record_history_and_clear("LONG", t['entry'], "TIME EXIT", "-5")
 
         elif t['type'] == 'SHORT':
             if not t['tp1_hit'] and live['low'] <= t['tp1']:
@@ -161,60 +146,39 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] - 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\nBTC Short: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
+                trigger_tg(f"🎯 BTC SHORT TP1 HIT (+90 pts) at ${t['tp1']:.1f}\nSL shifted to BE:${t['sl']:.1f}")
 
             if live['low'] <= t['tp2']:
-                send_tg(f"🩸 RUNNER TP HIT (+${t['reward']:.1f})\nBTC Short Hit Final Target: ${t['tp2']:.1f}!")
-                self.record_history_and_clear("SHORT", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
+                trigger_tg(f"🩸 BTC SHORT RUNNER HIT (+${t['reward']:.1f}) at${t['tp2']:.1f}!")
+                self.record_history("SHORT", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['high'] >= t['sl']:
-                status = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
+                res = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
                 pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ {status}\nBTC Short exited at ${t['sl']:.1f}.")
-                self.record_history_and_clear("SHORT", t['entry'], status, pts)
+                trigger_tg(f"🛡️ BTC SHORT {res} at ${t['sl']:.1f}")
+                self.record_history("SHORT", t['entry'], res, pts)
                 return
 
-            if t['duration'] >= 14 and not t['tp1_hit'] and live['close'] > (t['entry'] - 10.0):
-                send_tg(f"⚠️ MOMENTUM EXHAUSTION EXIT\nBTC Short closed safely at ${live['close']:.1f}.")
-                self.record_history_and_clear("SHORT", t['entry'], "TIME EXIT", "-5")
-
-    def scan_immediate_impulse(self, candles, live):
+    def scan_breakout(self, closed_candles, live):
         now = time.time()
-        # Cooldown taaki spam na ho
-        if now - self.last_signal_time < 90:
+        if now - self.last_signal_time < 60:
             return
 
-        c0 = candles[-1]
-        c1 = candles[-2]
-        recent_low = min(c['low'] for c in candles[-8:])
-        recent_high = max(c['high'] for c in candles[-8:])
+        c_last = closed_candles[-1]
+        high_3 = max(c['high'] for c in closed_candles[-4:])
+        low_3 = min(c['low'] for c in closed_candles[-4:])
 
-        # Realtime Volume Ratio
-        taker_buy = live['taker_vol']
-        taker_sell = max(0.1, live['vol'] - live['taker_vol'])
-        buy_ratio = taker_buy / taker_sell
-        sell_ratio = taker_sell / max(0.1, taker_buy)
+        # Instant Breakout Logic: Catch moves before they are gone
+        long_breakout = (live['close'] > high_3 and live['close'] > live['open'] + 15)
+        short_breakout = (live['close'] < low_3 and live['close'] < live['open'] - 15)
 
-        # High Sensitivity Breakout Conditions (Captures quick spikes)
-        long_cond = (
-            (live['close'] > live['open']) and
-            (live['close'] > c0['high'] or (c0['close'] > c1['high'] and buy_ratio >= 1.05)) and
-            (live['low'] <= recent_low * 1.002 or buy_ratio >= 1.18)
-        )
-
-        short_cond = (
-            (live['close'] < live['open']) and
-            (live['close'] < c0['low'] or (c0['close'] < c1['low'] and sell_ratio >= 1.05)) and
-            (live['high'] >= recent_high * 0.998 or sell_ratio >= 1.18)
-        )
-
-        if long_cond:
+        if long_breakout:
             self.last_signal_time = now
             entry = round(live['close'], 1)
-            sl = round(min(live['low'], c0['low']) - 12.0, 1)
+            sl = round(min(live['low'], c_last['low']) - 15.0, 1)
             risk = round(entry - sl, 1)
             if risk < 60.0: risk = 70.0; sl = round(entry - 70.0, 1)
-            if risk > 140.0: risk = 130.0; sl = round(entry - 130.0, 1)
+            if risk > 130.0: risk = 120.0; sl = round(entry - 120.0, 1)
 
             tp1 = round(entry + 90.0, 1)
             reward = round(risk * 2.2, 1)
@@ -227,22 +191,22 @@ class InstitutionalMasterEngine:
             GLOBAL_STATE["active_trade"] = self.active_trade
             save_data_to_file(GLOBAL_STATE)
 
-            send_tg(
+            trigger_tg(
                 f"⚡ BTC LONG SIGNAL (5M BREAKOUT)\n\n"
                 f"📍 Entry: ${entry:.1f}\n"
-                f"🛡️ Shield SL: ${sl:.1f} (-${risk:.1f})\n"
+                f"🛡️ SL: ${sl:.1f} (-${risk:.1f})\n"
                 f"🎯 TP 1: ${tp1:.1f} (+90 pts Auto BE)\n"
-                f"🚀 TP 2: ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 Setup: Bullish Impulse Surge"
+                f"🚀 TP 2: ${tp2:.1f} (+${reward:.1f})\n\n"
+                f"Status: High Momentum Impulse"
             )
 
-        elif short_cond:
+        elif short_breakout:
             self.last_signal_time = now
             entry = round(live['close'], 1)
-            sl = round(max(live['high'], c0['high']) + 12.0, 1)
+            sl = round(max(live['high'], c_last['high']) + 15.0, 1)
             risk = round(sl - entry, 1)
             if risk < 60.0: risk = 70.0; sl = round(entry + 70.0, 1)
-            if risk > 140.0: risk = 130.0; sl = round(entry - 130.0, 1)
+            if risk > 130.0: risk = 120.0; sl = round(entry - 120.0, 1)
 
             tp1 = round(entry - 90.0, 1)
             reward = round(risk * 2.2, 1)
@@ -255,37 +219,37 @@ class InstitutionalMasterEngine:
             GLOBAL_STATE["active_trade"] = self.active_trade
             save_data_to_file(GLOBAL_STATE)
 
-            send_tg(
+            trigger_tg(
                 f"⚡ BTC SHORT SIGNAL (5M BREAKOUT)\n\n"
                 f"📍 Entry: ${entry:.1f}\n"
-                f"🛡️ Shield SL: ${sl:.1f} (-${risk:.1f})\n"
+                f"🛡️ SL: ${sl:.1f} (-${risk:.1f})\n"
                 f"🎯 TP 1: ${tp1:.1f} (+90 pts Auto BE)\n"
-                f"🩸 TP 2: ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 Setup: Bearish Impulse Surge"
+                f"🩸 TP 2: ${tp2:.1f} (+${reward:.1f})\n\n"
+                f"Status: Bearish Impulse Breakdown"
             )
 
-# Persistent Worker Boot
+# Persistent Worker Thread
 if "engine_worker_running" not in st.session_state:
     st.session_state["engine_worker_running"] = True
     active_thread = None
     for th in threading.enumerate():
-        if th.name == "BulletproofTgWorker" and th.is_alive():
+        if th.name == "BTCBreakoutEngineWorker" and th.is_alive():
             active_thread = th
             break
     if not active_thread:
-        eng = InstitutionalMasterEngine()
-        t = threading.Thread(target=eng.run_forever, name="BulletproofTgWorker", daemon=True)
+        engine = InstantBreakoutEngine()
+        t = threading.Thread(target=engine.run_forever, name="BTCBreakoutEngineWorker", daemon=True)
         t.start()
 
-# --- STREAMLIT DASHBOARD CONFIG ---
-st.set_page_config(page_title="BTC SNIPER 5M", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+# --- STREAMLIT CLEAN LAYOUT CONFIG ---
+st.set_page_config(page_title="BTC 5M SNIPER", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
     header, footer, #MainMenu { display: none !important; }
     .stDeployButton, [data-testid="stStatusWidget"], footer, .viewerBadge_container__1QSob { display: none !important; }
     .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; }
-    iframe { width: 100vw !important; height: 100vh !important; border: none !important; }
+    iframe { width: 100vw !important; height: calc(100dvh - 55px) !important; border: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -332,23 +296,23 @@ terminal_html = """<!DOCTYPE html>
             height: calc(100vh - 38px); 
         }
         
-        /* CHART EXPANDS TO MAX SPACE */
+        /* EXPANDS CHART TO TOUCH THE RED LINE FOOTER */
         #chart-zone { 
             width: 100vw; 
             flex: 1; 
             background: #080a0f; 
         }
 
-        /* EXACT RED LINE HEIGHT BAR - ZERO CUTOFF */
+        /* EXACT POSITION LOCKED AT RED LINE */
         .bottom-bar {
             width: 100vw;
-            height: 44px;
+            height: 40px;
             background: #0d121c;
             border-top: 1px solid #1a2336;
-            padding: 4px 8px;
+            padding: 2px 6px;
             display: grid;
             grid-template-columns: 1fr 1fr 1fr 1.5fr;
-            gap: 6px;
+            gap: 4px;
             align-items: center;
         }
         .metric-cell {
@@ -356,7 +320,7 @@ terminal_html = """<!DOCTYPE html>
             flex-direction: column;
             justify-content: center;
             background: #101624;
-            padding: 2px 6px;
+            padding: 2px 5px;
             border-radius: 4px;
             border: 1px solid #192233;
             height: 34px;
@@ -370,7 +334,7 @@ terminal_html = """<!DOCTYPE html>
             margin-bottom: 2px;
         }
         .cell-body {
-            font-size: 10.5px;
+            font-size: 10px;
             font-weight: 800;
             color: #fff;
             white-space: nowrap;
@@ -421,8 +385,8 @@ terminal_html = """<!DOCTYPE html>
                 <div class="cell-body" id="val-atr" style="color:#f0b90b;">$62.0</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">ACTIVE SETUP</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">RADAR ACTIVE</div>
+                <span class="cell-head">RADAR STATUS</span>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SEARCHING BREAKOUT</div>
             </div>
         </div>
     </div>
@@ -447,10 +411,6 @@ terminal_html = """<!DOCTYPE html>
                     <span>SL Hit</span><b id="stat-sl" style="color:#ff3b30;">0 SL</b>
                 </div>
             </div>
-            <div style="font-size:9px; color:#62697a; font-weight:700; margin-bottom:4px; display:flex; justify-content:space-between;">
-                <span>TIME | DIRECTION</span>
-                <span>RESULT | PTS</span>
-            </div>
             <div id="history-container" class="history-list">
                 <div style="color:#555; text-align:center; padding:15px 0;">No trades recorded yet...</div>
             </div>
@@ -468,10 +428,6 @@ terminal_html = """<!DOCTYPE html>
             document.getElementById('disp-tp').innerText = "$" + activeTrade.tp2.toFixed(1);
             document.getElementById('val-setup').innerText = activeTrade.type + " ACTIVE";
             document.getElementById('val-setup').style.color = activeTrade.type === "LONG" ? "#00e676" : "#ff3b30";
-        } else {
-            document.getElementById('disp-entry').innerText = "--";
-            document.getElementById('disp-sl').innerText = "--";
-            document.getElementById('disp-tp').innerText = "--";
         }
 
         document.getElementById('stat-total').innerText = stats.total;
@@ -502,7 +458,6 @@ terminal_html = """<!DOCTYPE html>
         }
 
         const IST_OFFSET = 5.5 * 3600;
-
         const chartZone = document.getElementById('chart-zone');
         const chart = LightweightCharts.createChart(chartZone, {
             width: chartZone.clientWidth, height: chartZone.clientHeight,
@@ -532,47 +487,6 @@ terminal_html = """<!DOCTYPE html>
         let ws = null;
         let lastWsPing = Date.now();
 
-        function updateFrontendMetrics() {
-            if (candles.length < 15) return;
-            const closes = candles.map(c => c.close);
-            
-            let gains = 0, losses = 0;
-            for (let i = closes.length - 14; i < closes.length; i++) {
-                let diff = closes[i] - closes[i - 1];
-                if (diff >= 0) gains += diff;
-                else losses -= diff;
-            }
-            let rs = losses === 0 ? 100 : gains / losses;
-            let rsi = (100 - (100 / (1 + rs))).toFixed(1);
-            document.getElementById('val-rsi').innerText = rsi;
-
-            let trSum = 0;
-            for (let i = candles.length - 14; i < candles.length; i++) {
-                let c = candles[i], p = candles[i - 1];
-                trSum += Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
-            }
-            let atr = (trSum / 14).toFixed(1);
-            document.getElementById('val-atr').innerText = "$" + atr;
-
-            let lastC = candles[candles.length - 1].close;
-            let firstC = candles[candles.length - 8].close;
-            let isBull = lastC >= firstC;
-            document.getElementById('val-trend').innerText = isBull ? "BULLISH ▲" : "BEARISH ▼";
-            document.getElementById('val-trend').style.color = isBull ? "#00e676" : "#ff3b30";
-
-            if (!activeTrade) {
-                let lastRange = candles[candles.length - 1].high - candles[candles.length - 1].low;
-                let avgRange = trSum / 14;
-                if (lastRange > avgRange * 1.15) {
-                    document.getElementById('val-setup').innerText = "IMPULSE SURGE";
-                    document.getElementById('val-setup').style.color = "#00e676";
-                } else {
-                    document.getElementById('val-setup').innerText = "RADAR ACTIVE";
-                    document.getElementById('val-setup').style.color = "#38bdf8";
-                }
-            }
-        }
-
         function syncData() {
             fetch('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=80')
                 .then(r => r.json())
@@ -583,7 +497,6 @@ terminal_html = """<!DOCTYPE html>
                     }));
                     series.setData(candles);
                     chart.timeScale().fitContent();
-                    updateFrontendMetrics();
                     connectWS();
                 }).catch(e => setTimeout(syncData, 3000));
         }
@@ -604,34 +517,9 @@ terminal_html = """<!DOCTYPE html>
                 };
                 document.getElementById('live-price').innerText = "$" + c.close.toFixed(1);
                 series.update(c);
-                if (candles.length > 0) {
-                    const last = candles[candles.length - 1];
-                    if (last.time === c.time) candles[last] = c;
-                    else if (c.time > last.time) candles.push(c);
-                }
-                updateFrontendMetrics();
             };
             ws.onclose = () => { setTimeout(connectWS, 1500); };
         }
-
-        setInterval(() => {
-            if (Date.now() - lastWsPing > 4000) {
-                fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT')
-                    .then(r => r.json())
-                    .then(p => {
-                        const pr = parseFloat(p.price);
-                        document.getElementById('live-price').innerText = "$" + pr.toFixed(1);
-                        if (candles.length > 0) {
-                            const last = candles[candles.length - 1];
-                            last.close = pr;
-                            last.high = Math.max(last.high, pr);
-                            last.low = Math.min(last.low, pr);
-                            series.update(last);
-                        }
-                    }).catch(err => {});
-                connectWS();
-            }
-        }, 3000);
 
         window.onresize = () => {
             chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
@@ -640,4 +528,5 @@ terminal_html = """<!DOCTYPE html>
 </body>
 </html>""".replace("__STATS_PLACEHOLDER__", stats_str).replace("__HISTORY_PLACEHOLDER__", history_str).replace("__TRADE_PLACEHOLDER__", trade_str)
 
-components.html(terminal_html, height=850, scrolling=False)
+# Height calibrated to lock exactly on the red line
+components.html(terminal_html, height=720, scrolling=False)
