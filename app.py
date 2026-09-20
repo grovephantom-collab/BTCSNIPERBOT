@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# ENTERPRISE PRE-MOVE RADAR (FIXED TELEGRAM ENGINE + RED LINE COLUMN HEIGHT)
+# ENTERPRISE PRE-MOVE RADAR (REDUCED COMPACT ROW GAPS)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -44,7 +44,6 @@ if "SHARED_DATA" not in st.session_state:
 
 GLOBAL_STATE = st.session_state["SHARED_DATA"]
 
-# Permanently Solid Telegram Dispatcher (Zero HTML parse failure)
 def send_tg(text):
     def _dispatch():
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -66,8 +65,6 @@ class InstitutionalMasterEngine:
     def __init__(self):
         self.active_trade = GLOBAL_STATE.get("active_trade", None)
         self.last_signal_time = 0
-        # Immediate Startup Handshake to verify Telegram
-        send_tg("🟢 SNIPER 5M TELEGRAM VERIFIED!\n\nAlert engine connected successfully.\nLive signals will ring here directly.")
 
     def record_history_and_clear(self, trade_type, entry, result, pnl_pts):
         now_str = datetime.now().strftime("%H:%M")
@@ -137,21 +134,21 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] + 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\n\nBTC Long: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
+                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\n\nBTC Long: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}).")
 
             if live['high'] >= t['tp2']:
-                send_tg(f"🚀 RUNNER HIT (+${t['reward']:.1f})\n\nBTC Long hit final target ${t['tp2']:.1f}! Screen cleared.")
+                send_tg(f"🚀 RUNNER HIT (+${t['reward']:.1f})\n\nBTC Long target reached at ${t['tp2']:.1f}!")
                 self.record_history_and_clear("LONG", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['low'] <= t['sl']:
                 status = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
                 pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ {status}\n\nBTC Long exited at ${t['sl']:.1f}. Screen cleared.")
+                send_tg(f"🛡️ {status}\n\nBTC Long closed at ${t['sl']:.1f}.")
                 self.record_history_and_clear("LONG", t['entry'], status, pts)
                 return
 
             if t['duration'] >= 9 and not t['tp1_hit'] and live['close'] < (t['entry'] + 15.0):
-                send_tg(f"⚠️ TIME EXHAUSTION EXIT\n\nClosed at ${live['close']:.1f}. Screen cleared.")
+                send_tg(f"⚠️ TIME EXHAUSTION\n\nBTC Long closed at ${live['close']:.1f}.")
                 self.record_history_and_clear("LONG", t['entry'], "TIME EXIT", "-5")
 
         elif t['type'] == 'SHORT':
@@ -160,21 +157,21 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] - 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\n\nBTC Short: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
+                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\n\nBTC Short: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}).")
 
             if live['low'] <= t['tp2']:
-                send_tg(f"🩸 RUNNER HIT (+${t['reward']:.1f})\n\nBTC Short hit final target ${t['tp2']:.1f}! Screen cleared.")
+                send_tg(f"🩸 RUNNER HIT (+${t['reward']:.1f})\n\nBTC Short target reached at ${t['tp2']:.1f}!")
                 self.record_history_and_clear("SHORT", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['high'] >= t['sl']:
                 status = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
                 pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ {status}\n\nBTC Short exited at ${t['sl']:.1f}. Screen cleared.")
+                send_tg(f"🛡️ {status}\n\nBTC Short exited at ${t['sl']:.1f}.")
                 self.record_history_and_clear("SHORT", t['entry'], status, pts)
                 return
 
             if t['duration'] >= 9 and not t['tp1_hit'] and live['close'] > (t['entry'] - 15.0):
-                send_tg(f"⚠️ TIME EXHAUSTION EXIT\n\nClosed at ${live['close']:.1f}. Screen cleared.")
+                send_tg(f"⚠️ TIME EXHAUSTION\n\nBTC Short closed at ${live['close']:.1f}.")
                 self.record_history_and_clear("SHORT", t['entry'], "TIME EXIT", "-5")
 
     def scan_immediate_impulse(self, candles, live):
@@ -318,36 +315,36 @@ terminal_html = """<!DOCTYPE html>
         }
 
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
-        #chart-zone { width: 100vw; height: 58%; background: #080a0f; }
+        #chart-zone { width: 100vw; flex: 1; background: #080a0f; }
 
-        /* EXACT RED-LINE HEIGHT ADJUSTMENT */
+        /* TIGHT COMPACT LOWER DECK WITH MINIMAL GAPS */
         .lower-deck {
-            width: 100vw; height: 42%; background: #080b11;
-            border-top: 1px solid #141b27; padding: 6px 8px;
-            display: flex; flex-direction: column; gap: 6px;
+            width: 100vw; background: #080b11;
+            border-top: 1px solid #141b27; padding: 4px 8px 6px 8px;
+            display: flex; flex-direction: column; gap: 4px;
         }
         
         .score-card {
-            background: #0d121c; border: 1px solid #151d2d; border-radius: 6px;
-            padding: 6px 10px; display: flex; justify-content: space-between; align-items: center;
+            background: #0d121c; border: 1px solid #151d2d; border-radius: 5px;
+            padding: 4px 8px; display: flex; justify-content: space-between; align-items: center;
         }
         .score-left { display: flex; flex-direction: column; }
-        .score-label { font-size: 8px; color: #62697a; font-weight: 800; text-transform: uppercase; }
-        .score-val { font-size: 16px; font-weight: 800; color: #fff; }
+        .score-label { font-size: 7.5px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; }
+        .score-val { font-size: 14px; font-weight: 800; color: #fff; line-height: 1.2; margin-top: 1px; }
         .score-right { display: flex; flex-direction: column; align-items: flex-end; }
-        .score-tag { background: #131a26; color: #38bdf8; font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 700; }
-        .score-sub { font-size: 8px; color: #4e5668; margin-top: 1px; }
+        .score-tag { background: #131a26; color: #38bdf8; font-size: 8px; padding: 1px 5px; border-radius: 3px; font-weight: 700; line-height: 1.2; }
+        .score-sub { font-size: 7.5px; color: #4e5668; margin-top: 1px; line-height: 1; }
 
-        /* PERFECT HEIGHT TO FILL UP TO RED LINE */
+        /* REDUCED GAPS IN DUAL DECK */
         .dual-deck {
-            display: grid; grid-template-columns: 1fr 1fr; gap: 8px; flex: 1;
+            display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
         }
         .mini-card {
-            background: #0d121c; border: 1px solid #151d2d; border-radius: 6px;
-            padding: 8px 10px; display: flex; flex-direction: column; justify-content: space-around;
+            background: #0d121c; border: 1px solid #151d2d; border-radius: 5px;
+            padding: 4px 7px; display: flex; flex-direction: column;
         }
-        .mini-card-title { font-size: 8px; color: #62697a; font-weight: 800; text-transform: uppercase; margin-bottom: 2px; }
-        .row-item { display: flex; justify-content: space-between; font-size: 10px; padding: 4px 0; border-bottom: 1px solid #121824; }
+        .mini-card-title { font-size: 7.5px; color: #62697a; font-weight: 800; text-transform: uppercase; margin-bottom: 2px; }
+        .row-item { display: flex; justify-content: space-between; font-size: 9.5px; padding: 2px 0; border-bottom: 1px solid #121824; }
         .row-item:last-child { border-bottom: none; }
 
         .modal-bg {
@@ -391,10 +388,11 @@ terminal_html = """<!DOCTYPE html>
                 </div>
             </div>
 
+            <!-- DUAL CARDS: TIGHT COMPACT GAPS -->
             <div class="dual-deck">
                 <div class="mini-card">
                     <div class="mini-card-title">METRICS</div>
-                    <div class="row-item"><span>Trend</span><b id="val-trend" style="color:#ff3b30;">BEAR</b></div>
+                    <div class="row-item"><span>Trend</span><b id="val-trend" style="color:#00e676;">BULL</b></div>
                     <div class="row-item"><span>RSI</span><b id="val-rsi" style="color:#fff;">50.0</b></div>
                     <div class="row-item"><span>ATR</span><b id="val-atr" style="color:#f0b90b;">$60.0</b></div>
                 </div>
