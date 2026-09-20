@@ -4,7 +4,7 @@ import threading
 import time
 import requests
 
-# --- FULL PRO INSTITUTIONAL QUANT ENGINE ---
+# --- 24/7 PRO INSTITUTIONAL QUANT ENGINE ---
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
 CHAT_ID = "7886716805"
 
@@ -36,11 +36,9 @@ class InstitutionalEngine:
     def start(self):
         while True:
             try:
-                # 1. Fetch 5M execution candles & 1H regime candles
                 r_5m = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=45", timeout=5).json()
                 r_1h = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=50", timeout=5).json()
                 
-                # Fetch Open Interest
                 r_oi = requests.get("https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT", timeout=4).json()
                 curr_oi = float(r_oi.get('openInterest', 0))
 
@@ -70,11 +68,9 @@ class InstitutionalEngine:
                         oi_change_pct = ((curr_oi - self.prev_oi) / self.prev_oi) * 100
                     self.prev_oi = curr_oi
 
-                    # 2. ACTIVE POSITION MANAGEMENT (TRAILING SL + STALL INVALIDATION)
                     if self.active_trade:
-                        self.manage_position(live, c_time)
+                        self.manage_position(live)
 
-                    # 3. EVALUATE ENTRY ON 5M CLOSED CANDLE
                     if not self.active_trade and c_time > self.last_candle_time:
                         self.last_candle_time = c_time
                         self.evaluate_market(candles, htf_trend_bull, oi_change_pct)
@@ -82,54 +78,46 @@ class InstitutionalEngine:
                 pass
             time.sleep(3)
 
-    def manage_position(self, live, current_time):
+    def manage_position(self, live):
         t = self.active_trade
         t['duration_candles'] += 1
 
         if t['type'] == 'LONG':
-            # Target Hit
             if live['high'] >= t['tp']:
-                send_tg(f"🎯 *TARGET HIT (+$ {t['reward']:.1f})*\n\nBTC Long target reached at ${t['tp']:.1f}! Full profit secured.")
+                send_tg(f"🎯 *TARGET HIT (+$ {t['reward']:.1f})*\\n\\nBTC Long target reached at ${t['tp']:.1f}!")
                 self.active_trade = None
                 return
-            # Stop Loss Hit
             elif live['low'] <= t['sl']:
                 status = "BREAKEVEN EXIT" if t['is_breakeven'] else "STOP LOSS HIT"
-                send_tg(f"🛡️ *{status}*\n\nBTC Long closed at ${t['sl']:.1f}.")
+                send_tg(f"🛡️ *{status}*\\n\\nBTC Long closed at ${t['sl']:.1f}.")
                 self.active_trade = None
                 return
-            # Breakeven Trail (+110 points profit triggers risk-free lock)
             if not t['is_breakeven'] and (live['high'] >= t['entry'] + 110.0):
                 t['sl'] = t['entry'] + 10.0
                 t['is_breakeven'] = True
-                send_tg(f"🔒 *RISK-FREE SL LOCK*\n\nBTC reached +$110 profit! SL automatically moved to Breakeven (${t['sl']:.1f}).")
+                send_tg(f"🔒 *RISK-FREE SL LOCK*\\n\\nBTC reached +$110! SL shifted to Entry (${t['sl']:.1f}).")
 
-            # Momentum Stall Invalidation (6 candles without progress)
             if t['duration_candles'] >= 6 and live['close'] < (t['entry'] + 30.0):
-                send_tg(f"⚠️ *TIME STALL INVALIDATION*\n\nBTC Long momentum slowed down over 30 mins. Exiting trade at ${live['close']:.1f} to protect capital.")
+                send_tg(f"⚠️ *TIME STALL EXIT*\\n\\nBTC Long momentum slowed down over 30 mins. Exited at ${live['close']:.1f}.")
                 self.active_trade = None
 
         elif t['type'] == 'SHORT':
-            # Target Hit
             if live['low'] <= t['tp']:
-                send_tg(f"🎯 *TARGET HIT (+$ {t['reward']:.1f})*\n\nBTC Short target reached at ${t['tp']:.1f}! Full profit secured.")
+                send_tg(f"🎯 *TARGET HIT (+$ {t['reward']:.1f})*\\n\\nBTC Short target reached at ${t['tp']:.1f}!")
                 self.active_trade = None
                 return
-            # Stop Loss Hit
             elif live['high'] >= t['sl']:
                 status = "BREAKEVEN EXIT" if t['is_breakeven'] else "STOP LOSS HIT"
-                send_tg(f"🛡️ *{status}*\n\nBTC Short closed at ${t['sl']:.1f}.")
+                send_tg(f"🛡️ *{status}*\\n\\nBTC Short closed at ${t['sl']:.1f}.")
                 self.active_trade = None
                 return
-            # Breakeven Trail
             if not t['is_breakeven'] and (live['low'] <= t['entry'] - 110.0):
                 t['sl'] = t['entry'] - 10.0
                 t['is_breakeven'] = True
-                send_tg(f"🔒 *RISK-FREE SL LOCK*\n\nBTC dropped -$110 profit! SL automatically moved to Breakeven (${t['sl']:.1f}).")
+                send_tg(f"🔒 *RISK-FREE SL LOCK*\\n\\nBTC dropped -$110! SL shifted to Entry (${t['sl']:.1f}).")
 
-            # Momentum Stall Invalidation
             if t['duration_candles'] >= 6 and live['close'] > (t['entry'] - 30.0):
-                send_tg(f"⚠️ *TIME STALL INVALIDATION*\n\nBTC Short momentum slowed down over 30 mins. Exiting trade at ${live['close']:.1f} to protect capital.")
+                send_tg(f"⚠️ *TIME STALL EXIT*\\n\\nBTC Short momentum slowed down over 30 mins. Exited at ${live['close']:.1f}.")
                 self.active_trade = None
 
     def evaluate_market(self, candles, htf_bull, oi_change):
@@ -147,9 +135,7 @@ class InstitutionalEngine:
         avg_vol = total_vol / max(1, len(coil))
         atr = calc_atr(candles, 14)
 
-        # Dynamic Volatility Squeeze: Range relative to current ATR regime
         is_coiled = coil_spread <= (atr * 1.85)
-
         live_price = c_now['close']
         body = abs(live_price - c_now['open'])
         delta = c_now['taker_vol'] - (c_now['vol'] - c_now['taker_vol'])
@@ -157,9 +143,7 @@ class InstitutionalEngine:
         has_volume = (c_now['vol'] >= avg_vol * 0.9) and (delta > 0 if live_price > c_now['open'] else delta < 0)
         strong_break = body >= min(32.0, atr * 0.45)
 
-        # Long: Coiled + Breakout + HTF Bull + Buyer Delta
         valid_long = is_coiled and (live_price > coil_high + 6.0) and htf_bull and strong_break and has_volume
-        # Short: Coiled + Breakdown + HTF Bear + Seller Delta
         valid_short = is_coiled and (live_price < coil_low - 6.0) and (not htf_bull) and strong_break and has_volume
 
         if valid_long:
@@ -179,12 +163,12 @@ class InstitutionalEngine:
                 'is_breakeven': False, 'duration_candles': 0
             }
             send_tg(
-                f"🚀 *BTC 5M LONG (HTF CONFIRMED)*\n\n"
-                f"📍 *Entry:* ${entry:.1f}\n"
-                f"🛡️ *Wick-Proof SL:* ${sl:.1f} (-${actual_risk:.1f})\n"
-                f"🎯 *Exhaustion TP:* ${tp:.1f} (+${actual_reward:.1f})\n"
-                f"📊 *RR Ratio:* 1:2.35 | *OI Shift:* {oi_change:+.2f}%\n"
-                f"⚡ _1H Bull Regime + Taker Volume Delta Active_"
+                f"🚀 *BTC 5M LONG ENTRY*\\n\\n"
+                f"📍 *Entry:* ${entry:.1f}\\n"
+                f"🛡️ *Wick-Proof SL:* ${sl:.1f} (-${actual_risk:.1f})\\n"
+                f"🎯 *Exhaustion TP:* ${tp:.1f} (+${actual_reward:.1f})\\n"
+                f"📊 *RR Ratio:* 1:2.35 | *OI Shift:* {oi_change:+.2f}%\\n"
+                f"⚡ _1H Bull Regime + Buyer Delta Active_"
             )
 
         elif valid_short:
@@ -204,15 +188,14 @@ class InstitutionalEngine:
                 'is_breakeven': False, 'duration_candles': 0
             }
             send_tg(
-                f"🩸 *BTC 5M SHORT (HTF CONFIRMED)*\n\n"
-                f"📍 *Entry:* ${entry:.1f}\n"
-                f"🛡️ *Wick-Proof SL:* ${sl:.1f} (-${actual_risk:.1f})\n"
-                f"🎯 *Exhaustion TP:* ${tp:.1f} (+${actual_reward:.1f})\n"
-                f"📊 *RR Ratio:* 1:2.35 | *OI Shift:* {oi_change:+.2f}%\n"
-                f"⚡ _1H Bear Regime + Taker Volume Delta Active_"
+                f"🩸 *BTC 5M SHORT ENTRY*\\n\\n"
+                f"📍 *Entry:* ${entry:.1f}\\n"
+                f"🛡️ *Wick-Proof SL:* ${sl:.1f} (-${actual_risk:.1f})\\n"
+                f"🎯 *Exhaustion TP:* ${tp:.1f} (+${actual_reward:.1f})\\n"
+                f"📊 *RR Ratio:* 1:2.35 | *OI Shift:* {oi_change:+.2f}%\\n"
+                f"⚡ _1H Bear Regime + Seller Delta Active_"
             )
 
-# START INDEPENDENT THREAD
 found = False
 for th in threading.enumerate():
     if th.name == "InstitutionalQuantDaemon":
@@ -235,8 +218,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-terminal_html = """
-<!DOCTYPE html>
+terminal_html = """<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -433,4 +415,6 @@ terminal_html = """
         });
     </script>
 </body>
-</html>
+</html>"""
+
+components.html(terminal_html, height=850, scrolling=False)
