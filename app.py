@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# BTC SNIPER 5M - 100% LIVE TICKING CHART + COMPACT ELEVATED BOTTOM LAYOUT
+# BTC SNIPER 5M - DUAL-SERVER US-BYPASS & DYNAMIC MOMENTUM ENGINE
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -62,6 +62,33 @@ def send_telegram_alert(msg):
 def trigger_tg(text):
     threading.Thread(target=send_telegram_alert, args=(text,), daemon=True).start()
 
+# --- MULTI-SOURCE KLINE FETCHER (STREAMLIT CLOUD SAFE) ---
+def fetch_live_market_data():
+    endpoints = [
+        "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=25",
+        "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=25",
+        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=25"
+    ]
+    for ep in endpoints:
+        try:
+            r = requests.get(ep, timeout=2.5)
+            if r.status_code == 200:
+                raw = r.json()
+                if isinstance(raw, list) and len(raw) >= 10:
+                    closed = [{
+                        'open': float(d[1]), 'high': float(d[2]),
+                        'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])
+                    } for d in raw[:-1]]
+                    cur = raw[-1]
+                    live = {
+                        'open': float(cur[1]), 'high': float(cur[2]),
+                        'low': float(cur[3]), 'close': float(cur[4]), 'vol': float(cur[5])
+                    }
+                    return closed, live
+        except Exception:
+            continue
+    return None, None
+
 class InstantBreakoutEngine:
     def __init__(self):
         self.active_trade = GLOBAL_STATE.get("active_trade", None)
@@ -91,28 +118,12 @@ class InstantBreakoutEngine:
 
     def run_forever(self):
         while True:
-            try:
-                r = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=25", timeout=3)
-                if r.status_code == 200:
-                    raw = r.json()
-                    if isinstance(raw, list) and len(raw) >= 10:
-                        closed_candles = [{
-                            'open': float(d[1]), 'high': float(d[2]),
-                            'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])
-                        } for d in raw[:-1]]
-
-                        cur = raw[-1]
-                        live = {
-                            'open': float(cur[1]), 'high': float(cur[2]),
-                            'low': float(cur[3]), 'close': float(cur[4]), 'vol': float(cur[5])
-                        }
-
-                        if self.active_trade:
-                            self.manage_position(live)
-                        else:
-                            self.scan_breakout(closed_candles, live)
-            except Exception:
-                pass
+            closed_candles, live = fetch_live_market_data()
+            if closed_candles and live:
+                if self.active_trade:
+                    self.manage_position(live)
+                else:
+                    self.scan_breakout(closed_candles, live)
             time.sleep(1.5)
 
     def manage_position(self, live):
@@ -159,26 +170,32 @@ class InstantBreakoutEngine:
 
     def scan_breakout(self, closed_candles, live):
         now = time.time()
-        if now - self.last_signal_time < 60:
+        if now - self.last_signal_time < 90:
             return
 
-        c_last = closed_candles[-1]
-        high_3 = max(c['high'] for c in closed_candles[-4:])
-        low_3 = min(c['low'] for c in closed_candles[-4:])
+        c_prev = closed_candles[-1]
+        c_prev2 = closed_candles[-2]
+        
+        # Benchmark Highs/Lows based on Body and Recent Range
+        bench_high = max(c_prev['close'], c_prev['open'], c_prev2['close'], c_prev2['open'])
+        bench_low = min(c_prev['close'], c_prev['open'], c_prev2['close'], c_prev2['open'])
 
-        long_breakout = (live['close'] > high_3 and live['close'] > live['open'] + 10)
-        short_breakout = (live['close'] < low_3 and live['close'] < live['open'] - 10)
+        cur_move = live['close'] - live['open']
+
+        # Responsive Breakout: Price exceeds benchmark + 5M impulse
+        long_breakout = (live['close'] > bench_high and cur_move >= 18.0)
+        short_breakout = (live['close'] < bench_low and cur_move <= -18.0)
 
         if long_breakout:
             self.last_signal_time = now
             entry = round(live['close'], 1)
-            sl = round(min(live['low'], c_last['low']) - 15.0, 1)
+            sl = round(live['low'] - 15.0, 1)
             risk = round(entry - sl, 1)
             if risk < 60.0: risk = 70.0; sl = round(entry - 70.0, 1)
             if risk > 130.0: risk = 120.0; sl = round(entry - 120.0, 1)
 
             tp1 = round(entry + 90.0, 1)
-            reward = round(risk * 2.2, 1)
+            reward = round(risk * 2.0, 1)
             tp2 = round(entry + reward, 1)
 
             self.active_trade = {
@@ -189,24 +206,24 @@ class InstantBreakoutEngine:
             save_data_to_file(GLOBAL_STATE)
 
             trigger_tg(
-                f"⚡ BTC LONG SIGNAL (5M BREAKOUT)\n\n"
+                f"⚡ BTC LONG SIGNAL (5M IMPULSE)\n\n"
                 f"📍 Entry: ${entry:.1f}\n"
-                f"🛡️ SL: ${sl:.1f} (-${risk:.1f})\n"
-                f"🎯 TP 1: ${tp1:.1f} (+90 pts Auto BE)\n"
+                f"🛡️ Safe SL: ${sl:.1f} (-${risk:.1f})\n"
+                f"🎯 TP 1: ${tp1:.1f} (+90 pts -> Auto BE)\n"
                 f"🚀 TP 2: ${tp2:.1f} (+${reward:.1f})\n\n"
-                f"Status: High Momentum Impulse"
+                f"Status: Strong Bullish Breakout Confirmed"
             )
 
         elif short_breakout:
             self.last_signal_time = now
             entry = round(live['close'], 1)
-            sl = round(max(live['high'], c_last['high']) + 15.0, 1)
+            sl = round(live['high'] + 15.0, 1)
             risk = round(sl - entry, 1)
             if risk < 60.0: risk = 70.0; sl = round(entry + 70.0, 1)
             if risk > 130.0: risk = 120.0; sl = round(entry - 120.0, 1)
 
             tp1 = round(entry - 90.0, 1)
-            reward = round(risk * 2.2, 1)
+            reward = round(risk * 2.0, 1)
             tp2 = round(entry - reward, 1)
 
             self.active_trade = {
@@ -217,12 +234,12 @@ class InstantBreakoutEngine:
             save_data_to_file(GLOBAL_STATE)
 
             trigger_tg(
-                f"⚡ BTC SHORT SIGNAL (5M BREAKOUT)\n\n"
+                f"⚡ BTC SHORT SIGNAL (5M IMPULSE)\n\n"
                 f"📍 Entry: ${entry:.1f}\n"
-                f"🛡️ SL: ${sl:.1f} (-${risk:.1f})\n"
-                f"🎯 TP 1: ${tp1:.1f} (+90 pts Auto BE)\n"
+                f"🛡️ Safe SL: ${sl:.1f} (-${risk:.1f})\n"
+                f"🎯 TP 1: ${tp1:.1f} (+90 pts -> Auto BE)\n"
                 f"🩸 TP 2: ${tp2:.1f} (+${reward:.1f})\n\n"
-                f"Status: Bearish Impulse Breakdown"
+                f"Status: Strong Bearish Breakdown Confirmed"
             )
 
 if "engine_worker_running" not in st.session_state:
@@ -275,7 +292,7 @@ terminal_html = """<!DOCTYPE html>
             font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; 
         }
         .brand { font-weight: 800; color: #fff; font-size: 10px; display: flex; align-items: center; gap: 4px; }
-        .badge-scan { background: #161f30; color: #38bdf8; font-size: 8px; padding: 1px 4px; border-radius: 3px; font-weight: 700; }
+        .badge-scan { background: #00e676; color: #000; font-size: 8px; padding: 1px 4px; border-radius: 3px; font-weight: 800; }
         .stat-card { display: flex; flex-direction: column; min-width: 45px; }
         .stat-label { font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 700; }
         .stat-val { font-size: 9px; font-weight: 700; color: #fff; }
@@ -292,17 +309,15 @@ terminal_html = """<!DOCTYPE html>
             height: calc(100vh - 38px); 
         }
         
-        /* CHART THODA CHHOTA KIYA GAYA HAI TA-KI NICHE KA BAR UPAR RED LINE PAR AAYE */
         #chart-zone { 
             width: 100vw; 
-            height: 60vh; 
+            height: 59vh; 
             background: #080a0f; 
         }
 
-        /* EXACT POSITION LOCKED AT RED LINE LEVEL */
         .bottom-bar {
             width: 100vw;
-            height: calc(40vh - 38px);
+            height: calc(41vh - 38px);
             max-height: 52px;
             background: #0d121c;
             border-top: 1px solid #1a2336;
@@ -355,7 +370,7 @@ terminal_html = """<!DOCTYPE html>
 </head>
 <body>
     <div class="top-nav">
-        <div class="brand">⚡ SNIPER 5M <span class="badge-scan">SCANNING</span></div>
+        <div class="brand">⚡ SNIPER 5M <span class="badge-scan">ONLINE</span></div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
         <div class="stat-card"><div class="stat-label">BIG TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
@@ -383,7 +398,7 @@ terminal_html = """<!DOCTYPE html>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">ACTIVE SETUP</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">RADAR ACTIVE</div>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">RADAR SCANNING</div>
             </div>
         </div>
     </div>
@@ -482,7 +497,6 @@ terminal_html = """<!DOCTYPE html>
 
         let candles = [];
         let ws = null;
-        let lastWsPing = Date.now();
 
         function updateFrontendMetrics() {
             if (candles.length < 15) return;
@@ -513,13 +527,12 @@ terminal_html = """<!DOCTYPE html>
             document.getElementById('val-trend').style.color = isBull ? "#00e676" : "#ff3b30";
 
             if (!activeTrade) {
-                let lastRange = candles[candles.length - 1].high - candles[candles.length - 1].low;
-                let avgRange = trSum / 14;
-                if (lastRange > avgRange * 1.15) {
-                    document.getElementById('val-setup').innerText = "HIGH MOMENTUM";
+                let lastRange = Math.abs(candles[candles.length - 1].close - candles[candles.length - 1].open);
+                if (lastRange > 25) {
+                    document.getElementById('val-setup').innerText = "HIGH MOMENTUM 🔥";
                     document.getElementById('val-setup').style.color = "#00e676";
                 } else {
-                    document.getElementById('val-setup').innerText = "RADAR ACTIVE";
+                    document.getElementById('val-setup').innerText = "RADAR SCANNING";
                     document.getElementById('val-setup').style.color = "#38bdf8";
                 }
             }
@@ -545,7 +558,6 @@ terminal_html = """<!DOCTYPE html>
             if (ws) { try { ws.close(); } catch(e) {} }
             ws = new WebSocket("wss://fstream.binance.com/ws/btcusdt@kline_5m");
             ws.onmessage = (e) => {
-                lastWsPing = Date.now();
                 const k = JSON.parse(e.data).k;
                 const c = { 
                     time: Math.floor(k.t / 1000) + IST_OFFSET, 
@@ -566,7 +578,6 @@ terminal_html = """<!DOCTYPE html>
             ws.onclose = () => { setTimeout(connectWS, 1000); };
         }
 
-        // Fast 1.5-second Realtime Poller (Never Freezes even if WS drops)
         setInterval(() => {
             fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT')
                 .then(r => r.json())
