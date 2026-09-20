@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# ENTERPRISE PRE-MOVE RADAR (LIVE IST TIME + REAL-TIME FRONTEND METRICS + INSTANT SIGNALS)
+# ENTERPRISE PRE-MOVE RADAR (COMPACT BOTTOM CARDS)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -66,7 +66,6 @@ class InstitutionalMasterEngine:
     def __init__(self):
         self.active_trade = GLOBAL_STATE.get("active_trade", None)
         self.last_signal_time = 0
-        send_tg("🟢 <b>LIVE RADAR & TELEGRAM ACTIVE</b>\n\n• IST Time Sync: Enabled\n• Real-Time Squeeze Monitor: Active\nAlerts will ring directly before impulse moves.")
 
     def record_history_and_clear(self, trade_type, entry, result, pnl_pts):
         now_str = datetime.now().strftime("%H:%M")
@@ -182,18 +181,14 @@ class InstitutionalMasterEngine:
             return
 
         c0 = candles[-1]
-        c1 = candles[-2]
-
         recent_low = min(c['low'] for c in candles[-10:])
         recent_high = max(c['high'] for c in candles[-10:])
 
-        # Buy/Sell volume pressure
         taker_buy = live['taker_vol']
         taker_sell = live['vol'] - live['taker_vol']
         buy_ratio = taker_buy / max(1.0, taker_sell)
         sell_ratio = taker_sell / max(1.0, taker_buy)
 
-        # Trigger on Liquidity Reversal or Sudden Impulse Expansion
         long_cond = (
             (c0['low'] <= recent_low or live['low'] <= recent_low) and
             (live['close'] > live['open']) and
@@ -306,49 +301,51 @@ terminal_html = """<!DOCTYPE html>
         
         .top-nav { 
             display: flex; align-items: center; background: #0d111a; 
-            border-bottom: 1px solid #1a2336; padding: 6px 10px; 
-            font-size: 11px; height: 44px; gap: 8px; overflow-x: auto; white-space: nowrap; 
+            border-bottom: 1px solid #1a2336; padding: 4px 8px; 
+            font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; 
         }
-        .brand { font-weight: 800; color: #fff; font-size: 11px; display: flex; align-items: center; gap: 4px; }
-        .badge-scan { background: #161f30; color: #38bdf8; font-size: 8px; padding: 2px 5px; border-radius: 3px; font-weight: 700; }
-        .stat-card { display: flex; flex-direction: column; min-width: 50px; }
+        .brand { font-weight: 800; color: #fff; font-size: 10px; display: flex; align-items: center; gap: 4px; }
+        .badge-scan { background: #161f30; color: #38bdf8; font-size: 8px; padding: 1px 4px; border-radius: 3px; font-weight: 700; }
+        .stat-card { display: flex; flex-direction: column; min-width: 45px; }
         .stat-label { font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 700; }
-        .stat-val { font-size: 10px; font-weight: 700; color: #fff; }
+        .stat-val { font-size: 9px; font-weight: 700; color: #fff; }
         
         .btn-history {
             background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40;
-            border-radius: 4px; padding: 3px 7px; font-size: 9px; font-weight: 700; cursor: pointer;
+            border-radius: 4px; padding: 2px 6px; font-size: 8px; font-weight: 700; cursor: pointer;
         }
 
-        .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 44px); }
-        #chart-zone { width: 100vw; height: 50%; background: #080a0f; }
+        .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
+        #chart-zone { width: 100vw; flex: 1; background: #080a0f; }
 
+        /* COMPACT BOTTOM DECK */
         .lower-deck {
-            width: 100vw; height: 50%; background: #080b11;
-            border-top: 1px solid #141b27; padding: 10px;
-            display: flex; flex-direction: column; gap: 8px;
+            width: 100vw; background: #080b11;
+            border-top: 1px solid #141b27; padding: 6px 8px;
+            display: flex; flex-direction: column; gap: 5px;
         }
         
         .score-card {
-            background: #0d121c; border: 1px solid #151d2d; border-radius: 6px;
-            padding: 10px 12px; display: flex; justify-content: space-between; align-items: center;
+            background: #0d121c; border: 1px solid #151d2d; border-radius: 5px;
+            padding: 5px 8px; display: flex; justify-content: space-between; align-items: center;
         }
         .score-left { display: flex; flex-direction: column; }
-        .score-label { font-size: 8px; color: #62697a; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
-        .score-val { font-size: 20px; font-weight: 800; color: #fff; margin-top: 2px; }
+        .score-label { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; }
+        .score-val { font-size: 14px; font-weight: 800; color: #fff; }
         .score-right { display: flex; flex-direction: column; align-items: flex-end; }
-        .score-tag { background: #131a26; color: #38bdf8; font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 700; }
-        .score-sub { font-size: 9px; color: #4e5668; margin-top: 3px; }
+        .score-tag { background: #131a26; color: #38bdf8; font-size: 8px; padding: 1px 5px; border-radius: 3px; font-weight: 700; }
+        .score-sub { font-size: 7px; color: #4e5668; margin-top: 1px; }
 
+        /* CHOTA & SLIM 2 BOXES */
         .dual-deck {
-            display: grid; grid-template-columns: 1fr 1fr; gap: 8px; flex: 1;
+            display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
         }
         .mini-card {
-            background: #0d121c; border: 1px solid #151d2d; border-radius: 6px;
-            padding: 8px 10px; display: flex; flex-direction: column; justify-content: space-between;
+            background: #0d121c; border: 1px solid #151d2d; border-radius: 5px;
+            padding: 4px 6px; display: flex; flex-direction: column; justify-content: space-between;
         }
-        .mini-card-title { font-size: 8px; color: #62697a; font-weight: 800; text-transform: uppercase; margin-bottom: 4px; }
-        .row-item { display: flex; justify-content: space-between; font-size: 10px; padding: 3px 0; border-bottom: 1px solid #121824; }
+        .mini-card-title { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; margin-bottom: 2px; }
+        .row-item { display: flex; justify-content: space-between; font-size: 9px; padding: 1.5px 0; border-bottom: 1px solid #121824; }
         .row-item:last-child { border-bottom: none; }
 
         .modal-bg {
@@ -373,7 +370,7 @@ terminal_html = """<!DOCTYPE html>
         <div class="stat-card"><div class="stat-label">BIG TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
         <button class="btn-history" onclick="toggleModal(true)">📜 HISTORY</button>
         <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
-            <b id="live-price" style="color: #f0b90b; font-size: 13px;">...</b>
+            <b id="live-price" style="color: #f0b90b; font-size: 11px;">...</b>
         </div>
     </div>
 
@@ -490,7 +487,6 @@ terminal_html = """<!DOCTYPE html>
             if (e.target.id === 'modal-bg') toggleModal(false);
         }
 
-        // IST (+5:30) TIME CONVERSION ENGINE
         const IST_OFFSET = 5.5 * 3600;
 
         const chartZone = document.getElementById('chart-zone');
@@ -526,7 +522,6 @@ terminal_html = """<!DOCTYPE html>
             if (candles.length < 15) return;
             const closes = candles.map(c => c.close);
             
-            // Real-Time RSI
             let gains = 0, losses = 0;
             for (let i = closes.length - 14; i < closes.length; i++) {
                 let diff = closes[i] - closes[i - 1];
@@ -537,7 +532,6 @@ terminal_html = """<!DOCTYPE html>
             let rsi = (100 - (100 / (1 + rs))).toFixed(1);
             document.getElementById('val-rsi').innerText = rsi;
 
-            // Real-Time ATR
             let trSum = 0;
             for (let i = candles.length - 14; i < candles.length; i++) {
                 let c = candles[i], p = candles[i - 1];
@@ -546,7 +540,6 @@ terminal_html = """<!DOCTYPE html>
             let atr = (trSum / 14).toFixed(1);
             document.getElementById('val-atr').innerText = "$" + atr;
 
-            // Dynamic Squeeze & Trend
             let lastRange = candles[candles.length - 1].high - candles[candles.length - 1].low;
             let avgRange = trSum / 14;
             let isSqueezing = lastRange < (avgRange * 0.70);
