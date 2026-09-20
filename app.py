@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# ENTERPRISE PRE-MOVE RADAR - EXACT COMPACT FOOTER & REALTIME TG ENGINE
+# ENTERPRISE PRE-MOVE RADAR - FIXED BOTTOM FIT & PERSISTENT TELEGRAM BOT
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -44,23 +44,26 @@ if "SHARED_DATA" not in st.session_state:
 
 GLOBAL_STATE = st.session_state["SHARED_DATA"]
 
+def send_tg_sync(text):
+    """Reliable sync sender with retry mechanism"""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True
+    }
+    for _ in range(3):
+        try:
+            res = requests.post(url, json=payload, timeout=5)
+            if res.status_code == 200:
+                return True
+        except Exception:
+            time.sleep(0.5)
+    return False
+
 def send_tg(text):
-    def _dispatch():
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": CHAT_ID,
-            "text": text,
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True
-        }
-        for attempt in range(4):
-            try:
-                res = requests.post(url, json=payload, timeout=6)
-                if res.status_code == 200:
-                    break
-            except Exception:
-                time.sleep(1)
-    threading.Thread(target=_dispatch, daemon=True).start()
+    threading.Thread(target=send_tg_sync, args=(text,), daemon=True).start()
 
 class InstitutionalMasterEngine:
     def __init__(self):
@@ -94,15 +97,13 @@ class InstitutionalMasterEngine:
         GLOBAL_STATE["active_trade"] = None
         save_data_to_file(GLOBAL_STATE)
 
-    def start(self):
-        # Initial verification ping (ensure bot is connected)
-        send_tg("🚀 *BTC SNIPER 5M RADAR ACTIVATED*\nMonitoring 5M high-probability institutional swings...")
+    def run_forever(self):
         while True:
             try:
-                res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=40", timeout=4)
+                res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=30", timeout=4)
                 if res.status_code == 200:
                     r_5m = res.json()
-                    if isinstance(r_5m, list) and len(r_5m) >= 20:
+                    if isinstance(r_5m, list) and len(r_5m) >= 15:
                         candles = [{
                             'open': float(d[1]), 'high': float(d[2]),
                             'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5]),
@@ -125,7 +126,7 @@ class InstitutionalMasterEngine:
                             self.scan_immediate_impulse(candles, live)
             except Exception:
                 pass
-            time.sleep(1.8)
+            time.sleep(2.0)
 
     def manage_active_trade(self, live):
         t = self.active_trade
@@ -140,7 +141,7 @@ class InstitutionalMasterEngine:
                 send_tg(f"🎯 *TARGET 1 HIT (+90 pts)*\n\nBTC Long: `${t['tp1']:.1f}`\nSL shifted to Breakeven (`${t['sl']:.1f}`).")
 
             if live['high'] >= t['tp2']:
-                send_tg(f"🚀 *RUNNER TP HIT (+${t['reward']:.1f})*\n\nBTC Long Target 2 Reached at `${t['tp2']:.1f}`!")
+                send_tg(f"🚀 *RUNNER TARGET HIT (+${t['reward']:.1f})*\n\nBTC Long hit `${t['tp2']:.1f}`!")
                 self.record_history_and_clear("LONG", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['low'] <= t['sl']:
@@ -150,8 +151,8 @@ class InstitutionalMasterEngine:
                 self.record_history_and_clear("LONG", t['entry'], status, pts)
                 return
 
-            if t['duration'] >= 14 and not t['tp1_hit'] and live['close'] < (t['entry'] + 10.0):
-                send_tg(f"⚠️ *MOMENTUM EXHAUSTION EXIT*\n\nBTC Long closed safely at `${live['close']:.1f}`.")
+            if t['duration'] >= 12 and not t['tp1_hit'] and live['close'] < (t['entry'] + 10.0):
+                send_tg(f"⚠️ *TIME EXIT*\n\nBTC Long closed safely at `${live['close']:.1f}`.")
                 self.record_history_and_clear("LONG", t['entry'], "TIME EXIT", "-5")
 
         elif t['type'] == 'SHORT':
@@ -163,7 +164,7 @@ class InstitutionalMasterEngine:
                 send_tg(f"🎯 *TARGET 1 HIT (+90 pts)*\n\nBTC Short: `${t['tp1']:.1f}`\nSL shifted to Breakeven (`${t['sl']:.1f}`).")
 
             if live['low'] <= t['tp2']:
-                send_tg(f"🩸 *RUNNER TP HIT (+${t['reward']:.1f})*\n\nBTC Short Target 2 Reached at `${t['tp2']:.1f}`!")
+                send_tg(f"🩸 *RUNNER TARGET HIT (+${t['reward']:.1f})*\n\nBTC Short hit `${t['tp2']:.1f}`!")
                 self.record_history_and_clear("SHORT", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['high'] >= t['sl']:
@@ -173,38 +174,33 @@ class InstitutionalMasterEngine:
                 self.record_history_and_clear("SHORT", t['entry'], status, pts)
                 return
 
-            if t['duration'] >= 14 and not t['tp1_hit'] and live['close'] > (t['entry'] - 10.0):
-                send_tg(f"⚠️ *MOMENTUM EXHAUSTION EXIT*\n\nBTC Short closed safely at `${live['close']:.1f}`.")
+            if t['duration'] >= 12 and not t['tp1_hit'] and live['close'] > (t['entry'] - 10.0):
+                send_tg(f"⚠️ *TIME EXIT*\n\nBTC Short closed safely at `${live['close']:.1f}`.")
                 self.record_history_and_clear("SHORT", t['entry'], "TIME EXIT", "-5")
 
     def scan_immediate_impulse(self, candles, live):
         now = time.time()
-        # Cooldown taaki spam na ho par quick opportunities miss na hon
-        if now - self.last_signal_time < 120:
+        if now - self.last_signal_time < 90:
             return
 
         c0 = candles[-1]
-        c1 = candles[-2]
         recent_low = min(c['low'] for c in candles[-8:])
         recent_high = max(c['high'] for c in candles[-8:])
 
-        # Volume / Impulse Calculation
         taker_buy = live['taker_vol']
         taker_sell = max(0.1, live['vol'] - live['taker_vol'])
         buy_ratio = taker_buy / taker_sell
         sell_ratio = taker_sell / max(0.1, taker_buy)
 
-        # High accuracy entry conditions without missing solid impulse
         long_cond = (
             (live['close'] > live['open']) and
-            (live['close'] > c0['high'] or (c0['close'] > c1['high'] and buy_ratio >= 1.05)) and
-            (c0['low'] <= recent_low * 1.001 or live['low'] <= recent_low * 1.001 or buy_ratio >= 1.25)
+            (live['close'] > c0['high'] or buy_ratio >= 1.05) and
+            (live['low'] <= recent_low * 1.002 or buy_ratio >= 1.2)
         )
-
         short_cond = (
             (live['close'] < live['open']) and
-            (live['close'] < c0['low'] or (c0['close'] < c1['low'] and sell_ratio >= 1.05)) and
-            (c0['high'] >= recent_high * 0.999 or live['high'] >= recent_high * 0.999 or sell_ratio >= 1.25)
+            (live['close'] < c0['low'] or sell_ratio >= 1.05) and
+            (live['high'] >= recent_high * 0.998 or sell_ratio >= 1.2)
         )
 
         if long_cond:
@@ -227,12 +223,12 @@ class InstitutionalMasterEngine:
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ *BTC LONG SIGNAL (IMPULSE)*\n\n"
+                f"⚡ *BTC LONG SIGNAL (5M)*\n\n"
                 f"📍 *Entry:* `${entry:.1f}`\n"
                 f"🛡️ *SL:* `${sl:.1f}` (-${risk:.1f})\n"
                 f"🎯 *TP 1:* `${tp1:.1f}` (+90 pts Auto BE)\n"
-                f"🚀 *TP 2:* `${tp2:.1f}` (+${reward:.1f} Runner)\n\n"
-                f"🌊 *Setup:* Bullish Liquidity Absorption"
+                f"🚀 *TP 2:* `${tp2:.1f}` (+${reward:.1f})\n\n"
+                f"🌊 *Setup:* Institutional Swing Long"
             )
 
         elif short_cond:
@@ -255,27 +251,30 @@ class InstitutionalMasterEngine:
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ *BTC SHORT SIGNAL (IMPULSE)*\n\n"
+                f"⚡ *BTC SHORT SIGNAL (5M)*\n\n"
                 f"📍 *Entry:* `${entry:.1f}`\n"
                 f"🛡️ *SL:* `${sl:.1f}` (-${risk:.1f})\n"
                 f"🎯 *TP 1:* `${tp1:.1f}` (+90 pts Auto BE)\n"
-                f"🩸 *TP 2:* `${tp2:.1f}` (+${reward:.1f} Runner)\n\n"
-                f"🌊 *Setup:* Bearish Breakdown Impulse"
+                f"🩸 *TP 2:* `${tp2:.1f}` (+${reward:.1f})\n\n"
+                f"🌊 *Setup:* Institutional Swing Short"
             )
 
-if "engine_worker" not in st.session_state:
-    st.session_state["engine_worker"] = True
-    found = False
+# Persistent daemon starter
+if "engine_worker_running" not in st.session_state:
+    st.session_state["engine_worker_running"] = True
+    active_thread = None
     for th in threading.enumerate():
-        if th.name == "SolidTelegramWorker":
-            found = True
+        if th.name == "SolidTelegramWorker" and th.is_alive():
+            active_thread = th
             break
-    if not found:
+    if not active_thread:
         eng = InstitutionalMasterEngine()
-        t = threading.Thread(target=eng.start, name="SolidTelegramWorker", daemon=True)
+        t = threading.Thread(target=eng.run_forever, name="SolidTelegramWorker", daemon=True)
         t.start()
+        # Test notification to confirm connection is active
+        send_tg("✅ *BTC RADAR ENGINE LIVE*\nListening to real-time 5M Binance order flow...")
 
-# --- STREAMLIT CONFIG & DASHBOARD VIEW ---
+# --- STREAMLIT DASHBOARD CONFIG ---
 st.set_page_config(page_title="BTC SNIPER 5M", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
@@ -323,15 +322,27 @@ terminal_html = """<!DOCTYPE html>
             border-radius: 4px; padding: 2px 6px; font-size: 8px; font-weight: 700; cursor: pointer;
         }
 
-        .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
-        #chart-zone { width: 100vw; flex: 1; background: #080a0f; }
+        .workspace { 
+            display: flex; 
+            flex-direction: column; 
+            width: 100vw; 
+            height: calc(100vh - 38px); 
+        }
+        
+        /* CHART TAKES ENTIRE AVAILABLE HEIGHT */
+        #chart-zone { 
+            width: 100vw; 
+            flex: 1; 
+            background: #080a0f; 
+        }
 
-        /* EXACT CLEAN COMPACT FOOTER ROW AS PER USER SCREENSHOT */
+        /* EXACT POSITIONING MATCHING THE SCREENSHOT RED LINE */
         .bottom-bar {
             width: 100vw;
+            height: 48px;
             background: #0d121c;
             border-top: 1px solid #1a2336;
-            padding: 6px 10px;
+            padding: 4px 8px;
             display: grid;
             grid-template-columns: 1fr 1fr 1fr 1.5fr;
             gap: 6px;
@@ -340,26 +351,28 @@ terminal_html = """<!DOCTYPE html>
         .metric-cell {
             display: flex;
             flex-direction: column;
+            justify-content: center;
             background: #101624;
-            padding: 4px 8px;
+            padding: 3px 6px;
             border-radius: 4px;
             border: 1px solid #192233;
+            height: 38px;
         }
         .cell-head {
-            font-size: 7.5px;
+            font-size: 7px;
             color: #62697a;
             font-weight: 800;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            line-height: 1;
             margin-bottom: 2px;
         }
         .cell-body {
-            font-size: 11px;
+            font-size: 10.5px;
             font-weight: 800;
             color: #fff;
-            display: flex;
-            align-items: center;
-            gap: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         .modal-bg {
@@ -398,15 +411,15 @@ terminal_html = """<!DOCTYPE html>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">RSI (14)</span>
-                <div class="cell-body" id="val-rsi">52.4</div>
+                <div class="cell-body" id="val-rsi">52.0</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">ATR VOL</span>
-                <div class="cell-body" id="val-atr" style="color:#f0b90b;">$64.5</div>
+                <div class="cell-body" id="val-atr" style="color:#f0b90b;">$62.0</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">ACTIVE SETUP</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING SWINGS</div>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">RADAR ACTIVE</div>
             </div>
         </div>
     </div>
@@ -547,11 +560,11 @@ terminal_html = """<!DOCTYPE html>
             if (!activeTrade) {
                 let lastRange = candles[candles.length - 1].high - candles[candles.length - 1].low;
                 let avgRange = trSum / 14;
-                if (lastRange > avgRange * 1.2) {
-                    document.getElementById('val-setup').innerText = "HIGH VOL BREAKOUT";
+                if (lastRange > avgRange * 1.15) {
+                    document.getElementById('val-setup').innerText = "HIGH MOMENTUM";
                     document.getElementById('val-setup').style.color = "#00e676";
                 } else {
-                    document.getElementById('val-setup').innerText = "SCANNING SWINGS";
+                    document.getElementById('val-setup').innerText = "RADAR ACTIVE";
                     document.getElementById('val-setup').style.color = "#38bdf8";
                 }
             }
