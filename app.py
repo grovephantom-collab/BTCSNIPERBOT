@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# ENTERPRISE PRE-MOVE RADAR (LIVE SQUEEZE + ACCURATE TIME + HIGH-SENSITIVITY SIGNALS)
+# ENTERPRISE PRE-MOVE RADAR (LIVE IST TIME + REAL-TIME FRONTEND METRICS + INSTANT SIGNALS)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -22,22 +22,12 @@ def load_saved_data():
         "tp_count": 0,
         "sl_count": 0,
         "win_rate": 0.0,
-        "active_trade": None,
-        "live_metrics": {
-            "squeeze_state": "MONITORING SQUEEZE",
-            "score": 35,
-            "trend": "NEUTRAL",
-            "rsi": 50.0,
-            "atr": 60.0
-        }
+        "active_trade": None
     }
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r") as f:
-                d = json.load(f)
-                if "live_metrics" not in d:
-                    d["live_metrics"] = default_data["live_metrics"]
-                return d
+                return json.load(f)
         except Exception:
             return default_data
     return default_data
@@ -54,7 +44,6 @@ if "SHARED_DATA" not in st.session_state:
 
 GLOBAL_STATE = st.session_state["SHARED_DATA"]
 
-# Direct Telegram Dispatcher
 def send_tg(text):
     def _dispatch():
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -64,47 +53,20 @@ def send_tg(text):
             "parse_mode": "HTML",
             "disable_web_page_preview": True
         }
-        for _ in range(3):
+        for _ in range(4):
             try:
-                res = requests.post(url, json=payload, timeout=5)
+                res = requests.post(url, json=payload, timeout=6)
                 if res.status_code == 200:
                     break
             except Exception:
                 time.sleep(1)
     threading.Thread(target=_dispatch, daemon=True).start()
 
-def calc_rsi(closes, period=14):
-    if len(closes) <= period:
-        return 50.0
-    deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-    gains = [d if d > 0 else 0 for d in deltas[-period:]]
-    losses = [-d if d < 0 else 0 for d in deltas[-period:]]
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return round(100.0 - (100.0 / (1.0 + rs)), 1)
-
-def calc_atr(candles, p=14):
-    if len(candles) <= p:
-        return 60.0
-    trs = []
-    start_idx = max(1, len(candles) - p)
-    for i in range(start_idx, len(candles)):
-        h = candles[i]['high']
-        l = candles[i]['low']
-        prev_c = candles[i-1]['close']
-        trs.append(max(h - l, abs(h - prev_c), abs(l - prev_c)))
-    return round(max(25.0, sum(trs) / max(1, len(trs))), 1)
-
 class InstitutionalMasterEngine:
     def __init__(self):
         self.active_trade = GLOBAL_STATE.get("active_trade", None)
-        self.last_candle_time = 0
-        self.sentiment_score = 50
-        self.market_sentiment = "NEUTRAL"
-        self.last_sentiment_check = 0
+        self.last_signal_time = 0
+        send_tg("🟢 <b>LIVE RADAR & TELEGRAM ACTIVE</b>\n\n• IST Time Sync: Enabled\n• Real-Time Squeeze Monitor: Active\nAlerts will ring directly before impulse moves.")
 
     def record_history_and_clear(self, trade_type, entry, result, pnl_pts):
         now_str = datetime.now().strftime("%H:%M")
@@ -131,94 +93,38 @@ class InstitutionalMasterEngine:
 
         self.active_trade = None
         GLOBAL_STATE["active_trade"] = None
-        GLOBAL_STATE["live_metrics"]["score"] = 35
-        GLOBAL_STATE["live_metrics"]["squeeze_state"] = "MONITORING SQUEEZE"
         save_data_to_file(GLOBAL_STATE)
-
-    def fetch_global_sentiment(self):
-        now = time.time()
-        if now - self.last_sentiment_check >= 600:
-            self.last_sentiment_check = now
-            try:
-                r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=4)
-                if r.status_code == 200:
-                    data = r.json()
-                    self.sentiment_score = int(data['data'][0]['value'])
-                    self.market_sentiment = data['data'][0]['value_classification'].upper()
-            except Exception:
-                pass
-        return self.sentiment_score, self.market_sentiment
 
     def start(self):
         while True:
             try:
-                res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=45", timeout=5)
-                r_1h = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=50", timeout=5)
-
-                if res.status_code == 200 and r_1h.status_code == 200:
+                res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=30", timeout=4)
+                if res.status_code == 200:
                     r_5m = res.json()
-                    r_1h_data = r_1h.json()
-
-                    if isinstance(r_5m, list) and isinstance(r_1h_data, list) and len(r_5m) >= 25:
-                        closed_kline = r_5m[-2]
-                        live_kline = r_5m[-1]
-                        c_time = int(closed_kline[0] / 1000)
-
+                    if isinstance(r_5m, list) and len(r_5m) >= 20:
                         candles = [{
-                            'time': int(d[0]/1000), 'open': float(d[1]), 'high': float(d[2]),
+                            'open': float(d[1]), 'high': float(d[2]),
                             'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5]),
                             'taker_vol': float(d[9])
                         } for d in r_5m[:-1]]
 
-                        closes_5m = [c['close'] for c in candles]
-                        rsi_val = calc_rsi(closes_5m, 14)
-                        atr_val = calc_atr(candles, 14)
-
-                        closes_1h = [float(d[4]) for d in r_1h_data[:-1]]
-                        ema50_1h = sum(closes_1h[-35:]) / len(closes_1h[-35:])
-                        trend_val = "BULL" if closes_1h[-1] >= ema50_1h else "BEAR"
-
+                        live_kline = r_5m[-1]
                         live = {
+                            'open': float(live_kline[1]),
                             'high': float(live_kline[2]),
                             'low': float(live_kline[3]),
                             'close': float(live_kline[4]),
-                            'vol': float(live_kline[5])
+                            'vol': float(live_kline[5]),
+                            'taker_vol': float(live_kline[9])
                         }
-
-                        # LIVE SQUEEZE DETECTOR
-                        recent_ranges = [c['high'] - c['low'] for c in candles[-6:]]
-                        avg_range = sum(recent_ranges) / len(recent_ranges)
-                        is_squeezing = (recent_ranges[-1] < avg_range * 0.75)
-
-                        if is_squeezing:
-                            squeeze_text = "SQUEEZE DETECTED (PRE-MOVE)"
-                            score_val = 65
-                        elif self.active_trade:
-                            squeeze_text = "BREAKOUT IN MOTION"
-                            score_val = 90
-                        else:
-                            squeeze_text = "MONITORING SQUEEZE"
-                            score_val = 40
-
-                        GLOBAL_STATE["live_metrics"] = {
-                            "squeeze_state": squeeze_text,
-                            "score": score_val,
-                            "trend": trend_val,
-                            "rsi": rsi_val,
-                            "atr": atr_val
-                        }
-
-                        sentiment_val, _ = self.fetch_global_sentiment()
 
                         if self.active_trade:
                             self.manage_active_trade(live)
-
-                        if not self.active_trade and c_time > self.last_candle_time:
-                            self.last_candle_time = c_time
-                            self.evaluate_full_confluence(candles, sentiment_val)
+                        else:
+                            self.scan_immediate_impulse(candles, live)
             except Exception:
                 pass
-            time.sleep(3)
+            time.sleep(2.5)
 
     def manage_active_trade(self, live):
         t = self.active_trade
@@ -233,7 +139,7 @@ class InstitutionalMasterEngine:
                 send_tg(f"🎯 <b>TARGET 1 HIT (+90 pts)</b>\n\nBTC Long: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
 
             if live['high'] >= t['tp2']:
-                send_tg(f"🚀 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Long hit final target ${t['tp2']:.1f}! Screen display cleared.")
+                send_tg(f"🚀 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Long hit final target ${t['tp2']:.1f}! Screen cleared.")
                 self.record_history_and_clear("LONG", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['low'] <= t['sl']:
@@ -243,8 +149,8 @@ class InstitutionalMasterEngine:
                 self.record_history_and_clear("LONG", t['entry'], status, pts)
                 return
 
-            if t['duration'] >= 8 and not t['tp1_hit'] and live['close'] < (t['entry'] + 15.0):
-                send_tg(f"⚠️ <b>TIME STALL EXIT</b>\n\nClosed at ${live['close']:.1f}. Screen cleared.")
+            if t['duration'] >= 9 and not t['tp1_hit'] and live['close'] < (t['entry'] + 15.0):
+                send_tg(f"⚠️ <b>TIME EXHAUSTION EXIT</b>\n\nClosed at ${live['close']:.1f}. Screen cleared.")
                 self.record_history_and_clear("LONG", t['entry'], "TIME EXIT", "-5")
 
         elif t['type'] == 'SHORT':
@@ -256,7 +162,7 @@ class InstitutionalMasterEngine:
                 send_tg(f"🎯 <b>TARGET 1 HIT (+90 pts)</b>\n\nBTC Short: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
 
             if live['low'] <= t['tp2']:
-                send_tg(f"🩸 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Short hit final target ${t['tp2']:.1f}! Screen display cleared.")
+                send_tg(f"🩸 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Short hit final target ${t['tp2']:.1f}! Screen cleared.")
                 self.record_history_and_clear("SHORT", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['high'] >= t['sl']:
@@ -266,42 +172,43 @@ class InstitutionalMasterEngine:
                 self.record_history_and_clear("SHORT", t['entry'], status, pts)
                 return
 
-            if t['duration'] >= 8 and not t['tp1_hit'] and live['close'] > (t['entry'] - 15.0):
-                send_tg(f"⚠️ <b>TIME STALL EXIT</b>\n\nClosed at ${live['close']:.1f}. Screen cleared.")
+            if t['duration'] >= 9 and not t['tp1_hit'] and live['close'] > (t['entry'] - 15.0):
+                send_tg(f"⚠️ <b>TIME EXHAUSTION EXIT</b>\n\nClosed at ${live['close']:.1f}. Screen cleared.")
                 self.record_history_and_clear("SHORT", t['entry'], "TIME EXIT", "-5")
 
-    def evaluate_full_confluence(self, candles, sentiment_val):
+    def scan_immediate_impulse(self, candles, live):
+        now = time.time()
+        if now - self.last_signal_time < 300:
+            return
+
         c0 = candles[-1]
         c1 = candles[-2]
 
-        recent_low = min(c['low'] for c in candles[-12:-2])
-        recent_high = max(c['high'] for c in candles[-12:-2])
+        recent_low = min(c['low'] for c in candles[-10:])
+        recent_high = max(c['high'] for c in candles[-10:])
 
-        avg_vol = sum(c['vol'] for c in candles[-6:-1]) / 5.0
-        c0_taker_buy = c0['taker_vol']
-        c0_taker_sell = c0['vol'] - c0['taker_vol']
+        # Buy/Sell volume pressure
+        taker_buy = live['taker_vol']
+        taker_sell = live['vol'] - live['taker_vol']
+        buy_ratio = taker_buy / max(1.0, taker_sell)
+        sell_ratio = taker_sell / max(1.0, taker_buy)
 
-        buy_ratio = c0_taker_buy / max(1.0, c0_taker_sell)
-        sell_ratio = c0_taker_sell / max(1.0, c0_taker_buy)
-
-        # Acche moves miss na hone ke liye refined institutional breakout logic
-        valid_long = (
-            (c1['low'] <= recent_low or c0['low'] <= recent_low) and
-            (c0['close'] > c0['open']) and
-            (buy_ratio >= 1.10) and
-            (c0['vol'] >= avg_vol * 0.90)
+        # Trigger on Liquidity Reversal or Sudden Impulse Expansion
+        long_cond = (
+            (c0['low'] <= recent_low or live['low'] <= recent_low) and
+            (live['close'] > live['open']) and
+            (live['close'] > c0['high'] or buy_ratio >= 1.15)
+        )
+        short_cond = (
+            (c0['high'] >= recent_high or live['high'] >= recent_high) and
+            (live['close'] < live['open']) and
+            (live['close'] < c0['low'] or sell_ratio >= 1.15)
         )
 
-        valid_short = (
-            (c1['high'] >= recent_high or c0['high'] >= recent_high) and
-            (c0['close'] < c0['open']) and
-            (sell_ratio >= 1.10) and
-            (c0['vol'] >= avg_vol * 0.90)
-        )
-
-        if valid_long:
-            entry = round(c0['close'], 1)
-            sl = round(min(c0['low'], c1['low']) - 12.0, 1)
+        if long_cond:
+            self.last_signal_time = now
+            entry = round(live['close'], 1)
+            sl = round(min(live['low'], c0['low']) - 12.0, 1)
             risk = round(entry - sl, 1)
             if risk < 65.0: risk = 75.0; sl = round(entry - 75.0, 1)
             if risk > 150.0: risk = 135.0; sl = round(entry - 135.0, 1)
@@ -315,22 +222,21 @@ class InstitutionalMasterEngine:
                 'risk': risk, 'reward': reward, 'tp1_hit': False, 'duration': 0
             }
             GLOBAL_STATE["active_trade"] = self.active_trade
-            GLOBAL_STATE["live_metrics"]["score"] = 92
-            GLOBAL_STATE["live_metrics"]["squeeze_state"] = "LONG BREAKOUT ACTIVE"
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ <b>ACCURATE BTC LONG (BREAKOUT PRE-MOVE)</b>\n\n"
+                f"⚡ <b>ACCURATE BTC LONG (PRE-MOVE)</b>\n\n"
                 f"📍 <b>Entry:</b> ${entry:.1f}\n"
                 f"🛡️ <b>Shield SL:</b> ${sl:.1f} (-${risk:.1f})\n"
                 f"🎯 <b>TP 1:</b> ${tp1:.1f} (+90 pts Auto BE)\n"
                 f"🚀 <b>TP 2:</b> ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 <b>Context:</b> Squeeze Release | Buy Pressure: {buy_ratio:.2f}x"
+                f"🌊 <b>Context:</b> Bottom Reversal Impulse"
             )
 
-        elif valid_short:
-            entry = round(c0['close'], 1)
-            sl = round(max(c0['high'], c1['high']) + 12.0, 1)
+        elif short_cond:
+            self.last_signal_time = now
+            entry = round(live['close'], 1)
+            sl = round(max(live['high'], c0['high']) + 12.0, 1)
             risk = round(sl - entry, 1)
             if risk < 65.0: risk = 75.0; sl = round(entry + 75.0, 1)
             if risk > 150.0: risk = 135.0; sl = round(entry - 135.0, 1)
@@ -344,33 +250,30 @@ class InstitutionalMasterEngine:
                 'risk': risk, 'reward': reward, 'tp1_hit': False, 'duration': 0
             }
             GLOBAL_STATE["active_trade"] = self.active_trade
-            GLOBAL_STATE["live_metrics"]["score"] = 92
-            GLOBAL_STATE["live_metrics"]["squeeze_state"] = "SHORT BREAKOUT ACTIVE"
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ <b>ACCURATE BTC SHORT (BREAKOUT PRE-MOVE)</b>\n\n"
+                f"⚡ <b>ACCURATE BTC SHORT (PRE-MOVE)</b>\n\n"
                 f"📍 <b>Entry:</b> ${entry:.1f}\n"
                 f"🛡️ <b>Shield SL:</b> ${sl:.1f} (-${risk:.1f})\n"
                 f"🎯 <b>TP 1:</b> ${tp1:.1f} (+90 pts Auto BE)\n"
                 f"🩸 <b>TP 2:</b> ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 <b>Context:</b> Squeeze Release | Sell Pressure: {sell_ratio:.2f}x"
+                f"🌊 <b>Context:</b> Top Rejection Impulse"
             )
 
-# START WORKER
 if "engine_worker" not in st.session_state:
     st.session_state["engine_worker"] = True
     found = False
     for th in threading.enumerate():
-        if th.name == "FineTunedWorker":
+        if th.name == "DynamicLiveEngineWorker":
             found = True
             break
     if not found:
         eng = InstitutionalMasterEngine()
-        t = threading.Thread(target=eng.start, name="FineTunedWorker", daemon=True)
+        t = threading.Thread(target=eng.start, name="DynamicLiveEngineWorker", daemon=True)
         t.start()
 
-# --- STREAMLIT CLEAN VIEWPORT ---
+# --- STREAMLIT DASHBOARD VIEWPORT ---
 st.set_page_config(page_title="BTC SNIPER 5M", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
@@ -390,7 +293,6 @@ stats_str = json.dumps({
     "win_rate": current_data["win_rate"]
 })
 trade_str = json.dumps(current_data.get("active_trade"))
-metrics_str = json.dumps(current_data.get("live_metrics"))
 
 terminal_html = """<!DOCTYPE html>
 <html>
@@ -402,7 +304,6 @@ terminal_html = """<!DOCTYPE html>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100vh; overflow: hidden; }
         
-        /* EXACT TOP BAR */
         .top-nav { 
             display: flex; align-items: center; background: #0d111a; 
             border-bottom: 1px solid #1a2336; padding: 6px 10px; 
@@ -419,11 +320,9 @@ terminal_html = """<!DOCTYPE html>
             border-radius: 4px; padding: 3px 7px; font-size: 9px; font-weight: 700; cursor: pointer;
         }
 
-        /* 2-HALF WORKSPACE */
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 44px); }
         #chart-zone { width: 100vw; height: 50%; background: #080a0f; }
 
-        /* EXACT LOWER HALF */
         .lower-deck {
             width: 100vw; height: 50%; background: #080b11;
             border-top: 1px solid #141b27; padding: 10px;
@@ -452,7 +351,6 @@ terminal_html = """<!DOCTYPE html>
         .row-item { display: flex; justify-content: space-between; font-size: 10px; padding: 3px 0; border-bottom: 1px solid #121824; }
         .row-item:last-child { border-bottom: none; }
 
-        /* MODAL POPUP */
         .modal-bg {
             display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
             background: rgba(0,0,0,0.75); backdrop-filter: blur(4px); z-index: 999;
@@ -486,20 +384,20 @@ terminal_html = """<!DOCTYPE html>
             <div class="score-card">
                 <div class="score-left">
                     <span class="score-label">INSTITUTIONAL SETUP</span>
-                    <span class="score-val" id="score-text">-- / 100</span>
+                    <span class="score-val" id="score-text">35 / 100</span>
                 </div>
                 <div class="score-right">
                     <span class="score-tag" id="tag-squeeze">MONITORING SQUEEZE</span>
-                    <span class="score-sub">Only Closed 5M Candles</span>
+                    <span class="score-sub">Live 5M Dynamic Feed</span>
                 </div>
             </div>
 
             <div class="dual-deck">
                 <div class="mini-card">
                     <div class="mini-card-title">METRICS</div>
-                    <div class="row-item"><span>Trend</span><b id="val-trend" style="color:#ff3b30;">--</b></div>
-                    <div class="row-item"><span>RSI</span><b id="val-rsi" style="color:#fff;">--</b></div>
-                    <div class="row-item"><span>ATR</span><b id="val-atr" style="color:#f0b90b;">--</b></div>
+                    <div class="row-item"><span>Trend</span><b id="val-trend" style="color:#ff3b30;">BEAR</b></div>
+                    <div class="row-item"><span>RSI</span><b id="val-rsi" style="color:#fff;">50.0</b></div>
+                    <div class="row-item"><span>ATR</span><b id="val-atr" style="color:#f0b90b;">$60.0</b></div>
                 </div>
 
                 <div class="mini-card">
@@ -546,18 +444,6 @@ terminal_html = """<!DOCTYPE html>
         const stats = __STATS_PLACEHOLDER__;
         const historyData = __HISTORY_PLACEHOLDER__;
         const activeTrade = __TRADE_PLACEHOLDER__;
-        const metrics = __METRICS_PLACEHOLDER__;
-
-        // Metrics Live Update
-        if (metrics) {
-            document.getElementById('score-text').innerText = metrics.score + " / 100";
-            document.getElementById('score-text').style.color = metrics.score >= 80 ? "#00e676" : "#fff";
-            document.getElementById('tag-squeeze').innerText = metrics.squeeze_state;
-            document.getElementById('val-trend').innerText = metrics.trend;
-            document.getElementById('val-trend').style.color = metrics.trend === "BULL" ? "#00e676" : "#ff3b30";
-            document.getElementById('val-rsi').innerText = metrics.rsi;
-            document.getElementById('val-atr').innerText = "$" + metrics.atr;
-        }
 
         if (activeTrade) {
             document.getElementById('disp-entry').innerText = "$" + activeTrade.entry.toFixed(1);
@@ -565,6 +451,10 @@ terminal_html = """<!DOCTYPE html>
             document.getElementById('disp-tp').innerText = "$" + activeTrade.tp2.toFixed(1);
             document.getElementById('val-reward').innerText = "+$" + activeTrade.reward.toFixed(1);
             document.getElementById('val-risk').innerText = "-$" + activeTrade.risk.toFixed(1);
+            document.getElementById('score-text').innerText = "92 / 100";
+            document.getElementById('score-text').style.color = "#00e676";
+            document.getElementById('tag-squeeze').innerText = activeTrade.type + " BREAKOUT ACTIVE";
+            document.getElementById('tag-squeeze').style.color = "#00e676";
         } else {
             document.getElementById('disp-entry').innerText = "--";
             document.getElementById('disp-sl').innerText = "--";
@@ -600,7 +490,9 @@ terminal_html = """<!DOCTYPE html>
             if (e.target.id === 'modal-bg') toggleModal(false);
         }
 
-        // Accurate TimeScale Synchronized Lightweight Chart
+        // IST (+5:30) TIME CONVERSION ENGINE
+        const IST_OFFSET = 5.5 * 3600;
+
         const chartZone = document.getElementById('chart-zone');
         const chart = LightweightCharts.createChart(chartZone, {
             width: chartZone.clientWidth, height: chartZone.clientHeight,
@@ -610,8 +502,13 @@ terminal_html = """<!DOCTYPE html>
             timeScale: { 
                 borderColor: '#192130', 
                 timeVisible: true, 
-                secondsVisible: false,
-                shiftVisibleRangeOnNewBar: true
+                secondsVisible: false
+            },
+            localization: {
+                timeFormatter: businessDayOrTimestamp => {
+                    const d = new Date((businessDayOrTimestamp + IST_OFFSET) * 1000);
+                    return d.toUTCString().match(/\\d{2}:\\d{2}/)[0];
+                }
             }
         });
 
@@ -625,16 +522,65 @@ terminal_html = """<!DOCTYPE html>
         let ws = null;
         let lastWsPing = Date.now();
 
+        function updateFrontendMetrics() {
+            if (candles.length < 15) return;
+            const closes = candles.map(c => c.close);
+            
+            // Real-Time RSI
+            let gains = 0, losses = 0;
+            for (let i = closes.length - 14; i < closes.length; i++) {
+                let diff = closes[i] - closes[i - 1];
+                if (diff >= 0) gains += diff;
+                else losses -= diff;
+            }
+            let rs = losses === 0 ? 100 : gains / losses;
+            let rsi = (100 - (100 / (1 + rs))).toFixed(1);
+            document.getElementById('val-rsi').innerText = rsi;
+
+            // Real-Time ATR
+            let trSum = 0;
+            for (let i = candles.length - 14; i < candles.length; i++) {
+                let c = candles[i], p = candles[i - 1];
+                trSum += Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
+            }
+            let atr = (trSum / 14).toFixed(1);
+            document.getElementById('val-atr').innerText = "$" + atr;
+
+            // Dynamic Squeeze & Trend
+            let lastRange = candles[candles.length - 1].high - candles[candles.length - 1].low;
+            let avgRange = trSum / 14;
+            let isSqueezing = lastRange < (avgRange * 0.70);
+
+            if (!activeTrade) {
+                if (isSqueezing) {
+                    document.getElementById('tag-squeeze').innerText = "SQUEEZE ACTIVE (ACCUMULATING)";
+                    document.getElementById('tag-squeeze').style.color = "#38bdf8";
+                    document.getElementById('score-text').innerText = "65 / 100";
+                } else {
+                    document.getElementById('tag-squeeze').innerText = "MONITORING SQUEEZE";
+                    document.getElementById('tag-squeeze').style.color = "#78859e";
+                    document.getElementById('score-text').innerText = "35 / 100";
+                }
+            }
+
+            let lastC = candles[candles.length - 1].close;
+            let firstC = candles[candles.length - 10].close;
+            let trend = lastC >= firstC ? "BULL" : "BEAR";
+            document.getElementById('val-trend').innerText = trend;
+            document.getElementById('val-trend').style.color = trend === "BULL" ? "#00e676" : "#ff3b30";
+        }
+
         function syncData() {
             fetch('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=80')
                 .then(r => r.json())
                 .then(data => {
                     candles = data.map(d => ({
-                        time: Math.floor(d[0] / 1000),
+                        time: Math.floor(d[0] / 1000) + IST_OFFSET,
                         open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4])
                     }));
                     series.setData(candles);
                     chart.timeScale().fitContent();
+                    updateFrontendMetrics();
                     connectWS();
                 }).catch(e => setTimeout(syncData, 3000));
         }
@@ -647,16 +593,20 @@ terminal_html = """<!DOCTYPE html>
                 lastWsPing = Date.now();
                 const k = JSON.parse(e.data).k;
                 const c = { 
-                    time: Math.floor(k.t / 1000), open: parseFloat(k.o), 
-                    high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c) 
+                    time: Math.floor(k.t / 1000) + IST_OFFSET, 
+                    open: parseFloat(k.o), 
+                    high: parseFloat(k.h), 
+                    low: parseFloat(k.l), 
+                    close: parseFloat(k.c) 
                 };
                 document.getElementById('live-price').innerText = "$" + c.close.toFixed(1);
                 series.update(c);
                 if (candles.length > 0) {
-                    const last = candles.length - 1;
-                    if (candles[last].time === c.time) candles[last] = c;
-                    else if (c.time > candles[last].time) candles.push(c);
+                    const last = candles[candles.length - 1];
+                    if (last.time === c.time) candles[candles.length - 1] = c;
+                    else if (c.time > last.time) candles.push(c);
                 }
+                updateFrontendMetrics();
             };
             ws.onclose = () => { setTimeout(connectWS, 1500); };
         }
@@ -685,6 +635,6 @@ terminal_html = """<!DOCTYPE html>
         };
     </script>
 </body>
-</html>""".replace("__STATS_PLACEHOLDER__", stats_str).replace("__HISTORY_PLACEHOLDER__", history_str).replace("__TRADE_PLACEHOLDER__", trade_str).replace("__METRICS_PLACEHOLDER__", metrics_str)
+</html>""".replace("__STATS_PLACEHOLDER__", stats_str).replace("__HISTORY_PLACEHOLDER__", history_str).replace("__TRADE_PLACEHOLDER__", trade_str)
 
 components.html(terminal_html, height=850, scrolling=False)
