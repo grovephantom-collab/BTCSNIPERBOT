@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# BTC SNIPER 5M - 100% BULLETPROOF TELEGRAM & EXACT SCREEN/RED LINE FIT
+# BTC SNIPER 5M - 100% LIVE TICKING CHART + COMPACT ELEVATED BOTTOM LAYOUT
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -44,16 +44,15 @@ if "SHARED_DATA" not in st.session_state:
 
 GLOBAL_STATE = st.session_state["SHARED_DATA"]
 
-# Direct Reliable Telegram Sender
 def send_telegram_alert(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": str(CHAT_ID).strip(),
         "text": msg
     }
-    for attempt in range(3):
+    for _ in range(3):
         try:
-            r = requests.post(url, json=payload, timeout=5)
+            r = requests.post(url, json=payload, timeout=4)
             if r.status_code == 200:
                 return True
         except Exception:
@@ -67,7 +66,6 @@ class InstantBreakoutEngine:
     def __init__(self):
         self.active_trade = GLOBAL_STATE.get("active_trade", None)
         self.last_signal_time = 0
-        trigger_tg("🟢 [ENGINE ONLINE] BTC 5M Live Radar is active. Moves will trigger instantly.")
 
     def record_history(self, trade_type, entry, result, pnl_pts):
         now_str = datetime.now().strftime("%H:%M")
@@ -168,9 +166,8 @@ class InstantBreakoutEngine:
         high_3 = max(c['high'] for c in closed_candles[-4:])
         low_3 = min(c['low'] for c in closed_candles[-4:])
 
-        # Instant Breakout Logic: Catch moves before they are gone
-        long_breakout = (live['close'] > high_3 and live['close'] > live['open'] + 15)
-        short_breakout = (live['close'] < low_3 and live['close'] < live['open'] - 15)
+        long_breakout = (live['close'] > high_3 and live['close'] > live['open'] + 10)
+        short_breakout = (live['close'] < low_3 and live['close'] < live['open'] - 10)
 
         if long_breakout:
             self.last_signal_time = now
@@ -228,7 +225,6 @@ class InstantBreakoutEngine:
                 f"Status: Bearish Impulse Breakdown"
             )
 
-# Persistent Worker Thread
 if "engine_worker_running" not in st.session_state:
     st.session_state["engine_worker_running"] = True
     active_thread = None
@@ -241,15 +237,15 @@ if "engine_worker_running" not in st.session_state:
         t = threading.Thread(target=engine.run_forever, name="BTCBreakoutEngineWorker", daemon=True)
         t.start()
 
-# --- STREAMLIT CLEAN LAYOUT CONFIG ---
-st.set_page_config(page_title="BTC 5M SNIPER", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+# --- STREAMLIT DASHBOARD CONFIG ---
+st.set_page_config(page_title="BTC SNIPER 5M", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
     header, footer, #MainMenu { display: none !important; }
     .stDeployButton, [data-testid="stStatusWidget"], footer, .viewerBadge_container__1QSob { display: none !important; }
     .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; }
-    iframe { width: 100vw !important; height: calc(100dvh - 55px) !important; border: none !important; }
+    iframe { width: 100vw !important; height: 100vh !important; border: none !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -296,23 +292,24 @@ terminal_html = """<!DOCTYPE html>
             height: calc(100vh - 38px); 
         }
         
-        /* EXPANDS CHART TO TOUCH THE RED LINE FOOTER */
+        /* CHART THODA CHHOTA KIYA GAYA HAI TA-KI NICHE KA BAR UPAR RED LINE PAR AAYE */
         #chart-zone { 
             width: 100vw; 
-            flex: 1; 
+            height: 60vh; 
             background: #080a0f; 
         }
 
-        /* EXACT POSITION LOCKED AT RED LINE */
+        /* EXACT POSITION LOCKED AT RED LINE LEVEL */
         .bottom-bar {
             width: 100vw;
-            height: 40px;
+            height: calc(40vh - 38px);
+            max-height: 52px;
             background: #0d121c;
             border-top: 1px solid #1a2336;
-            padding: 2px 6px;
+            padding: 4px 8px;
             display: grid;
             grid-template-columns: 1fr 1fr 1fr 1.5fr;
-            gap: 4px;
+            gap: 6px;
             align-items: center;
         }
         .metric-cell {
@@ -320,10 +317,10 @@ terminal_html = """<!DOCTYPE html>
             flex-direction: column;
             justify-content: center;
             background: #101624;
-            padding: 2px 5px;
+            padding: 3px 6px;
             border-radius: 4px;
             border: 1px solid #192233;
-            height: 34px;
+            height: 38px;
         }
         .cell-head {
             font-size: 7px;
@@ -334,7 +331,7 @@ terminal_html = """<!DOCTYPE html>
             margin-bottom: 2px;
         }
         .cell-body {
-            font-size: 10px;
+            font-size: 10.5px;
             font-weight: 800;
             color: #fff;
             white-space: nowrap;
@@ -385,8 +382,8 @@ terminal_html = """<!DOCTYPE html>
                 <div class="cell-body" id="val-atr" style="color:#f0b90b;">$62.0</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">RADAR STATUS</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SEARCHING BREAKOUT</div>
+                <span class="cell-head">ACTIVE SETUP</span>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">RADAR ACTIVE</div>
             </div>
         </div>
     </div>
@@ -487,6 +484,47 @@ terminal_html = """<!DOCTYPE html>
         let ws = null;
         let lastWsPing = Date.now();
 
+        function updateFrontendMetrics() {
+            if (candles.length < 15) return;
+            const closes = candles.map(c => c.close);
+            
+            let gains = 0, losses = 0;
+            for (let i = closes.length - 14; i < closes.length; i++) {
+                let diff = closes[i] - closes[i - 1];
+                if (diff >= 0) gains += diff;
+                else losses -= diff;
+            }
+            let rs = losses === 0 ? 100 : gains / losses;
+            let rsi = (100 - (100 / (1 + rs))).toFixed(1);
+            document.getElementById('val-rsi').innerText = rsi;
+
+            let trSum = 0;
+            for (let i = candles.length - 14; i < candles.length; i++) {
+                let c = candles[i], p = candles[i - 1];
+                trSum += Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close));
+            }
+            let atr = (trSum / 14).toFixed(1);
+            document.getElementById('val-atr').innerText = "$" + atr;
+
+            let lastC = candles[candles.length - 1].close;
+            let firstC = candles[candles.length - 8].close;
+            let isBull = lastC >= firstC;
+            document.getElementById('val-trend').innerText = isBull ? "BULLISH ▲" : "BEARISH ▼";
+            document.getElementById('val-trend').style.color = isBull ? "#00e676" : "#ff3b30";
+
+            if (!activeTrade) {
+                let lastRange = candles[candles.length - 1].high - candles[candles.length - 1].low;
+                let avgRange = trSum / 14;
+                if (lastRange > avgRange * 1.15) {
+                    document.getElementById('val-setup').innerText = "HIGH MOMENTUM";
+                    document.getElementById('val-setup').style.color = "#00e676";
+                } else {
+                    document.getElementById('val-setup').innerText = "RADAR ACTIVE";
+                    document.getElementById('val-setup').style.color = "#38bdf8";
+                }
+            }
+        }
+
         function syncData() {
             fetch('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=80')
                 .then(r => r.json())
@@ -497,8 +535,9 @@ terminal_html = """<!DOCTYPE html>
                     }));
                     series.setData(candles);
                     chart.timeScale().fitContent();
+                    updateFrontendMetrics();
                     connectWS();
-                }).catch(e => setTimeout(syncData, 3000));
+                }).catch(e => setTimeout(syncData, 2000));
         }
         syncData();
 
@@ -517,9 +556,32 @@ terminal_html = """<!DOCTYPE html>
                 };
                 document.getElementById('live-price').innerText = "$" + c.close.toFixed(1);
                 series.update(c);
+                if (candles.length > 0) {
+                    const last = candles[candles.length - 1];
+                    if (last.time === c.time) candles[candles.length - 1] = c;
+                    else if (c.time > last.time) candles.push(c);
+                }
+                updateFrontendMetrics();
             };
-            ws.onclose = () => { setTimeout(connectWS, 1500); };
+            ws.onclose = () => { setTimeout(connectWS, 1000); };
         }
+
+        // Fast 1.5-second Realtime Poller (Never Freezes even if WS drops)
+        setInterval(() => {
+            fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT')
+                .then(r => r.json())
+                .then(p => {
+                    const pr = parseFloat(p.price);
+                    document.getElementById('live-price').innerText = "$" + pr.toFixed(1);
+                    if (candles.length > 0) {
+                        const last = candles[candles.length - 1];
+                        last.close = pr;
+                        last.high = Math.max(last.high, pr);
+                        last.low = Math.min(last.low, pr);
+                        series.update(last);
+                    }
+                }).catch(err => {});
+        }, 1500);
 
         window.onresize = () => {
             chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
@@ -528,5 +590,4 @@ terminal_html = """<!DOCTYPE html>
 </body>
 </html>""".replace("__STATS_PLACEHOLDER__", stats_str).replace("__HISTORY_PLACEHOLDER__", history_str).replace("__TRADE_PLACEHOLDER__", trade_str)
 
-# Height calibrated to lock exactly on the red line
 components.html(terminal_html, height=720, scrolling=False)
