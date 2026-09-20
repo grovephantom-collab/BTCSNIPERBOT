@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# ENTERPRISE PRE-MOVE RADAR (COMPACT BOTTOM CARDS)
+# ENTERPRISE PRE-MOVE RADAR (FIXED TELEGRAM ENGINE + RED LINE COLUMN HEIGHT)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -44,28 +44,30 @@ if "SHARED_DATA" not in st.session_state:
 
 GLOBAL_STATE = st.session_state["SHARED_DATA"]
 
+# Permanently Solid Telegram Dispatcher (Zero HTML parse failure)
 def send_tg(text):
     def _dispatch():
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": CHAT_ID,
             "text": text,
-            "parse_mode": "HTML",
             "disable_web_page_preview": True
         }
-        for _ in range(4):
+        for attempt in range(5):
             try:
-                res = requests.post(url, json=payload, timeout=6)
+                res = requests.post(url, json=payload, timeout=8)
                 if res.status_code == 200:
                     break
             except Exception:
-                time.sleep(1)
+                time.sleep(1.5)
     threading.Thread(target=_dispatch, daemon=True).start()
 
 class InstitutionalMasterEngine:
     def __init__(self):
         self.active_trade = GLOBAL_STATE.get("active_trade", None)
         self.last_signal_time = 0
+        # Immediate Startup Handshake to verify Telegram
+        send_tg("🟢 SNIPER 5M TELEGRAM VERIFIED!\n\nAlert engine connected successfully.\nLive signals will ring here directly.")
 
     def record_history_and_clear(self, trade_type, entry, result, pnl_pts):
         now_str = datetime.now().strftime("%H:%M")
@@ -135,21 +137,21 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] + 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 <b>TARGET 1 HIT (+90 pts)</b>\n\nBTC Long: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
+                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\n\nBTC Long: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
 
             if live['high'] >= t['tp2']:
-                send_tg(f"🚀 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Long hit final target ${t['tp2']:.1f}! Screen cleared.")
+                send_tg(f"🚀 RUNNER HIT (+${t['reward']:.1f})\n\nBTC Long hit final target ${t['tp2']:.1f}! Screen cleared.")
                 self.record_history_and_clear("LONG", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['low'] <= t['sl']:
                 status = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
                 pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ <b>{status}</b>\n\nBTC Long exited at ${t['sl']:.1f}. Screen cleared.")
+                send_tg(f"🛡️ {status}\n\nBTC Long exited at ${t['sl']:.1f}. Screen cleared.")
                 self.record_history_and_clear("LONG", t['entry'], status, pts)
                 return
 
             if t['duration'] >= 9 and not t['tp1_hit'] and live['close'] < (t['entry'] + 15.0):
-                send_tg(f"⚠️ <b>TIME EXHAUSTION EXIT</b>\n\nClosed at ${live['close']:.1f}. Screen cleared.")
+                send_tg(f"⚠️ TIME EXHAUSTION EXIT\n\nClosed at ${live['close']:.1f}. Screen cleared.")
                 self.record_history_and_clear("LONG", t['entry'], "TIME EXIT", "-5")
 
         elif t['type'] == 'SHORT':
@@ -158,21 +160,21 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] - 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 <b>TARGET 1 HIT (+90 pts)</b>\n\nBTC Short: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
+                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\n\nBTC Short: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
 
             if live['low'] <= t['tp2']:
-                send_tg(f"🩸 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Short hit final target ${t['tp2']:.1f}! Screen cleared.")
+                send_tg(f"🩸 RUNNER HIT (+${t['reward']:.1f})\n\nBTC Short hit final target ${t['tp2']:.1f}! Screen cleared.")
                 self.record_history_and_clear("SHORT", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['high'] >= t['sl']:
                 status = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
                 pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ <b>{status}</b>\n\nBTC Short exited at ${t['sl']:.1f}. Screen cleared.")
+                send_tg(f"🛡️ {status}\n\nBTC Short exited at ${t['sl']:.1f}. Screen cleared.")
                 self.record_history_and_clear("SHORT", t['entry'], status, pts)
                 return
 
             if t['duration'] >= 9 and not t['tp1_hit'] and live['close'] > (t['entry'] - 15.0):
-                send_tg(f"⚠️ <b>TIME EXHAUSTION EXIT</b>\n\nClosed at ${live['close']:.1f}. Screen cleared.")
+                send_tg(f"⚠️ TIME EXHAUSTION EXIT\n\nClosed at ${live['close']:.1f}. Screen cleared.")
                 self.record_history_and_clear("SHORT", t['entry'], "TIME EXIT", "-5")
 
     def scan_immediate_impulse(self, candles, live):
@@ -220,12 +222,12 @@ class InstitutionalMasterEngine:
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ <b>ACCURATE BTC LONG (PRE-MOVE)</b>\n\n"
-                f"📍 <b>Entry:</b> ${entry:.1f}\n"
-                f"🛡️ <b>Shield SL:</b> ${sl:.1f} (-${risk:.1f})\n"
-                f"🎯 <b>TP 1:</b> ${tp1:.1f} (+90 pts Auto BE)\n"
-                f"🚀 <b>TP 2:</b> ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 <b>Context:</b> Bottom Reversal Impulse"
+                f"⚡ ACCURATE BTC LONG (PRE-MOVE)\n\n"
+                f"📍 Entry: ${entry:.1f}\n"
+                f"🛡️ Shield SL: ${sl:.1f} (-${risk:.1f})\n"
+                f"🎯 TP 1: ${tp1:.1f} (+90 pts Auto BE)\n"
+                f"🚀 TP 2: ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
+                f"🌊 Context: Bottom Reversal Impulse"
             )
 
         elif short_cond:
@@ -248,24 +250,24 @@ class InstitutionalMasterEngine:
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ <b>ACCURATE BTC SHORT (PRE-MOVE)</b>\n\n"
-                f"📍 <b>Entry:</b> ${entry:.1f}\n"
-                f"🛡️ <b>Shield SL:</b> ${sl:.1f} (-${risk:.1f})\n"
-                f"🎯 <b>TP 1:</b> ${tp1:.1f} (+90 pts Auto BE)\n"
-                f"🩸 <b>TP 2:</b> ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 <b>Context:</b> Top Rejection Impulse"
+                f"⚡ ACCURATE BTC SHORT (PRE-MOVE)\n\n"
+                f"📍 Entry: ${entry:.1f}\n"
+                f"🛡️ Shield SL: ${sl:.1f} (-${risk:.1f})\n"
+                f"🎯 TP 1: ${tp1:.1f} (+90 pts Auto BE)\n"
+                f"🩸 TP 2: ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
+                f"🌊 Context: Top Rejection Impulse"
             )
 
 if "engine_worker" not in st.session_state:
     st.session_state["engine_worker"] = True
     found = False
     for th in threading.enumerate():
-        if th.name == "DynamicLiveEngineWorker":
+        if th.name == "SolidTelegramWorker":
             found = True
             break
     if not found:
         eng = InstitutionalMasterEngine()
-        t = threading.Thread(target=eng.start, name="DynamicLiveEngineWorker", daemon=True)
+        t = threading.Thread(target=eng.start, name="SolidTelegramWorker", daemon=True)
         t.start()
 
 # --- STREAMLIT DASHBOARD VIEWPORT ---
@@ -316,36 +318,36 @@ terminal_html = """<!DOCTYPE html>
         }
 
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
-        #chart-zone { width: 100vw; flex: 1; background: #080a0f; }
+        #chart-zone { width: 100vw; height: 58%; background: #080a0f; }
 
-        /* COMPACT BOTTOM DECK */
+        /* EXACT RED-LINE HEIGHT ADJUSTMENT */
         .lower-deck {
-            width: 100vw; background: #080b11;
+            width: 100vw; height: 42%; background: #080b11;
             border-top: 1px solid #141b27; padding: 6px 8px;
-            display: flex; flex-direction: column; gap: 5px;
+            display: flex; flex-direction: column; gap: 6px;
         }
         
         .score-card {
-            background: #0d121c; border: 1px solid #151d2d; border-radius: 5px;
-            padding: 5px 8px; display: flex; justify-content: space-between; align-items: center;
+            background: #0d121c; border: 1px solid #151d2d; border-radius: 6px;
+            padding: 6px 10px; display: flex; justify-content: space-between; align-items: center;
         }
         .score-left { display: flex; flex-direction: column; }
-        .score-label { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; }
-        .score-val { font-size: 14px; font-weight: 800; color: #fff; }
+        .score-label { font-size: 8px; color: #62697a; font-weight: 800; text-transform: uppercase; }
+        .score-val { font-size: 16px; font-weight: 800; color: #fff; }
         .score-right { display: flex; flex-direction: column; align-items: flex-end; }
-        .score-tag { background: #131a26; color: #38bdf8; font-size: 8px; padding: 1px 5px; border-radius: 3px; font-weight: 700; }
-        .score-sub { font-size: 7px; color: #4e5668; margin-top: 1px; }
+        .score-tag { background: #131a26; color: #38bdf8; font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 700; }
+        .score-sub { font-size: 8px; color: #4e5668; margin-top: 1px; }
 
-        /* CHOTA & SLIM 2 BOXES */
+        /* PERFECT HEIGHT TO FILL UP TO RED LINE */
         .dual-deck {
-            display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+            display: grid; grid-template-columns: 1fr 1fr; gap: 8px; flex: 1;
         }
         .mini-card {
-            background: #0d121c; border: 1px solid #151d2d; border-radius: 5px;
-            padding: 4px 6px; display: flex; flex-direction: column; justify-content: space-between;
+            background: #0d121c; border: 1px solid #151d2d; border-radius: 6px;
+            padding: 8px 10px; display: flex; flex-direction: column; justify-content: space-around;
         }
-        .mini-card-title { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; margin-bottom: 2px; }
-        .row-item { display: flex; justify-content: space-between; font-size: 9px; padding: 1.5px 0; border-bottom: 1px solid #121824; }
+        .mini-card-title { font-size: 8px; color: #62697a; font-weight: 800; text-transform: uppercase; margin-bottom: 2px; }
+        .row-item { display: flex; justify-content: space-between; font-size: 10px; padding: 4px 0; border-bottom: 1px solid #121824; }
         .row-item:last-child { border-bottom: none; }
 
         .modal-bg {
@@ -596,7 +598,7 @@ terminal_html = """<!DOCTYPE html>
                 series.update(c);
                 if (candles.length > 0) {
                     const last = candles[candles.length - 1];
-                    if (last.time === c.time) candles[candles.length - 1] = c;
+                    if (last.time === c.time) candles[last] = c;
                     else if (c.time > last.time) candles.push(c);
                 }
                 updateFrontendMetrics();
