@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# ENTERPRISE PRE-MOVE RADAR (FIXED BOTTOM OVERLAP & FULLY VISIBLE RISK/ALERTS)
+# ENTERPRISE PRE-MOVE RADAR - EXACT COMPACT FOOTER & REALTIME TG ENGINE
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -50,15 +50,16 @@ def send_tg(text):
         payload = {
             "chat_id": CHAT_ID,
             "text": text,
+            "parse_mode": "Markdown",
             "disable_web_page_preview": True
         }
-        for attempt in range(5):
+        for attempt in range(4):
             try:
-                res = requests.post(url, json=payload, timeout=8)
+                res = requests.post(url, json=payload, timeout=6)
                 if res.status_code == 200:
                     break
             except Exception:
-                time.sleep(1.5)
+                time.sleep(1)
     threading.Thread(target=_dispatch, daemon=True).start()
 
 class InstitutionalMasterEngine:
@@ -94,9 +95,11 @@ class InstitutionalMasterEngine:
         save_data_to_file(GLOBAL_STATE)
 
     def start(self):
+        # Initial verification ping (ensure bot is connected)
+        send_tg("🚀 *BTC SNIPER 5M RADAR ACTIVATED*\nMonitoring 5M high-probability institutional swings...")
         while True:
             try:
-                res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=30", timeout=4)
+                res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=40", timeout=4)
                 if res.status_code == 200:
                     r_5m = res.json()
                     if isinstance(r_5m, list) and len(r_5m) >= 20:
@@ -122,7 +125,7 @@ class InstitutionalMasterEngine:
                             self.scan_immediate_impulse(candles, live)
             except Exception:
                 pass
-            time.sleep(2.5)
+            time.sleep(1.8)
 
     def manage_active_trade(self, live):
         t = self.active_trade
@@ -134,21 +137,21 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] + 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\n\nBTC Long: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}).")
+                send_tg(f"🎯 *TARGET 1 HIT (+90 pts)*\n\nBTC Long: `${t['tp1']:.1f}`\nSL shifted to Breakeven (`${t['sl']:.1f}`).")
 
             if live['high'] >= t['tp2']:
-                send_tg(f"🚀 RUNNER HIT (+${t['reward']:.1f})\n\nBTC Long target reached at ${t['tp2']:.1f}!")
+                send_tg(f"🚀 *RUNNER TP HIT (+${t['reward']:.1f})*\n\nBTC Long Target 2 Reached at `${t['tp2']:.1f}`!")
                 self.record_history_and_clear("LONG", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['low'] <= t['sl']:
                 status = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
                 pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ {status}\n\nBTC Long closed at ${t['sl']:.1f}.")
+                send_tg(f"🛡️ *{status}*\n\nBTC Long closed at `${t['sl']:.1f}`.")
                 self.record_history_and_clear("LONG", t['entry'], status, pts)
                 return
 
-            if t['duration'] >= 9 and not t['tp1_hit'] and live['close'] < (t['entry'] + 15.0):
-                send_tg(f"⚠️ TIME EXHAUSTION\n\nBTC Long closed at ${live['close']:.1f}.")
+            if t['duration'] >= 14 and not t['tp1_hit'] and live['close'] < (t['entry'] + 10.0):
+                send_tg(f"⚠️ *MOMENTUM EXHAUSTION EXIT*\n\nBTC Long closed safely at `${live['close']:.1f}`.")
                 self.record_history_and_clear("LONG", t['entry'], "TIME EXIT", "-5")
 
         elif t['type'] == 'SHORT':
@@ -157,46 +160,51 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] - 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\n\nBTC Short: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}).")
+                send_tg(f"🎯 *TARGET 1 HIT (+90 pts)*\n\nBTC Short: `${t['tp1']:.1f}`\nSL shifted to Breakeven (`${t['sl']:.1f}`).")
 
             if live['low'] <= t['tp2']:
-                send_tg(f"🩸 RUNNER HIT (+${t['reward']:.1f})\n\nBTC Short target reached at ${t['tp2']:.1f}!")
+                send_tg(f"🩸 *RUNNER TP HIT (+${t['reward']:.1f})*\n\nBTC Short Target 2 Reached at `${t['tp2']:.1f}`!")
                 self.record_history_and_clear("SHORT", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['high'] >= t['sl']:
                 status = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
                 pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ {status}\n\nBTC Short exited at ${t['sl']:.1f}.")
+                send_tg(f"🛡️ *{status}*\n\nBTC Short closed at `${t['sl']:.1f}`.")
                 self.record_history_and_clear("SHORT", t['entry'], status, pts)
                 return
 
-            if t['duration'] >= 9 and not t['tp1_hit'] and live['close'] > (t['entry'] - 15.0):
-                send_tg(f"⚠️ TIME EXHAUSTION\n\nBTC Short closed at ${live['close']:.1f}.")
+            if t['duration'] >= 14 and not t['tp1_hit'] and live['close'] > (t['entry'] - 10.0):
+                send_tg(f"⚠️ *MOMENTUM EXHAUSTION EXIT*\n\nBTC Short closed safely at `${live['close']:.1f}`.")
                 self.record_history_and_clear("SHORT", t['entry'], "TIME EXIT", "-5")
 
     def scan_immediate_impulse(self, candles, live):
         now = time.time()
-        if now - self.last_signal_time < 300:
+        # Cooldown taaki spam na ho par quick opportunities miss na hon
+        if now - self.last_signal_time < 120:
             return
 
         c0 = candles[-1]
-        recent_low = min(c['low'] for c in candles[-10:])
-        recent_high = max(c['high'] for c in candles[-10:])
+        c1 = candles[-2]
+        recent_low = min(c['low'] for c in candles[-8:])
+        recent_high = max(c['high'] for c in candles[-8:])
 
+        # Volume / Impulse Calculation
         taker_buy = live['taker_vol']
-        taker_sell = live['vol'] - live['taker_vol']
-        buy_ratio = taker_buy / max(1.0, taker_sell)
-        sell_ratio = taker_sell / max(1.0, taker_buy)
+        taker_sell = max(0.1, live['vol'] - live['taker_vol'])
+        buy_ratio = taker_buy / taker_sell
+        sell_ratio = taker_sell / max(0.1, taker_buy)
 
+        # High accuracy entry conditions without missing solid impulse
         long_cond = (
-            (c0['low'] <= recent_low or live['low'] <= recent_low) and
             (live['close'] > live['open']) and
-            (live['close'] > c0['high'] or buy_ratio >= 1.15)
+            (live['close'] > c0['high'] or (c0['close'] > c1['high'] and buy_ratio >= 1.05)) and
+            (c0['low'] <= recent_low * 1.001 or live['low'] <= recent_low * 1.001 or buy_ratio >= 1.25)
         )
+
         short_cond = (
-            (c0['high'] >= recent_high or live['high'] >= recent_high) and
             (live['close'] < live['open']) and
-            (live['close'] < c0['low'] or sell_ratio >= 1.15)
+            (live['close'] < c0['low'] or (c0['close'] < c1['low'] and sell_ratio >= 1.05)) and
+            (c0['high'] >= recent_high * 0.999 or live['high'] >= recent_high * 0.999 or sell_ratio >= 1.25)
         )
 
         if long_cond:
@@ -204,11 +212,11 @@ class InstitutionalMasterEngine:
             entry = round(live['close'], 1)
             sl = round(min(live['low'], c0['low']) - 12.0, 1)
             risk = round(entry - sl, 1)
-            if risk < 65.0: risk = 75.0; sl = round(entry - 75.0, 1)
-            if risk > 150.0: risk = 135.0; sl = round(entry - 135.0, 1)
+            if risk < 60.0: risk = 70.0; sl = round(entry - 70.0, 1)
+            if risk > 140.0: risk = 130.0; sl = round(entry - 130.0, 1)
 
             tp1 = round(entry + 90.0, 1)
-            reward = round(risk * 2.3, 1)
+            reward = round(risk * 2.2, 1)
             tp2 = round(entry + reward, 1)
 
             self.active_trade = {
@@ -219,12 +227,12 @@ class InstitutionalMasterEngine:
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ ACCURATE BTC LONG (PRE-MOVE)\n\n"
-                f"📍 Entry: ${entry:.1f}\n"
-                f"🛡️ Shield SL: ${sl:.1f} (-${risk:.1f})\n"
-                f"🎯 TP 1: ${tp1:.1f} (+90 pts Auto BE)\n"
-                f"🚀 TP 2: ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 Context: Bottom Reversal Impulse"
+                f"⚡ *BTC LONG SIGNAL (IMPULSE)*\n\n"
+                f"📍 *Entry:* `${entry:.1f}`\n"
+                f"🛡️ *SL:* `${sl:.1f}` (-${risk:.1f})\n"
+                f"🎯 *TP 1:* `${tp1:.1f}` (+90 pts Auto BE)\n"
+                f"🚀 *TP 2:* `${tp2:.1f}` (+${reward:.1f} Runner)\n\n"
+                f"🌊 *Setup:* Bullish Liquidity Absorption"
             )
 
         elif short_cond:
@@ -232,11 +240,11 @@ class InstitutionalMasterEngine:
             entry = round(live['close'], 1)
             sl = round(max(live['high'], c0['high']) + 12.0, 1)
             risk = round(sl - entry, 1)
-            if risk < 65.0: risk = 75.0; sl = round(entry + 75.0, 1)
-            if risk > 150.0: risk = 135.0; sl = round(entry - 135.0, 1)
+            if risk < 60.0: risk = 70.0; sl = round(entry + 70.0, 1)
+            if risk > 140.0: risk = 130.0; sl = round(entry - 130.0, 1)
 
             tp1 = round(entry - 90.0, 1)
-            reward = round(risk * 2.3, 1)
+            reward = round(risk * 2.2, 1)
             tp2 = round(entry - reward, 1)
 
             self.active_trade = {
@@ -247,12 +255,12 @@ class InstitutionalMasterEngine:
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ ACCURATE BTC SHORT (PRE-MOVE)\n\n"
-                f"📍 Entry: ${entry:.1f}\n"
-                f"🛡️ Shield SL: ${sl:.1f} (-${risk:.1f})\n"
-                f"🎯 TP 1: ${tp1:.1f} (+90 pts Auto BE)\n"
-                f"🩸 TP 2: ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 Context: Top Rejection Impulse"
+                f"⚡ *BTC SHORT SIGNAL (IMPULSE)*\n\n"
+                f"📍 *Entry:* `${entry:.1f}`\n"
+                f"🛡️ *SL:* `${sl:.1f}` (-${risk:.1f})\n"
+                f"🎯 *TP 1:* `${tp1:.1f}` (+90 pts Auto BE)\n"
+                f"🩸 *TP 2:* `${tp2:.1f}` (+${reward:.1f} Runner)\n\n"
+                f"🌊 *Setup:* Bearish Breakdown Impulse"
             )
 
 if "engine_worker" not in st.session_state:
@@ -267,10 +275,9 @@ if "engine_worker" not in st.session_state:
         t = threading.Thread(target=eng.start, name="SolidTelegramWorker", daemon=True)
         t.start()
 
-# --- STREAMLIT DASHBOARD VIEWPORT ---
+# --- STREAMLIT CONFIG & DASHBOARD VIEW ---
 st.set_page_config(page_title="BTC SNIPER 5M", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
-# Hide Streamlit Default Floating Badges & Padding
 st.markdown("""
 <style>
     header, footer, #MainMenu { display: none !important; }
@@ -319,34 +326,41 @@ terminal_html = """<!DOCTYPE html>
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
         #chart-zone { width: 100vw; flex: 1; background: #080a0f; }
 
-        /* SAFE BOTTOM PADDING - KUCH BHI CHIPEGA NAHI */
-        .lower-deck {
-            width: 100vw; background: #080b11;
-            border-top: 1px solid #141b27; padding: 4px 8px 18px 8px;
-            display: flex; flex-direction: column; gap: 4px;
+        /* EXACT CLEAN COMPACT FOOTER ROW AS PER USER SCREENSHOT */
+        .bottom-bar {
+            width: 100vw;
+            background: #0d121c;
+            border-top: 1px solid #1a2336;
+            padding: 6px 10px;
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr 1.5fr;
+            gap: 6px;
+            align-items: center;
         }
-        
-        .score-card {
-            background: #0d121c; border: 1px solid #151d2d; border-radius: 5px;
-            padding: 4px 8px; display: flex; justify-content: space-between; align-items: center;
+        .metric-cell {
+            display: flex;
+            flex-direction: column;
+            background: #101624;
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: 1px solid #192233;
         }
-        .score-left { display: flex; flex-direction: column; }
-        .score-label { font-size: 7.5px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; }
-        .score-val { font-size: 14px; font-weight: 800; color: #fff; line-height: 1.2; margin-top: 1px; }
-        .score-right { display: flex; flex-direction: column; align-items: flex-end; }
-        .score-tag { background: #131a26; color: #38bdf8; font-size: 8px; padding: 1px 5px; border-radius: 3px; font-weight: 700; line-height: 1.2; }
-        .score-sub { font-size: 7.5px; color: #4e5668; margin-top: 1px; line-height: 1; }
-
-        .dual-deck {
-            display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+        .cell-head {
+            font-size: 7.5px;
+            color: #62697a;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 2px;
         }
-        .mini-card {
-            background: #0d121c; border: 1px solid #151d2d; border-radius: 5px;
-            padding: 5px 7px 6px 7px; display: flex; flex-direction: column;
+        .cell-body {
+            font-size: 11px;
+            font-weight: 800;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 4px;
         }
-        .mini-card-title { font-size: 7.5px; color: #62697a; font-weight: 800; text-transform: uppercase; margin-bottom: 2px; }
-        .row-item { display: flex; justify-content: space-between; font-size: 9.5px; padding: 2px 0; border-bottom: 1px solid #121824; }
-        .row-item:last-child { border-bottom: none; }
 
         .modal-bg {
             display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
@@ -377,32 +391,22 @@ terminal_html = """<!DOCTYPE html>
     <div class="workspace">
         <div id="chart-zone"></div>
 
-        <div class="lower-deck">
-            <div class="score-card">
-                <div class="score-left">
-                    <span class="score-label">INSTITUTIONAL SETUP</span>
-                    <span class="score-val" id="score-text">35 / 100</span>
-                </div>
-                <div class="score-right">
-                    <span class="score-tag" id="tag-squeeze">MONITORING SQUEEZE</span>
-                    <span class="score-sub">Live 5M Dynamic Feed</span>
-                </div>
+        <div class="bottom-bar">
+            <div class="metric-cell">
+                <span class="cell-head">TREND</span>
+                <div class="cell-body" id="val-trend" style="color:#00e676;">BULLISH ▲</div>
             </div>
-
-            <div class="dual-deck">
-                <div class="mini-card">
-                    <div class="mini-card-title">METRICS</div>
-                    <div class="row-item"><span>Trend</span><b id="val-trend" style="color:#00e676;">BULL</b></div>
-                    <div class="row-item"><span>RSI</span><b id="val-rsi" style="color:#fff;">50.0</b></div>
-                    <div class="row-item"><span>ATR</span><b id="val-atr" style="color:#f0b90b;">$60.0</b></div>
-                </div>
-
-                <div class="mini-card">
-                    <div class="mini-card-title">TRADE INFO</div>
-                    <div class="row-item"><span>Reward</span><b id="val-reward" style="color:#00e676;">--</b></div>
-                    <div class="row-item"><span>Risk</span><b id="val-risk" style="color:#ff3b30;">--</b></div>
-                    <div class="row-item"><span>Alerts</span><b style="color:#00e676;">TG Active ✅</b></div>
-                </div>
+            <div class="metric-cell">
+                <span class="cell-head">RSI (14)</span>
+                <div class="cell-body" id="val-rsi">52.4</div>
+            </div>
+            <div class="metric-cell">
+                <span class="cell-head">ATR VOL</span>
+                <div class="cell-body" id="val-atr" style="color:#f0b90b;">$64.5</div>
+            </div>
+            <div class="metric-cell">
+                <span class="cell-head">ACTIVE SETUP</span>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING SWINGS</div>
             </div>
         </div>
     </div>
@@ -446,18 +450,12 @@ terminal_html = """<!DOCTYPE html>
             document.getElementById('disp-entry').innerText = "$" + activeTrade.entry.toFixed(1);
             document.getElementById('disp-sl').innerText = "$" + activeTrade.sl.toFixed(1);
             document.getElementById('disp-tp').innerText = "$" + activeTrade.tp2.toFixed(1);
-            document.getElementById('val-reward').innerText = "+$" + activeTrade.reward.toFixed(1);
-            document.getElementById('val-risk').innerText = "-$" + activeTrade.risk.toFixed(1);
-            document.getElementById('score-text').innerText = "92 / 100";
-            document.getElementById('score-text').style.color = "#00e676";
-            document.getElementById('tag-squeeze').innerText = activeTrade.type + " BREAKOUT ACTIVE";
-            document.getElementById('tag-squeeze').style.color = "#00e676";
+            document.getElementById('val-setup').innerText = activeTrade.type + " ACTIVE";
+            document.getElementById('val-setup').style.color = activeTrade.type === "LONG" ? "#00e676" : "#ff3b30";
         } else {
             document.getElementById('disp-entry').innerText = "--";
             document.getElementById('disp-sl').innerText = "--";
             document.getElementById('disp-tp').innerText = "--";
-            document.getElementById('val-reward').innerText = "--";
-            document.getElementById('val-risk').innerText = "--";
         }
 
         document.getElementById('stat-total').innerText = stats.total;
@@ -540,27 +538,23 @@ terminal_html = """<!DOCTYPE html>
             let atr = (trSum / 14).toFixed(1);
             document.getElementById('val-atr').innerText = "$" + atr;
 
-            let lastRange = candles[candles.length - 1].high - candles[candles.length - 1].low;
-            let avgRange = trSum / 14;
-            let isSqueezing = lastRange < (avgRange * 0.70);
+            let lastC = candles[candles.length - 1].close;
+            let firstC = candles[candles.length - 8].close;
+            let isBull = lastC >= firstC;
+            document.getElementById('val-trend').innerText = isBull ? "BULLISH ▲" : "BEARISH ▼";
+            document.getElementById('val-trend').style.color = isBull ? "#00e676" : "#ff3b30";
 
             if (!activeTrade) {
-                if (isSqueezing) {
-                    document.getElementById('tag-squeeze').innerText = "SQUEEZE ACTIVE (ACCUMULATING)";
-                    document.getElementById('tag-squeeze').style.color = "#38bdf8";
-                    document.getElementById('score-text').innerText = "65 / 100";
+                let lastRange = candles[candles.length - 1].high - candles[candles.length - 1].low;
+                let avgRange = trSum / 14;
+                if (lastRange > avgRange * 1.2) {
+                    document.getElementById('val-setup').innerText = "HIGH VOL BREAKOUT";
+                    document.getElementById('val-setup').style.color = "#00e676";
                 } else {
-                    document.getElementById('tag-squeeze').innerText = "MONITORING SQUEEZE";
-                    document.getElementById('tag-squeeze').style.color = "#78859e";
-                    document.getElementById('score-text').innerText = "35 / 100";
+                    document.getElementById('val-setup').innerText = "SCANNING SWINGS";
+                    document.getElementById('val-setup').style.color = "#38bdf8";
                 }
             }
-
-            let lastC = candles[candles.length - 1].close;
-            let firstC = candles[candles.length - 10].close;
-            let trend = lastC >= firstC ? "BULL" : "BEAR";
-            document.getElementById('val-trend').innerText = trend;
-            document.getElementById('val-trend').style.color = trend === "BULL" ? "#00e676" : "#ff3b30";
         }
 
         function syncData() {
