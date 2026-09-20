@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# EXACT ORIGINAL DASHBOARD (IMAGE RESTORED + POPUP HISTORY + TELEGRAM FIXED)
+# ENTERPRISE PRE-MOVE RADAR (LIVE SQUEEZE + ACCURATE TIME + HIGH-SENSITIVITY SIGNALS)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -22,12 +22,22 @@ def load_saved_data():
         "tp_count": 0,
         "sl_count": 0,
         "win_rate": 0.0,
-        "active_trade": None
+        "active_trade": None,
+        "live_metrics": {
+            "squeeze_state": "MONITORING SQUEEZE",
+            "score": 35,
+            "trend": "NEUTRAL",
+            "rsi": 50.0,
+            "atr": 60.0
+        }
     }
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r") as f:
-                return json.load(f)
+                d = json.load(f)
+                if "live_metrics" not in d:
+                    d["live_metrics"] = default_data["live_metrics"]
+                return d
         except Exception:
             return default_data
     return default_data
@@ -44,7 +54,7 @@ if "SHARED_DATA" not in st.session_state:
 
 GLOBAL_STATE = st.session_state["SHARED_DATA"]
 
-# Reliable Direct Telegram Dispatcher
+# Direct Telegram Dispatcher
 def send_tg(text):
     def _dispatch():
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -95,22 +105,9 @@ class InstitutionalMasterEngine:
         self.sentiment_score = 50
         self.market_sentiment = "NEUTRAL"
         self.last_sentiment_check = 0
-        self.live_rsi = 50.0
-        self.live_atr = 60.0
-        self.live_trend = "BULL"
-        self.setup_score = 30
-        
-        # Test alert on boot
-        send_tg(
-            "🟢 <b>SNIPER 5M SYSTEM ONLINE</b>\n\n"
-            "• UI Restored: Institutional Setup & Metrics View\n"
-            "• Popup History: Enabled\n"
-            "• Live Alerts: Active 24/7"
-        )
 
     def record_history_and_clear(self, trade_type, entry, result, pnl_pts):
         now_str = datetime.now().strftime("%H:%M")
-
         GLOBAL_STATE["total_signals"] += 1
         if "TP" in result or "RUNNER" in result:
             GLOBAL_STATE["tp_count"] += 1
@@ -134,6 +131,8 @@ class InstitutionalMasterEngine:
 
         self.active_trade = None
         GLOBAL_STATE["active_trade"] = None
+        GLOBAL_STATE["live_metrics"]["score"] = 35
+        GLOBAL_STATE["live_metrics"]["squeeze_state"] = "MONITORING SQUEEZE"
         save_data_to_file(GLOBAL_STATE)
 
     def fetch_global_sentiment(self):
@@ -172,27 +171,51 @@ class InstitutionalMasterEngine:
                         } for d in r_5m[:-1]]
 
                         closes_5m = [c['close'] for c in candles]
-                        self.live_rsi = calc_rsi(closes_5m, 14)
-                        self.live_atr = calc_atr(candles, 14)
+                        rsi_val = calc_rsi(closes_5m, 14)
+                        atr_val = calc_atr(candles, 14)
 
                         closes_1h = [float(d[4]) for d in r_1h_data[:-1]]
                         ema50_1h = sum(closes_1h[-35:]) / len(closes_1h[-35:])
-                        self.live_trend = "BULL" if closes_1h[-1] >= ema50_1h else "BEAR"
+                        trend_val = "BULL" if closes_1h[-1] >= ema50_1h else "BEAR"
 
                         live = {
                             'high': float(live_kline[2]),
                             'low': float(live_kline[3]),
-                            'close': float(live_kline[4])
+                            'close': float(live_kline[4]),
+                            'vol': float(live_kline[5])
                         }
 
-                        sentiment_val, sentiment_label = self.fetch_global_sentiment()
+                        # LIVE SQUEEZE DETECTOR
+                        recent_ranges = [c['high'] - c['low'] for c in candles[-6:]]
+                        avg_range = sum(recent_ranges) / len(recent_ranges)
+                        is_squeezing = (recent_ranges[-1] < avg_range * 0.75)
+
+                        if is_squeezing:
+                            squeeze_text = "SQUEEZE DETECTED (PRE-MOVE)"
+                            score_val = 65
+                        elif self.active_trade:
+                            squeeze_text = "BREAKOUT IN MOTION"
+                            score_val = 90
+                        else:
+                            squeeze_text = "MONITORING SQUEEZE"
+                            score_val = 40
+
+                        GLOBAL_STATE["live_metrics"] = {
+                            "squeeze_state": squeeze_text,
+                            "score": score_val,
+                            "trend": trend_val,
+                            "rsi": rsi_val,
+                            "atr": atr_val
+                        }
+
+                        sentiment_val, _ = self.fetch_global_sentiment()
 
                         if self.active_trade:
                             self.manage_active_trade(live)
 
                         if not self.active_trade and c_time > self.last_candle_time:
                             self.last_candle_time = c_time
-                            self.evaluate_full_confluence(candles, sentiment_val, sentiment_label)
+                            self.evaluate_full_confluence(candles, sentiment_val)
             except Exception:
                 pass
             time.sleep(3)
@@ -210,7 +233,7 @@ class InstitutionalMasterEngine:
                 send_tg(f"🎯 <b>TARGET 1 HIT (+90 pts)</b>\n\nBTC Long: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
 
             if live['high'] >= t['tp2']:
-                send_tg(f"🚀 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Long hit target ${t['tp2']:.1f}! Screen display cleared.")
+                send_tg(f"🚀 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Long hit final target ${t['tp2']:.1f}! Screen display cleared.")
                 self.record_history_and_clear("LONG", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['low'] <= t['sl']:
@@ -220,7 +243,7 @@ class InstitutionalMasterEngine:
                 self.record_history_and_clear("LONG", t['entry'], status, pts)
                 return
 
-            if t['duration'] >= 7 and not t['tp1_hit'] and live['close'] < (t['entry'] + 15.0):
+            if t['duration'] >= 8 and not t['tp1_hit'] and live['close'] < (t['entry'] + 15.0):
                 send_tg(f"⚠️ <b>TIME STALL EXIT</b>\n\nClosed at ${live['close']:.1f}. Screen cleared.")
                 self.record_history_and_clear("LONG", t['entry'], "TIME EXIT", "-5")
 
@@ -233,7 +256,7 @@ class InstitutionalMasterEngine:
                 send_tg(f"🎯 <b>TARGET 1 HIT (+90 pts)</b>\n\nBTC Short: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
 
             if live['low'] <= t['tp2']:
-                send_tg(f"🩸 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Short hit target ${t['tp2']:.1f}! Screen display cleared.")
+                send_tg(f"🩸 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Short hit final target ${t['tp2']:.1f}! Screen display cleared.")
                 self.record_history_and_clear("SHORT", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['high'] >= t['sl']:
@@ -243,54 +266,45 @@ class InstitutionalMasterEngine:
                 self.record_history_and_clear("SHORT", t['entry'], status, pts)
                 return
 
-            if t['duration'] >= 7 and not t['tp1_hit'] and live['close'] > (t['entry'] - 15.0):
+            if t['duration'] >= 8 and not t['tp1_hit'] and live['close'] > (t['entry'] - 15.0):
                 send_tg(f"⚠️ <b>TIME STALL EXIT</b>\n\nClosed at ${live['close']:.1f}. Screen cleared.")
                 self.record_history_and_clear("SHORT", t['entry'], "TIME EXIT", "-5")
 
-    def evaluate_full_confluence(self, candles, sentiment_val, sentiment_label):
+    def evaluate_full_confluence(self, candles, sentiment_val):
         c0 = candles[-1]
         c1 = candles[-2]
 
-        lookback_lows = [c['low'] for c in candles[-16:-3]]
-        lookback_highs = [c['high'] for c in candles[-16:-3]]
-        recent_low = min(lookback_lows)
-        recent_high = max(lookback_highs)
+        recent_low = min(c['low'] for c in candles[-12:-2])
+        recent_high = max(c['high'] for c in candles[-12:-2])
 
-        avg_vol = sum(c['vol'] for c in candles[-7:-1]) / 6.0
+        avg_vol = sum(c['vol'] for c in candles[-6:-1]) / 5.0
         c0_taker_buy = c0['taker_vol']
         c0_taker_sell = c0['vol'] - c0['taker_vol']
-        c0_delta = c0_taker_buy - c0_taker_sell
 
-        buy_pressure_ratio = c0_taker_buy / max(1.0, c0_taker_sell)
-        sell_pressure_ratio = c0_taker_sell / max(1.0, c0_taker_buy)
+        buy_ratio = c0_taker_buy / max(1.0, c0_taker_sell)
+        sell_ratio = c0_taker_sell / max(1.0, c0_taker_buy)
 
+        # Acche moves miss na hone ke liye refined institutional breakout logic
         valid_long = (
-            (c1['low'] < recent_low) and
-            (c0['close'] > c1['open']) and
+            (c1['low'] <= recent_low or c0['low'] <= recent_low) and
             (c0['close'] > c0['open']) and
-            (buy_pressure_ratio >= 1.25) and
-            (c0['vol'] >= avg_vol * 1.1) and
-            (c0_delta > 0) and
-            (sentiment_val >= 20)
+            (buy_ratio >= 1.10) and
+            (c0['vol'] >= avg_vol * 0.90)
         )
 
         valid_short = (
-            (c1['high'] > recent_high) and
-            (c0['close'] < c1['open']) and
+            (c1['high'] >= recent_high or c0['high'] >= recent_high) and
             (c0['close'] < c0['open']) and
-            (sell_pressure_ratio >= 1.25) and
-            (c0['vol'] >= avg_vol * 1.1) and
-            (c0_delta < 0) and
-            (sentiment_val <= 85)
+            (sell_ratio >= 1.10) and
+            (c0['vol'] >= avg_vol * 0.90)
         )
 
         if valid_long:
-            self.setup_score = 90
             entry = round(c0['close'], 1)
-            sl = round(c1['low'] - 10.0, 1)
+            sl = round(min(c0['low'], c1['low']) - 12.0, 1)
             risk = round(entry - sl, 1)
             if risk < 65.0: risk = 75.0; sl = round(entry - 75.0, 1)
-            if risk > 145.0: risk = 135.0; sl = round(entry - 135.0, 1)
+            if risk > 150.0: risk = 135.0; sl = round(entry - 135.0, 1)
 
             tp1 = round(entry + 90.0, 1)
             reward = round(risk * 2.3, 1)
@@ -301,24 +315,25 @@ class InstitutionalMasterEngine:
                 'risk': risk, 'reward': reward, 'tp1_hit': False, 'duration': 0
             }
             GLOBAL_STATE["active_trade"] = self.active_trade
+            GLOBAL_STATE["live_metrics"]["score"] = 92
+            GLOBAL_STATE["live_metrics"]["squeeze_state"] = "LONG BREAKOUT ACTIVE"
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ <b>ACCURATE BTC LONG (PRE-MOVE)</b>\n\n"
+                f"⚡ <b>ACCURATE BTC LONG (BREAKOUT PRE-MOVE)</b>\n\n"
                 f"📍 <b>Entry:</b> ${entry:.1f}\n"
                 f"🛡️ <b>Shield SL:</b> ${sl:.1f} (-${risk:.1f})\n"
                 f"🎯 <b>TP 1:</b> ${tp1:.1f} (+90 pts Auto BE)\n"
                 f"🚀 <b>TP 2:</b> ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 <b>Context:</b> Bear Trap Swept (${recent_low:.1f}) | Buy Vol Ratio {buy_pressure_ratio:.2f}x"
+                f"🌊 <b>Context:</b> Squeeze Release | Buy Pressure: {buy_ratio:.2f}x"
             )
 
         elif valid_short:
-            self.setup_score = 90
             entry = round(c0['close'], 1)
-            sl = round(c1['high'] + 10.0, 1)
+            sl = round(max(c0['high'], c1['high']) + 12.0, 1)
             risk = round(sl - entry, 1)
             if risk < 65.0: risk = 75.0; sl = round(entry + 75.0, 1)
-            if risk > 145.0: risk = 135.0; sl = round(entry - 135.0, 1)
+            if risk > 150.0: risk = 135.0; sl = round(entry - 135.0, 1)
 
             tp1 = round(entry - 90.0, 1)
             reward = round(risk * 2.3, 1)
@@ -329,31 +344,30 @@ class InstitutionalMasterEngine:
                 'risk': risk, 'reward': reward, 'tp1_hit': False, 'duration': 0
             }
             GLOBAL_STATE["active_trade"] = self.active_trade
+            GLOBAL_STATE["live_metrics"]["score"] = 92
+            GLOBAL_STATE["live_metrics"]["squeeze_state"] = "SHORT BREAKOUT ACTIVE"
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ <b>ACCURATE BTC SHORT (PRE-MOVE)</b>\n\n"
+                f"⚡ <b>ACCURATE BTC SHORT (BREAKOUT PRE-MOVE)</b>\n\n"
                 f"📍 <b>Entry:</b> ${entry:.1f}\n"
                 f"🛡️ <b>Shield SL:</b> ${sl:.1f} (-${risk:.1f})\n"
                 f"🎯 <b>TP 1:</b> ${tp1:.1f} (+90 pts Auto BE)\n"
                 f"🩸 <b>TP 2:</b> ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 <b>Context:</b> Bull Trap Swept (${recent_high:.1f}) | Sell Vol Ratio {sell_pressure_ratio:.2f}x"
+                f"🌊 <b>Context:</b> Squeeze Release | Sell Pressure: {sell_ratio:.2f}x"
             )
-        else:
-            self.setup_score = 30
 
-engine_instance = None
+# START WORKER
 if "engine_worker" not in st.session_state:
     st.session_state["engine_worker"] = True
     found = False
     for th in threading.enumerate():
-        if th.name == "ExactRestoredWorker":
+        if th.name == "FineTunedWorker":
             found = True
             break
     if not found:
         eng = InstitutionalMasterEngine()
-        engine_instance = eng
-        t = threading.Thread(target=eng.start, name="ExactRestoredWorker", daemon=True)
+        t = threading.Thread(target=eng.start, name="FineTunedWorker", daemon=True)
         t.start()
 
 # --- STREAMLIT CLEAN VIEWPORT ---
@@ -376,8 +390,8 @@ stats_str = json.dumps({
     "win_rate": current_data["win_rate"]
 })
 trade_str = json.dumps(current_data.get("active_trade"))
+metrics_str = json.dumps(current_data.get("live_metrics"))
 
-# Image layout exact restoration
 terminal_html = """<!DOCTYPE html>
 <html>
 <head>
@@ -401,21 +415,15 @@ terminal_html = """<!DOCTYPE html>
         .stat-val { font-size: 10px; font-weight: 700; color: #fff; }
         
         .btn-history {
-            background: #141c2c;
-            color: #38bdf8;
-            border: 1px solid #1f2a40;
-            border-radius: 4px;
-            padding: 3px 7px;
-            font-size: 9px;
-            font-weight: 700;
-            cursor: pointer;
+            background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40;
+            border-radius: 4px; padding: 3px 7px; font-size: 9px; font-weight: 700; cursor: pointer;
         }
 
         /* 2-HALF WORKSPACE */
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 44px); }
         #chart-zone { width: 100vw; height: 50%; background: #080a0f; }
 
-        /* EXACT LOWER HALF RESTORATION (MATCHING USER SCREENSHOT) */
+        /* EXACT LOWER HALF */
         .lower-deck {
             width: 100vw; height: 50%; background: #080b11;
             border-top: 1px solid #141b27; padding: 10px;
@@ -430,7 +438,7 @@ terminal_html = """<!DOCTYPE html>
         .score-label { font-size: 8px; color: #62697a; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
         .score-val { font-size: 20px; font-weight: 800; color: #fff; margin-top: 2px; }
         .score-right { display: flex; flex-direction: column; align-items: flex-end; }
-        .score-tag { background: #131a26; color: #78859e; font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 700; }
+        .score-tag { background: #131a26; color: #38bdf8; font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 700; }
         .score-sub { font-size: 9px; color: #4e5668; margin-top: 3px; }
 
         .dual-deck {
@@ -444,7 +452,7 @@ terminal_html = """<!DOCTYPE html>
         .row-item { display: flex; justify-content: space-between; font-size: 10px; padding: 3px 0; border-bottom: 1px solid #121824; }
         .row-item:last-child { border-bottom: none; }
 
-        /* MODAL DRAWER FOR HISTORY POPUP */
+        /* MODAL POPUP */
         .modal-bg {
             display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
             background: rgba(0,0,0,0.75); backdrop-filter: blur(4px); z-index: 999;
@@ -460,7 +468,6 @@ terminal_html = """<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <!-- TOP BAR -->
     <div class="top-nav">
         <div class="brand">⚡ SNIPER 5M <span class="badge-scan">SCANNING</span></div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
@@ -473,34 +480,28 @@ terminal_html = """<!DOCTYPE html>
     </div>
 
     <div class="workspace">
-        <!-- UPPER HALF: CANDLESTICK CHART -->
         <div id="chart-zone"></div>
 
-        <!-- LOWER HALF: EXACT MATCH TO USER'S IMAGE -->
         <div class="lower-deck">
-            <!-- INSTITUTIONAL SCORE BANNER -->
             <div class="score-card">
                 <div class="score-left">
                     <span class="score-label">INSTITUTIONAL SETUP</span>
-                    <span class="score-val" id="score-text">30 / 100</span>
+                    <span class="score-val" id="score-text">-- / 100</span>
                 </div>
                 <div class="score-right">
-                    <span class="score-tag">MONITORING SQUEEZE</span>
+                    <span class="score-tag" id="tag-squeeze">MONITORING SQUEEZE</span>
                     <span class="score-sub">Only Closed 5M Candles</span>
                 </div>
             </div>
 
-            <!-- DUAL CARDS: METRICS & TRADE INFO -->
             <div class="dual-deck">
-                <!-- CARD 1: METRICS -->
                 <div class="mini-card">
                     <div class="mini-card-title">METRICS</div>
-                    <div class="row-item"><span>Trend</span><b id="val-trend" style="color:#ff3b30;">BEAR</b></div>
-                    <div class="row-item"><span>RSI</span><b id="val-rsi" style="color:#fff;">66.5</b></div>
-                    <div class="row-item"><span>ATR</span><b id="val-atr" style="color:#f0b90b;">$60.8</b></div>
+                    <div class="row-item"><span>Trend</span><b id="val-trend" style="color:#ff3b30;">--</b></div>
+                    <div class="row-item"><span>RSI</span><b id="val-rsi" style="color:#fff;">--</b></div>
+                    <div class="row-item"><span>ATR</span><b id="val-atr" style="color:#f0b90b;">--</b></div>
                 </div>
 
-                <!-- CARD 2: TRADE INFO -->
                 <div class="mini-card">
                     <div class="mini-card-title">TRADE INFO</div>
                     <div class="row-item"><span>Reward</span><b id="val-reward" style="color:#00e676;">--</b></div>
@@ -511,7 +512,6 @@ terminal_html = """<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- POPUP HISTORY MODAL -->
     <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
         <div class="modal-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
@@ -546,6 +546,18 @@ terminal_html = """<!DOCTYPE html>
         const stats = __STATS_PLACEHOLDER__;
         const historyData = __HISTORY_PLACEHOLDER__;
         const activeTrade = __TRADE_PLACEHOLDER__;
+        const metrics = __METRICS_PLACEHOLDER__;
+
+        // Metrics Live Update
+        if (metrics) {
+            document.getElementById('score-text').innerText = metrics.score + " / 100";
+            document.getElementById('score-text').style.color = metrics.score >= 80 ? "#00e676" : "#fff";
+            document.getElementById('tag-squeeze').innerText = metrics.squeeze_state;
+            document.getElementById('val-trend').innerText = metrics.trend;
+            document.getElementById('val-trend').style.color = metrics.trend === "BULL" ? "#00e676" : "#ff3b30";
+            document.getElementById('val-rsi').innerText = metrics.rsi;
+            document.getElementById('val-atr').innerText = "$" + metrics.atr;
+        }
 
         if (activeTrade) {
             document.getElementById('disp-entry').innerText = "$" + activeTrade.entry.toFixed(1);
@@ -553,16 +565,12 @@ terminal_html = """<!DOCTYPE html>
             document.getElementById('disp-tp').innerText = "$" + activeTrade.tp2.toFixed(1);
             document.getElementById('val-reward').innerText = "+$" + activeTrade.reward.toFixed(1);
             document.getElementById('val-risk').innerText = "-$" + activeTrade.risk.toFixed(1);
-            document.getElementById('score-text').innerText = "90 / 100";
-            document.getElementById('score-text').style.color = "#00e676";
         } else {
             document.getElementById('disp-entry').innerText = "--";
             document.getElementById('disp-sl').innerText = "--";
             document.getElementById('disp-tp').innerText = "--";
             document.getElementById('val-reward').innerText = "--";
             document.getElementById('val-risk').innerText = "--";
-            document.getElementById('score-text').innerText = "30 / 100";
-            document.getElementById('score-text').style.color = "#fff";
         }
 
         document.getElementById('stat-total').innerText = stats.total;
@@ -592,13 +600,19 @@ terminal_html = """<!DOCTYPE html>
             if (e.target.id === 'modal-bg') toggleModal(false);
         }
 
+        // Accurate TimeScale Synchronized Lightweight Chart
         const chartZone = document.getElementById('chart-zone');
         const chart = LightweightCharts.createChart(chartZone, {
             width: chartZone.clientWidth, height: chartZone.clientHeight,
             layout: { background: { color: '#080a0f' }, textColor: '#787b86' },
             grid: { vertLines: { color: '#111622' }, horzLines: { color: '#111622' } },
             rightPriceScale: { borderColor: '#192130' },
-            timeScale: { borderColor: '#192130', timeVisible: true, secondsVisible: false }
+            timeScale: { 
+                borderColor: '#192130', 
+                timeVisible: true, 
+                secondsVisible: false,
+                shiftVisibleRangeOnNewBar: true
+            }
         });
 
         const series = chart.addCandlestickSeries({
@@ -671,6 +685,6 @@ terminal_html = """<!DOCTYPE html>
         };
     </script>
 </body>
-</html>""".replace("__STATS_PLACEHOLDER__", stats_str).replace("__HISTORY_PLACEHOLDER__", history_str).replace("__TRADE_PLACEHOLDER__", trade_str)
+</html>""".replace("__STATS_PLACEHOLDER__", stats_str).replace("__HISTORY_PLACEHOLDER__", history_str).replace("__TRADE_PLACEHOLDER__", trade_str).replace("__METRICS_PLACEHOLDER__", metrics_str)
 
 components.html(terminal_html, height=850, scrolling=False)
