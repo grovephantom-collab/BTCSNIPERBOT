@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# ENTERPRISE PRE-MOVE RADAR (REDUCED COMPACT ROW GAPS)
+# ENTERPRISE PRE-MOVE RADAR (FIXED BOTTOM OVERLAP & FULLY VISIBLE RISK/ALERTS)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -270,9 +270,11 @@ if "engine_worker" not in st.session_state:
 # --- STREAMLIT DASHBOARD VIEWPORT ---
 st.set_page_config(page_title="BTC SNIPER 5M", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
+# Hide Streamlit Default Floating Badges & Padding
 st.markdown("""
 <style>
     header, footer, #MainMenu { display: none !important; }
+    .stDeployButton, [data-testid="stStatusWidget"], footer, .viewerBadge_container__1QSob { display: none !important; }
     .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; }
     iframe { width: 100vw !important; height: 100vh !important; border: none !important; }
 </style>
@@ -317,10 +319,10 @@ terminal_html = """<!DOCTYPE html>
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
         #chart-zone { width: 100vw; flex: 1; background: #080a0f; }
 
-        /* TIGHT COMPACT LOWER DECK WITH MINIMAL GAPS */
+        /* SAFE BOTTOM PADDING - KUCH BHI CHIPEGA NAHI */
         .lower-deck {
             width: 100vw; background: #080b11;
-            border-top: 1px solid #141b27; padding: 4px 8px 6px 8px;
+            border-top: 1px solid #141b27; padding: 4px 8px 18px 8px;
             display: flex; flex-direction: column; gap: 4px;
         }
         
@@ -335,13 +337,12 @@ terminal_html = """<!DOCTYPE html>
         .score-tag { background: #131a26; color: #38bdf8; font-size: 8px; padding: 1px 5px; border-radius: 3px; font-weight: 700; line-height: 1.2; }
         .score-sub { font-size: 7.5px; color: #4e5668; margin-top: 1px; line-height: 1; }
 
-        /* REDUCED GAPS IN DUAL DECK */
         .dual-deck {
             display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
         }
         .mini-card {
             background: #0d121c; border: 1px solid #151d2d; border-radius: 5px;
-            padding: 4px 7px; display: flex; flex-direction: column;
+            padding: 5px 7px 6px 7px; display: flex; flex-direction: column;
         }
         .mini-card-title { font-size: 7.5px; color: #62697a; font-weight: 800; text-transform: uppercase; margin-bottom: 2px; }
         .row-item { display: flex; justify-content: space-between; font-size: 9.5px; padding: 2px 0; border-bottom: 1px solid #121824; }
@@ -388,7 +389,6 @@ terminal_html = """<!DOCTYPE html>
                 </div>
             </div>
 
-            <!-- DUAL CARDS: TIGHT COMPACT GAPS -->
             <div class="dual-deck">
                 <div class="mini-card">
                     <div class="mini-card-title">METRICS</div>
