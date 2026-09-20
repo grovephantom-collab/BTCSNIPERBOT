@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# ENTERPRISE PRE-MOVE SNIPER (SYNTAX CRASH FIXED + AUTO CLEAR + PERSISTENT)
+# BTC SNIPER: POPUP HISTORY DRAWER + AUTO-RECONNECTING LIVE ENGINE
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -71,10 +71,9 @@ class InstitutionalMasterEngine:
         self.last_sentiment_check = 0
         send_tg(
             "🟢 <b>SYSTEM LIVE & VERIFIED</b>\n\n"
-            "• Engine: Institutional Pre-Move Radar\n"
-            "• Auto-Clear On Exit: Enabled\n"
-            "• Persistent Stats: Connected\n"
-            "All crash bugs patched. Signals will ring here."
+            "• Live Auto-Reconnect Engine: Active\n"
+            "• Top Bar History Drawer: Integrated\n"
+            "Signals will ring here directly before moves."
         )
 
     def record_history_and_clear(self, trade_type, entry, result, pnl_pts):
@@ -98,7 +97,7 @@ class InstitutionalMasterEngine:
             "pts": pnl_pts
         }
         GLOBAL_STATE["history"].insert(0, record)
-        if len(GLOBAL_STATE["history"]) > 50:
+        if len(GLOBAL_STATE["history"]) > 60:
             GLOBAL_STATE["history"].pop()
 
         self.active_trade = None
@@ -168,7 +167,7 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] + 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 <b>TARGET 1 HIT (+90 pts)</b>\n\nBTC Long: ${t['tp1']:.1f}\nSL locked to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
+                send_tg(f"🎯 <b>TARGET 1 HIT (+90 pts)</b>\n\nBTC Long: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
 
             if live['high'] >= t['tp2']:
                 send_tg(f"🚀 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Long hit target${t['tp2']:.1f}!")
@@ -191,7 +190,7 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] - 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 <b>TARGET 1 HIT (+90 pts)</b>\n\nBTC Short: ${t['tp1']:.1f}\nSL locked to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
+                send_tg(f"🎯 <b>TARGET 1 HIT (+90 pts)</b>\n\nBTC Short: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
 
             if live['low'] <= t['tp2']:
                 send_tg(f"🩸 <b>RUNNER HIT (+${t['reward']:.1f})</b>\n\nBTC Short hit target${t['tp2']:.1f}!")
@@ -268,8 +267,7 @@ class InstitutionalMasterEngine:
                 f"📍 <b>Entry:</b> ${entry:.1f}\n"
                 f"🛡️ <b>Shield SL:</b> ${sl:.1f} (-${risk:.1f})\n"
                 f"🎯 <b>TP 1:</b> ${tp1:.1f} (+90 pts Auto BE)\n"
-                f"🚀 <b>TP 2:</b> ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 <b>Trap Context:</b> Bear Trap Swept (${recent_low:.1f}) | Taker Buy Ratio {buy_pressure_ratio:.2f}x"
+                f"🚀 <b>TP 2:</b> ${tp2:.1f} (+${reward:.1f} Runner)"
             )
 
         elif valid_short:
@@ -277,7 +275,7 @@ class InstitutionalMasterEngine:
             sl = round(c1['high'] + 10.0, 1)
             risk = round(sl - entry, 1)
             if risk < 65.0: risk = 75.0; sl = round(entry + 75.0, 1)
-            if risk > 145.0: risk = 135.0; sl = round(entry - 135.0, 1)
+            if risk > 145.0: risk = 135.0; sl = round(entry + 135.0, 1)
 
             tp1 = round(entry - 90.0, 1)
             reward = round(risk * 2.3, 1)
@@ -295,8 +293,7 @@ class InstitutionalMasterEngine:
                 f"📍 <b>Entry:</b> ${entry:.1f}\n"
                 f"🛡️ <b>Shield SL:</b> ${sl:.1f} (-${risk:.1f})\n"
                 f"🎯 <b>TP 1:</b> ${tp1:.1f} (+90 pts Auto BE)\n"
-                f"🩸 <b>TP 2:</b> ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
-                f"🌊 <b>Trap Context:</b> Bull Trap Swept (${recent_high:.1f}) | Taker Sell Ratio {sell_pressure_ratio:.2f}x"
+                f"🩸 <b>TP 2:</b> ${tp2:.1f} (+${reward:.1f} Runner)"
             )
 
 # START SINGLETON ENGINE
@@ -312,7 +309,7 @@ if "engine_worker" not in st.session_state:
         t = threading.Thread(target=eng.start, name="HistoryQuantWorker", daemon=True)
         t.start()
 
-# --- STREAMLIT DASHBOARD UI ---
+# --- STREAMLIT CLEAN VIEWPORT ---
 st.set_page_config(page_title="BTC SNIPER 5M", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
@@ -333,7 +330,6 @@ stats_str = json.dumps({
 })
 trade_str = json.dumps(current_data.get("active_trade"))
 
-# Pure string template - zero f-string curly bracket collision
 terminal_html = """<!DOCTYPE html>
 <html>
 <head>
@@ -343,24 +339,57 @@ terminal_html = """<!DOCTYPE html>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100vh; overflow: hidden; }
-        .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 6px 10px; font-size: 11px; height: 40px; gap: 8px; overflow-x: auto; white-space: nowrap; }
+        .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 6px 8px; font-size: 11px; height: 44px; gap: 6px; overflow-x: auto; white-space: nowrap; }
         .brand { font-weight: 800; color: #fff; font-size: 11px; }
-        .stat-card { display: flex; flex-direction: column; min-width: 58px; }
+        .stat-card { display: flex; flex-direction: column; min-width: 50px; }
         .stat-label { font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 700; }
         .stat-val { font-size: 10px; font-weight: 700; color: #fff; }
-        .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 40px); }
-        #chart-zone { width: 100vw; height: 50vh; background: #080a0f; }
-        .side-bar {
-            width: 100vw; height: calc(50vh - 40px); background: #0b0f17;
-            border-top: 1px solid #161d2b; padding: 8px 10px;
-            display: grid; grid-template-columns: 1fr 1.3fr; gap: 6px;
+        
+        /* POPUP BUTTON IN TOP BAR */
+        .btn-history {
+            background: #1a2336;
+            color: #38bdf8;
+            border: 1px solid #2a374f;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 10px;
+            font-weight: 700;
+            cursor: pointer;
         }
-        .card { background: #101520; border: 1px solid #1a2233; border-radius: 6px; padding: 6px 8px; font-size: 11px; display: flex; flex-direction: column; }
-        .card-title { font-size: 9px; color: #848e9c; font-weight: 700; margin-bottom: 4px; display: flex; justify-content: space-between; }
-        .row { display: flex; justify-content: space-between; padding: 2px 0; font-size: 10px; border-bottom: 1px solid #151c2a; }
-        .row:last-child { border-bottom: none; }
-        .history-list { overflow-y: auto; max-height: 120px; font-size: 9px; }
-        .history-item { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid #141b27; }
+        .btn-history:active { background: #2a374f; }
+
+        #chart-zone { width: 100vw; height: calc(100vh - 44px); background: #080a0f; }
+
+        /* MODAL POPUP DRAWER */
+        .modal-bg {
+            display: none;
+            position: fixed;
+            top: 0; left: 0;
+            width: 100vw; height: 100vh;
+            background: rgba(0,0,0,0.7);
+            backdrop-filter: blur(3px);
+            z-index: 999;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-card {
+            background: #0f141e;
+            border: 1px solid #1f2a3e;
+            border-radius: 8px;
+            width: 90vw;
+            max-width: 420px;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            padding: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+        }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .close-btn { color: #848e9c; font-size: 18px; font-weight: 800; cursor: pointer; border: none; background: transparent; }
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
+        .stat-box { background: #151c2a; padding: 6px 8px; border-radius: 4px; font-size: 10px; display: flex; justify-content: space-between; }
+        .history-list { overflow-y: auto; max-height: 250px; font-size: 10px; }
+        .history-item { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #182133; }
         .tag-long { color: #00e676; font-weight: 700; }
         .tag-short { color: #ff3b30; font-weight: 700; }
         .res-tp { color: #00e676; font-weight: 700; }
@@ -370,36 +399,36 @@ terminal_html = """<!DOCTYPE html>
 </head>
 <body>
     <div class="top-nav">
-        <div class="brand">⚡ PRE-MOVE SNIPER</div>
+        <div class="brand">⚡ PRE-MOVE</div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SHIELD SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
         <div class="stat-card"><div class="stat-label">RUNNER TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
+        <button class="btn-history" onclick="toggleModal(true)">📜 HISTORY</button>
         <div style="margin-left: auto; display: flex; align-items: center; gap: 6px;">
             <b id="live-price" style="color: #f0b90b; font-size: 13px;">...</b>
         </div>
     </div>
-    <div class="workspace">
-        <div id="chart-zone"></div>
-        <div class="side-bar">
-            <div class="card">
-                <div class="card-title">
-                    <span>PERSISTENT STATS</span>
-                    <span id="win-rate-badge" style="padding:1px 4px; border-radius:3px; background:rgba(0,230,118,0.2); color:#00e676;">0% WIN</span>
-                </div>
-                <div class="row"><span>Total Signals</span><b id="stat-total" style="color:#fff;">0</b></div>
-                <div class="row"><span>Target 1/2 Hit</span><b id="stat-tp" style="color:#00e676;">0 TP</b></div>
-                <div class="row"><span>Stop Loss Hit</span><b id="stat-sl" style="color:#ff3b30;">0 SL</b></div>
-                <div class="row"><span>Win Percentage</span><b id="stat-rate" style="color:#38bdf8;">0.0%</b></div>
-            </div>
 
-            <div class="card">
-                <div class="card-title">
-                    <span>SAVED SIGNALS HISTORY</span>
-                    <span style="color:#848e9c;">TIME | RES | PTS</span>
-                </div>
-                <div id="history-container" class="history-list">
-                    <div style="color:#555; text-align:center; padding:10px 0;">No trades recorded yet...</div>
-                </div>
+    <div id="chart-zone"></div>
+
+    <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
+        <div class="modal-card">
+            <div class="modal-header">
+                <span style="font-weight: 800; color: #fff; font-size: 12px;">PERFORMANCE & SAVED SIGNALS</span>
+                <button class="close-btn" onclick="toggleModal(false)">✕</button>
+            </div>
+            <div class="stats-grid">
+                <div class="stat-box"><span>Total Signals</span><b id="stat-total" style="color:#fff;">0</b></div>
+                <div class="stat-box"><span>Win Rate</span><b id="stat-rate" style="color:#00e676;">0.0%</b></div>
+                <div class="stat-box"><span>TP Secured</span><b id="stat-tp" style="color:#00e676;">0 TP</b></div>
+                <div class="stat-box"><span>SL Hit</span><b id="stat-sl" style="color:#ff3b30;">0 SL</b></div>
+            </div>
+            <div style="font-size: 9px; color: #62697a; font-weight: 700; margin-bottom: 4px; display: flex; justify-content: space-between;">
+                <span>TIME | DIRECTION</span>
+                <span>RESULT | PTS</span>
+            </div>
+            <div id="history-container" class="history-list">
+                <div style="color:#555; text-align:center; padding:15px 0;">No trades recorded yet...</div>
             </div>
         </div>
     </div>
@@ -423,7 +452,6 @@ terminal_html = """<!DOCTYPE html>
         document.getElementById('stat-tp').innerText = stats.tp + " TP";
         document.getElementById('stat-sl').innerText = stats.sl + " SL";
         document.getElementById('stat-rate').innerText = stats.win_rate + "%";
-        document.getElementById('win-rate-badge').innerText = stats.win_rate + "% WIN";
 
         const histCont = document.getElementById('history-container');
         if (historyData && historyData.length > 0) {
@@ -433,12 +461,18 @@ terminal_html = """<!DOCTYPE html>
                 let typeClass = item.type === "LONG" ? "tag-long" : "tag-short";
                 histCont.innerHTML += `
                     <div class="history-item">
-                        <span>${item.time} <b class="${typeClass}">${item.type}</b></span>
-                        <span class="${resClass}">${item.result}</span>
-                        <span style="color:#fff;">${item.pts}</span>
+                        <span>${item.time} <b class="${typeClass}">${item.type}</b> @ $${item.entry.toFixed(1)}</span>
+                        <span><b class="${resClass}">${item.result}</b> (${item.pts} pts)</span>
                     </div>
                 `;
             });
+        }
+
+        function toggleModal(show) {
+            document.getElementById('modal-bg').style.display = show ? 'flex' : 'none';
+        }
+        function handleBgClick(e) {
+            if (e.target.id === 'modal-bg') toggleModal(false);
         }
 
         const chartZone = document.getElementById('chart-zone');
@@ -458,7 +492,9 @@ terminal_html = """<!DOCTYPE html>
 
         let candles = [];
         let ws = null;
+        let lastWsPing = Date.now();
 
+        // 1. Initial REST History Load
         function syncData() {
             fetch('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=80')
                 .then(r => r.json())
@@ -474,10 +510,12 @@ terminal_html = """<!DOCTYPE html>
         }
         syncData();
 
+        // 2. Resilient WebSocket Live Stream
         function connectWS() {
             if (ws) { try { ws.close(); } catch(e) {} }
             ws = new WebSocket("wss://fstream.binance.com/ws/btcusdt@kline_5m");
             ws.onmessage = (e) => {
+                lastWsPing = Date.now();
                 const k = JSON.parse(e.data).k;
                 const c = { 
                     time: Math.floor(k.t / 1000), open: parseFloat(k.o), 
@@ -491,8 +529,28 @@ terminal_html = """<!DOCTYPE html>
                     else if (c.time > candles[last].time) candles.push(c);
                 }
             };
-            ws.onclose = () => { setTimeout(connectWS, 2500); };
+            ws.onclose = () => { setTimeout(connectWS, 1500); };
         }
+
+        // 3. Fallback Heartbeat Monitor: agar WS drop ho toh REST se live rakhe
+        setInterval(() => {
+            if (Date.now() - lastWsPing > 5000) {
+                fetch('https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT')
+                    .then(r => r.json())
+                    .then(p => {
+                        const pr = parseFloat(p.price);
+                        document.getElementById('live-price').innerText = "$" + pr.toFixed(1);
+                        if (candles.length > 0) {
+                            const last = candles[candles.length - 1];
+                            last.close = pr;
+                            last.high = Math.max(last.high, pr);
+                            last.low = Math.min(last.low, pr);
+                            series.update(last);
+                        }
+                    }).catch(err => {});
+                connectWS();
+            }
+        }, 3000);
 
         window.onresize = () => {
             chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
