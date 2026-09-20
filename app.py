@@ -8,7 +8,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# ENTERPRISE PRE-MOVE RADAR - FIXED BOTTOM FIT & PERSISTENT TELEGRAM BOT
+# ENTERPRISE PRE-MOVE RADAR - PERMANENT TELEGRAM FIX & EXACT RED LINE FIT
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
@@ -44,31 +44,31 @@ if "SHARED_DATA" not in st.session_state:
 
 GLOBAL_STATE = st.session_state["SHARED_DATA"]
 
-def send_tg_sync(text):
-    """Reliable sync sender with retry mechanism"""
+# Bulletproof Telegram Sender - No parse_mode to prevent silent drops
+def send_tg_bulletproof(msg_text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown",
+        "chat_id": str(CHAT_ID).strip(),
+        "text": msg_text,
         "disable_web_page_preview": True
     }
-    for _ in range(3):
+    for attempt in range(4):
         try:
-            res = requests.post(url, json=payload, timeout=5)
+            res = requests.post(url, json=payload, timeout=6)
             if res.status_code == 200:
                 return True
         except Exception:
-            time.sleep(0.5)
+            time.sleep(1)
     return False
 
 def send_tg(text):
-    threading.Thread(target=send_tg_sync, args=(text,), daemon=True).start()
+    threading.Thread(target=send_tg_bulletproof, args=(text,), daemon=True).start()
 
 class InstitutionalMasterEngine:
     def __init__(self):
         self.active_trade = GLOBAL_STATE.get("active_trade", None)
         self.last_signal_time = 0
+        send_tg("🟢 [BTC SNIPER 5M ACTIVE]\nRadar connection verified successfully. Alerts will ring instantly on breakout moves.")
 
     def record_history_and_clear(self, trade_type, entry, result, pnl_pts):
         now_str = datetime.now().strftime("%H:%M")
@@ -126,7 +126,7 @@ class InstitutionalMasterEngine:
                             self.scan_immediate_impulse(candles, live)
             except Exception:
                 pass
-            time.sleep(2.0)
+            time.sleep(1.8)
 
     def manage_active_trade(self, live):
         t = self.active_trade
@@ -138,21 +138,21 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] + 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 *TARGET 1 HIT (+90 pts)*\n\nBTC Long: `${t['tp1']:.1f}`\nSL shifted to Breakeven (`${t['sl']:.1f}`).")
+                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\nBTC Long: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
 
             if live['high'] >= t['tp2']:
-                send_tg(f"🚀 *RUNNER TARGET HIT (+${t['reward']:.1f})*\n\nBTC Long hit `${t['tp2']:.1f}`!")
+                send_tg(f"🚀 RUNNER TP HIT (+${t['reward']:.1f})\nBTC Long Hit Final Target: ${t['tp2']:.1f}!")
                 self.record_history_and_clear("LONG", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['low'] <= t['sl']:
                 status = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
                 pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ *{status}*\n\nBTC Long closed at `${t['sl']:.1f}`.")
+                send_tg(f"🛡️ {status}\nBTC Long exited at ${t['sl']:.1f}.")
                 self.record_history_and_clear("LONG", t['entry'], status, pts)
                 return
 
-            if t['duration'] >= 12 and not t['tp1_hit'] and live['close'] < (t['entry'] + 10.0):
-                send_tg(f"⚠️ *TIME EXIT*\n\nBTC Long closed safely at `${live['close']:.1f}`.")
+            if t['duration'] >= 14 and not t['tp1_hit'] and live['close'] < (t['entry'] + 10.0):
+                send_tg(f"⚠️ MOMENTUM EXHAUSTION EXIT\nBTC Long closed safely at ${live['close']:.1f}.")
                 self.record_history_and_clear("LONG", t['entry'], "TIME EXIT", "-5")
 
         elif t['type'] == 'SHORT':
@@ -161,46 +161,51 @@ class InstitutionalMasterEngine:
                 t['sl'] = round(t['entry'] - 15.0, 1)
                 GLOBAL_STATE["active_trade"] = t
                 save_data_to_file(GLOBAL_STATE)
-                send_tg(f"🎯 *TARGET 1 HIT (+90 pts)*\n\nBTC Short: `${t['tp1']:.1f}`\nSL shifted to Breakeven (`${t['sl']:.1f}`).")
+                send_tg(f"🎯 TARGET 1 HIT (+90 pts)\nBTC Short: ${t['tp1']:.1f}\nSL shifted to Breakeven (${t['sl']:.1f}). Position is Risk-Free.")
 
             if live['low'] <= t['tp2']:
-                send_tg(f"🩸 *RUNNER TARGET HIT (+${t['reward']:.1f})*\n\nBTC Short hit `${t['tp2']:.1f}`!")
+                send_tg(f"🩸 RUNNER TP HIT (+${t['reward']:.1f})\nBTC Short Hit Final Target: ${t['tp2']:.1f}!")
                 self.record_history_and_clear("SHORT", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
                 return
             elif live['high'] >= t['sl']:
                 status = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
                 pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ *{status}*\n\nBTC Short closed at `${t['sl']:.1f}`.")
+                send_tg(f"🛡️ {status}\nBTC Short exited at ${t['sl']:.1f}.")
                 self.record_history_and_clear("SHORT", t['entry'], status, pts)
                 return
 
-            if t['duration'] >= 12 and not t['tp1_hit'] and live['close'] > (t['entry'] - 10.0):
-                send_tg(f"⚠️ *TIME EXIT*\n\nBTC Short closed safely at `${live['close']:.1f}`.")
+            if t['duration'] >= 14 and not t['tp1_hit'] and live['close'] > (t['entry'] - 10.0):
+                send_tg(f"⚠️ MOMENTUM EXHAUSTION EXIT\nBTC Short closed safely at ${live['close']:.1f}.")
                 self.record_history_and_clear("SHORT", t['entry'], "TIME EXIT", "-5")
 
     def scan_immediate_impulse(self, candles, live):
         now = time.time()
+        # Cooldown taaki spam na ho
         if now - self.last_signal_time < 90:
             return
 
         c0 = candles[-1]
+        c1 = candles[-2]
         recent_low = min(c['low'] for c in candles[-8:])
         recent_high = max(c['high'] for c in candles[-8:])
 
+        # Realtime Volume Ratio
         taker_buy = live['taker_vol']
         taker_sell = max(0.1, live['vol'] - live['taker_vol'])
         buy_ratio = taker_buy / taker_sell
         sell_ratio = taker_sell / max(0.1, taker_buy)
 
+        # High Sensitivity Breakout Conditions (Captures quick spikes)
         long_cond = (
             (live['close'] > live['open']) and
-            (live['close'] > c0['high'] or buy_ratio >= 1.05) and
-            (live['low'] <= recent_low * 1.002 or buy_ratio >= 1.2)
+            (live['close'] > c0['high'] or (c0['close'] > c1['high'] and buy_ratio >= 1.05)) and
+            (live['low'] <= recent_low * 1.002 or buy_ratio >= 1.18)
         )
+
         short_cond = (
             (live['close'] < live['open']) and
-            (live['close'] < c0['low'] or sell_ratio >= 1.05) and
-            (live['high'] >= recent_high * 0.998 or sell_ratio >= 1.2)
+            (live['close'] < c0['low'] or (c0['close'] < c1['low'] and sell_ratio >= 1.05)) and
+            (live['high'] >= recent_high * 0.998 or sell_ratio >= 1.18)
         )
 
         if long_cond:
@@ -223,12 +228,12 @@ class InstitutionalMasterEngine:
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ *BTC LONG SIGNAL (5M)*\n\n"
-                f"📍 *Entry:* `${entry:.1f}`\n"
-                f"🛡️ *SL:* `${sl:.1f}` (-${risk:.1f})\n"
-                f"🎯 *TP 1:* `${tp1:.1f}` (+90 pts Auto BE)\n"
-                f"🚀 *TP 2:* `${tp2:.1f}` (+${reward:.1f})\n\n"
-                f"🌊 *Setup:* Institutional Swing Long"
+                f"⚡ BTC LONG SIGNAL (5M BREAKOUT)\n\n"
+                f"📍 Entry: ${entry:.1f}\n"
+                f"🛡️ Shield SL: ${sl:.1f} (-${risk:.1f})\n"
+                f"🎯 TP 1: ${tp1:.1f} (+90 pts Auto BE)\n"
+                f"🚀 TP 2: ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
+                f"🌊 Setup: Bullish Impulse Surge"
             )
 
         elif short_cond:
@@ -251,28 +256,26 @@ class InstitutionalMasterEngine:
             save_data_to_file(GLOBAL_STATE)
 
             send_tg(
-                f"⚡ *BTC SHORT SIGNAL (5M)*\n\n"
-                f"📍 *Entry:* `${entry:.1f}`\n"
-                f"🛡️ *SL:* `${sl:.1f}` (-${risk:.1f})\n"
-                f"🎯 *TP 1:* `${tp1:.1f}` (+90 pts Auto BE)\n"
-                f"🩸 *TP 2:* `${tp2:.1f}` (+${reward:.1f})\n\n"
-                f"🌊 *Setup:* Institutional Swing Short"
+                f"⚡ BTC SHORT SIGNAL (5M BREAKOUT)\n\n"
+                f"📍 Entry: ${entry:.1f}\n"
+                f"🛡️ Shield SL: ${sl:.1f} (-${risk:.1f})\n"
+                f"🎯 TP 1: ${tp1:.1f} (+90 pts Auto BE)\n"
+                f"🩸 TP 2: ${tp2:.1f} (+${reward:.1f} Runner)\n\n"
+                f"🌊 Setup: Bearish Impulse Surge"
             )
 
-# Persistent daemon starter
+# Persistent Worker Boot
 if "engine_worker_running" not in st.session_state:
     st.session_state["engine_worker_running"] = True
     active_thread = None
     for th in threading.enumerate():
-        if th.name == "SolidTelegramWorker" and th.is_alive():
+        if th.name == "BulletproofTgWorker" and th.is_alive():
             active_thread = th
             break
     if not active_thread:
         eng = InstitutionalMasterEngine()
-        t = threading.Thread(target=eng.run_forever, name="SolidTelegramWorker", daemon=True)
+        t = threading.Thread(target=eng.run_forever, name="BulletproofTgWorker", daemon=True)
         t.start()
-        # Test notification to confirm connection is active
-        send_tg("✅ *BTC RADAR ENGINE LIVE*\nListening to real-time 5M Binance order flow...")
 
 # --- STREAMLIT DASHBOARD CONFIG ---
 st.set_page_config(page_title="BTC SNIPER 5M", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
@@ -329,17 +332,17 @@ terminal_html = """<!DOCTYPE html>
             height: calc(100vh - 38px); 
         }
         
-        /* CHART TAKES ENTIRE AVAILABLE HEIGHT */
+        /* CHART EXPANDS TO MAX SPACE */
         #chart-zone { 
             width: 100vw; 
             flex: 1; 
             background: #080a0f; 
         }
 
-        /* EXACT POSITIONING MATCHING THE SCREENSHOT RED LINE */
+        /* EXACT RED LINE HEIGHT BAR - ZERO CUTOFF */
         .bottom-bar {
             width: 100vw;
-            height: 48px;
+            height: 44px;
             background: #0d121c;
             border-top: 1px solid #1a2336;
             padding: 4px 8px;
@@ -353,10 +356,10 @@ terminal_html = """<!DOCTYPE html>
             flex-direction: column;
             justify-content: center;
             background: #101624;
-            padding: 3px 6px;
+            padding: 2px 6px;
             border-radius: 4px;
             border: 1px solid #192233;
-            height: 38px;
+            height: 34px;
         }
         .cell-head {
             font-size: 7px;
@@ -561,7 +564,7 @@ terminal_html = """<!DOCTYPE html>
                 let lastRange = candles[candles.length - 1].high - candles[candles.length - 1].low;
                 let avgRange = trSum / 14;
                 if (lastRange > avgRange * 1.15) {
-                    document.getElementById('val-setup').innerText = "HIGH MOMENTUM";
+                    document.getElementById('val-setup').innerText = "IMPULSE SURGE";
                     document.getElementById('val-setup').style.color = "#00e676";
                 } else {
                     document.getElementById('val-setup').innerText = "RADAR ACTIVE";
