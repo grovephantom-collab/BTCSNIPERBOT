@@ -4,7 +4,7 @@ import threading
 import time
 import requests
 
-# --- 24/7 CLOUD SERVER TRADING ENGINE (TELEGRAM DIRECT) ---
+# --- 24/7 CLOUD SERVER ENGINE (TELEGRAM DIRECT ON 5M CLOSED CANDLES) ---
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
 CHAT_ID = "7886716805"
 
@@ -24,7 +24,7 @@ def calc_ema(period, values):
 
 def calc_atr(candles, p=14):
     if len(candles) < p + 1:
-        return 120.0
+        return 140.0
     trs = []
     for i in range(len(candles)-p, len(candles)):
         h = candles[i]['high']
@@ -48,110 +48,135 @@ def calc_rsi(closes, p=14):
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
 
-class CloudTrader:
+class InstitutionalEngine:
     def __init__(self):
         self.active_trade = None
-        self.last_alert_candle = 0
+        self.last_processed_candle_time = 0
 
     def run(self):
         while True:
             try:
-                r = requests.get("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=80", timeout=8)
+                # Sirf complete closed candles uthayenge
+                r = requests.get("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=150", timeout=8)
                 data = r.json()
-                candles = [{
-                    'time': int(d[0]/1000),
-                    'open': float(d[1]), 'high': float(d[2]),
-                    'low': float(d[3]), 'close': float(d[4])
-                } for d in data]
+                if len(data) >= 80:
+                    # data[-1] abhi live ban rahi hai, data[-2] confirm closed candle hai
+                    closed_kline = data[-2]
+                    candle_time = int(closed_kline[0] / 1000)
 
-                if len(candles) >= 50:
-                    self.evaluate(candles)
+                    # Har closed candle par sirf 1 baar calculation hogi
+                    if candle_time > self.last_processed_candle_time:
+                        self.last_processed_candle_time = candle_time
+                        candles = [{
+                            'time': int(d[0]/1000),
+                            'open': float(d[1]), 'high': float(d[2]),
+                            'low': float(d[3]), 'close': float(d[4]),
+                            'volume': float(d[5])
+                        } for d in data[:-1]]
+
+                        current_live = {
+                            'high': float(data[-1][2]),
+                            'low': float(data[-1][3]),
+                            'close': float(data[-1][4])
+                        }
+                        self.evaluate(candles, current_live)
             except Exception:
                 pass
-            time.sleep(3)
+            time.sleep(10)
 
-    def evaluate(self, candles):
-        current = candles[-1]
+    def evaluate(self, candles, live_candle):
+        c_last = candles[-1]
         closes = [c['close'] for c in candles]
         atr = calc_atr(candles, 14)
         ema20 = calc_ema(20, closes)
         ema50 = calc_ema(50, closes)
         rsi = calc_rsi(closes, 14)
-        is_bull = ema20 > ema50
 
+        # 1. RUNNING POSITION SL/TP TRACKING
         if self.active_trade:
             if self.active_trade['type'] == 'LONG':
-                if current['high'] >= self.active_trade['tp']:
-                    send_tg(f"🎯 *TARGET ACHIEVED (+$ {self.active_trade['reward']:.1f})*\\n\\nBTC Long target hit at ${self.active_trade['tp']:.1f}!")
+                if live_candle['high'] >= self.active_trade['tp']:
+                    send_tg(f"🎯 *TARGET HIT (+$ {self.active_trade['reward']:.1f})*\\n\\nBTC Long target reached at ${self.active_trade['tp']:.1f}! Book Profit.")
                     self.active_trade = None
-                elif current['low'] <= self.active_trade['sl']:
-                    send_tg(f"🛡️ *STOP LOSS HIT*\\n\\nBTC Long exited at ${current['low']:.1f}.")
+                elif live_candle['low'] <= self.active_trade['sl']:
+                    send_tg(f"🛡️ *STOP LOSS HIT*\\n\\nBTC Long safe exit at ${self.active_trade['sl']:.1f}.")
                     self.active_trade = None
             elif self.active_trade['type'] == 'SHORT':
-                if current['low'] <= self.active_trade['tp']:
-                    send_tg(f"🎯 *TARGET ACHIEVED (+$ {self.active_trade['reward']:.1f})*\\n\\nBTC Short target hit at ${self.active_trade['tp']:.1f}!")
+                if live_candle['low'] <= self.active_trade['tp']:
+                    send_tg(f"🎯 *TARGET HIT (+$ {self.active_trade['reward']:.1f})*\\n\\nBTC Short target reached at ${self.active_trade['tp']:.1f}! Book Profit.")
                     self.active_trade = None
-                elif current['high'] >= self.active_trade['sl']:
-                    send_tg(f"🛡️ *STOP LOSS HIT*\\n\\nBTC Short exited at ${current['high']:.1f}.")
+                elif live_candle['high'] >= self.active_trade['sl']:
+                    send_tg(f"🛡️ *STOP LOSS HIT*\\n\\nBTC Short safe exit at ${self.active_trade['sl']:.1f}.")
                     self.active_trade = None
             return
 
-        if current['time'] <= self.last_alert_candle:
-            return
+        # 2. ACCURATE BIG MOVE SETUP (Consolidation Squeeze Breakout)
+        # Pichhli 12 candles (1 hour) ka high/low consolidation zone
+        lookback = candles[-13:-1]
+        consolidation_high = max(c['high'] for c in lookback)
+        consolidation_low = min(c['low'] for c in lookback)
+        box_range = consolidation_high - consolidation_low
 
-        prev_candles = candles[-8:-1]
-        high_lvl = max(c['high'] for c in prev_candles)
-        low_lvl = min(c['low'] for c in prev_candles)
-        body = abs(current['close'] - current['open'])
+        # Filter: Range compress honi chahiye ($100 se $350 ke beech consolidation)
+        is_squeezed = 100 <= box_range <= 350
+        body = abs(c_last['close'] - c_last['open'])
 
-        score = 0
-        bias = "NONE"
+        # Long Trigger: Closed candle box ke upar nikle, Trend Bullish ho, RSI 54-68 (Overbought na ho)
+        long_condition = (
+            c_last['close'] > consolidation_high and
+            c_last['close'] > ema20 and
+            ema20 > ema50 and
+            body >= (atr * 0.75) and
+            54 <= rsi <= 68
+        )
 
-        if current['close'] > high_lvl and current['close'] > ema20 and is_bull:
-            bias = "LONG"
-            score += 45
-        elif current['close'] < low_lvl and current['close'] < ema20 and not is_bull:
-            bias = "SHORT"
-            score += 45
+        # Short Trigger: Closed candle box ke niche close ho, Trend Bearish ho, RSI 32-46
+        short_condition = (
+            c_last['close'] < consolidation_low and
+            c_last['close'] < ema20 and
+            ema20 < ema50 and
+            body >= (atr * 0.75) and
+            32 <= rsi <= 46
+        )
 
-        if body >= (atr * 0.70):
-            score += 35
-        if bias == "LONG" and rsi >= 54:
-            score += 20
-        if bias == "SHORT" and rsi <= 46:
-            score += 20
+        if is_squeezed and long_condition:
+            entry = c_last['close']
+            sl = consolidation_low - (atr * 0.3)
+            risk = entry - sl
+            if risk < 120: risk = 140
+            if risk > 220: risk = 200
+            sl = entry - risk
+            reward = risk * 2.5
+            tp = entry + reward
 
-        if score >= 80:
-            p = current['close']
-            risk = max(120.0, min(180.0, atr * 1.2))
-            reward = risk * 2.2
+            self.active_trade = {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'reward': reward}
+            send_tg(f"🚀 *INSTITUTIONAL BTC 5M BUY SIGNAL*\\n\\n💰 *Entry:* ${entry:.1f}\\n🛡️ *Safe SL:* ${sl:.1f} (-${risk:.1f})\\n🎯 *Big Target:* ${tp:.1f} (+${reward:.1f})\\n📊 *Risk/Reward:* 1:2.5\\n⚡ _Consolidation Breakout Confirmed_")
 
-            if bias == "LONG":
-                sl = p - risk
-                tp = p + reward
-                self.active_trade = {'type': 'LONG', 'entry': p, 'sl': sl, 'tp': tp, 'risk': risk, 'reward': reward}
-                self.last_alert_candle = current['time']
-                send_tg(f"🔥 *INSTITUTIONAL BTC 5M BUY*\\n\\n💰 *Entry:* ${p:.1f}\\n🛡️ *Safe SL:* ${sl:.1f} (-${risk:.1f})\\n🎯 *Big Target:* ${tp:.1f} (+${reward:.1f})\\n📊 *RR:* 1:2.2\\n⚡ _Expansion Confirmed_")
-            elif bias == "SHORT":
-                sl = p + risk
-                tp = p - reward
-                self.active_trade = {'type': 'SHORT', 'entry': p, 'sl': sl, 'tp': tp, 'risk': risk, 'reward': reward}
-                self.last_alert_candle = current['time']
-                send_tg(f"🔥 *INSTITUTIONAL BTC 5M SELL*\\n\\n💰 *Entry:* ${p:.1f}\\n🛡️ *Safe SL:* ${sl:.1f} (-${risk:.1f})\\n🎯 *Big Target:* ${tp:.1f} (+${reward:.1f})\\n📊 *RR:* 1:2.2\\n⚡ _Expansion Confirmed_")
+        elif is_squeezed and short_condition:
+            entry = c_last['close']
+            sl = consolidation_high + (atr * 0.3)
+            risk = sl - entry
+            if risk < 120: risk = 140
+            if risk > 220: risk = 200
+            sl = entry + risk
+            reward = risk * 2.5
+            tp = entry - reward
 
-if "bg_trader_started" not in st.session_state:
-    st.session_state["bg_trader_started"] = True
-    found = False
-    for t in threading.enumerate():
-        if t.name == "CloudTraderThread":
-            found = True
+            self.active_trade = {'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'reward': reward}
+            send_tg(f"🩸 *INSTITUTIONAL BTC 5M SELL SIGNAL*\\n\\n💰 *Entry:* ${entry:.1f}\\n🛡️ *Safe SL:* ${sl:.1f} (-${risk:.1f})\\n🎯 *Big Target:* ${tp:.1f} (+${reward:.1f})\\n📊 *Risk/Reward:* 1:2.5\\n⚡ _Consolidation Breakdown Confirmed_")
+
+# BACKGROUND DAEMON THREAD
+if "quant_engine_started" not in st.session_state:
+    st.session_state["quant_engine_started"] = True
+    for th in threading.enumerate():
+        if th.name == "QuantEngineThread":
             break
-    if not found:
-        ct = CloudTrader()
-        t = threading.Thread(target=ct.run, name="CloudTraderThread", daemon=True)
+    else:
+        inst_engine = InstitutionalEngine()
+        t = threading.Thread(target=inst_engine.run, name="QuantEngineThread", daemon=True)
         t.start()
 
-# --- STREAMLIT CLEAN MOBILE UI ---
+# --- STREAMLIT UI (SMOOTH NON-FLICKERING CHART & IST TIME) ---
 st.set_page_config(page_title="PRO QUANT SNIPER", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
@@ -186,7 +211,7 @@ terminal_html = """
             border-bottom: 1px solid #1a2336;
             padding: 6px 10px;
             font-size: 11px;
-            height: 42px;
+            height: 40px;
             gap: 8px;
             overflow-x: auto;
             white-space: nowrap;
@@ -194,11 +219,7 @@ terminal_html = """
         .top-nav::-webkit-scrollbar { display: none; }
         .brand { font-weight: 800; color: #fff; font-size: 11px; }
         .badge { padding: 2px 6px; border-radius: 4px; font-weight: 700; font-size: 9px; }
-        .badge-idle { background: #151c2a; color: #848e9c; border: 1px solid #232d42; }
-        .badge-long { background: rgba(0, 230, 118, 0.2); color: #00e676; border: 1px solid #00e676; }
-        .badge-short { background: rgba(255, 59, 48, 0.2); color: #ff3b30; border: 1px solid #ff3b30; }
-
-        .stat-card { display: flex; flex-direction: column; min-width: 55px; }
+        .stat-card { display: flex; flex-direction: column; min-width: 58px; }
         .stat-label { font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 700; }
         .stat-val { font-size: 10px; font-weight: 700; color: #fff; }
 
@@ -206,16 +227,16 @@ terminal_html = """
             display: flex;
             flex-direction: column;
             width: 100vw;
-            height: calc(100vh - 42px);
+            height: calc(100vh - 40px);
         }
         #chart-zone {
             width: 100vw;
-            height: 48vh;
+            height: 52vh;
             background: #080a0f;
         }
         .side-bar {
             width: 100vw;
-            height: calc(52vh - 42px);
+            height: calc(48vh - 40px);
             background: #0b0f17;
             border-top: 1px solid #161d2b;
             padding: 8px 10px;
@@ -231,15 +252,6 @@ terminal_html = """
             font-size: 11px;
         }
         .card-full { grid-column: span 2; }
-        .card-header {
-            font-size: 9px;
-            font-weight: 700;
-            color: #848e9c;
-            text-transform: uppercase;
-            margin-bottom: 2px;
-            display: flex;
-            justify-content: space-between;
-        }
         .row {
             display: flex;
             justify-content: space-between;
@@ -254,7 +266,7 @@ terminal_html = """
 
     <div class="top-nav">
         <div class="brand">⚡ SNIPER 5M</div>
-        <div id="status-badge" class="badge badge-idle">SCANNING</div>
+        <div id="status-badge" class="badge" style="background:#151c2a; color:#848e9c; border:1px solid #232d42;">SCANNING</div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
         <div class="stat-card"><div class="stat-label">BIG TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
@@ -268,28 +280,28 @@ terminal_html = """
 
         <div class="side-bar">
             <div class="card card-full">
-                <div class="card-header">
-                    <span>BREAKOUT QUALITY</span>
-                    <span id="bias-pill" style="padding:1px 4px; border-radius:3px; background:#1c2436; color:#848e9c; font-size:9px;">WAITING</span>
+                <div style="font-size:9px; color:#848e9c; font-weight:700; display:flex; justify-content:space-between;">
+                    <span>INSTITUTIONAL SETUP</span>
+                    <span id="bias-pill" style="padding:1px 5px; border-radius:3px; background:#1c2436; color:#848e9c; font-size:9px;">MONITORING SQUEEZE</span>
                 </div>
-                <div style="display:flex; justify-content:space-between; align-items:center;">
-                    <div style="font-size: 16px; font-weight: 800; color: #fff;" id="score-text">0 / 100</div>
-                    <span style="font-size: 9px; color: #62697a;">Min: $120+ Expansion Required</span>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:3px;">
+                    <div style="font-size: 15px; font-weight: 800; color: #fff;" id="score-text">0 / 100</div>
+                    <span style="font-size: 9px; color: #62697a;">Only Closed 5M Candles</span>
                 </div>
             </div>
 
             <div class="card">
-                <div class="card-header"><span>METRICS</span><span style="color:#00e676;">LIVE ✅</span></div>
+                <div style="font-size:9px; color:#848e9c; font-weight:700; margin-bottom:2px;">METRICS</div>
                 <div class="row"><span>Trend</span><b id="trend-val" style="color:#fff;">--</b></div>
-                <div class="row"><span>RSI (14)</span><b id="rsi-val" style="color:#fff;">--</b></div>
-                <div class="row"><span>ATR Vol</span><b id="atr-val" style="color:#f0b90b;">--</b></div>
+                <div class="row"><span>RSI</span><b id="rsi-val" style="color:#fff;">--</b></div>
+                <div class="row"><span>ATR</span><b id="atr-val" style="color:#f0b90b;">--</b></div>
             </div>
 
             <div class="card">
-                <div class="card-header"><span>ACTIVE TRADE</span><span id="trade-badge" style="color:#848e9c;">NONE</span></div>
-                <div class="row"><span>Target Gain</span><b id="gain-pts" style="color:#00e676;">--</b></div>
-                <div class="row"><span>Risk Buffer</span><b id="loss-pts" style="color:#ff3b30;">--</b></div>
-                <div class="row"><span>Server Status</span><b style="color:#00e676;">24/7 ONLINE</b></div>
+                <div style="font-size:9px; color:#848e9c; font-weight:700; margin-bottom:2px;">TRADE INFO</div>
+                <div class="row"><span>Reward</span><b id="gain-pts" style="color:#00e676;">--</b></div>
+                <div class="row"><span>Risk</span><b id="loss-pts" style="color:#ff3b30;">--</b></div>
+                <div class="row"><span>Alerts</span><b style="color:#00e676;">TG Active ✅</b></div>
             </div>
         </div>
     </div>
@@ -302,7 +314,18 @@ terminal_html = """
             layout: { background: { color: '#080a0f' }, textColor: '#787b86' },
             grid: { vertLines: { color: '#111622' }, horzLines: { color: '#111622' } },
             rightPriceScale: { borderColor: '#192130' },
-            timeScale: { borderColor: '#192130', timeVisible: true }
+            timeScale: { 
+                borderColor: '#192130', 
+                timeVisible: true,
+                secondsVisible: false
+            },
+            localization: {
+                // Indian Standard Time (+5:30) offset
+                timeFormatter: timestamp => {
+                    const date = new Date((timestamp + (5.5 * 3600)) * 1000);
+                    return date.toISOString().substr(11, 5);
+                }
+            }
         });
 
         const series = chart.addCandlestickSeries({
@@ -315,32 +338,31 @@ terminal_html = """
         let markers = [];
         let activeTrade = null;
         let entryLine = null, slLine = null, tpLine = null;
+        let lastTriggeredCandle = 0;
 
-        try {
-            const saved = localStorage.getItem('btc_sniper_active_trade');
-            if (saved) activeTrade = JSON.parse(saved);
-        } catch(e) {}
-
-        function drawLines(t) {
+        function drawTradeLines(trade) {
             if (entryLine) series.removePriceLine(entryLine);
             if (slLine) series.removePriceLine(slLine);
             if (tpLine) series.removePriceLine(tpLine);
 
-            entryLine = series.createPriceLine({ price: t.entry, color: '#38bdf8', lineWidth: 2, title: 'ENTRY' });
-            tpLine = series.createPriceLine({ price: t.tp, color: '#00e676', lineWidth: 2, title: 'TARGET' });
-            slLine = series.createPriceLine({ price: t.sl, color: '#ff3b30', lineWidth: 2, title: 'SL' });
+            entryLine = series.createPriceLine({ price: trade.entry, color: '#38bdf8', lineWidth: 2, title: 'ENTRY' });
+            tpLine = series.createPriceLine({ price: trade.tp, color: '#00e676', lineWidth: 2, title: 'BIG TP' });
+            slLine = series.createPriceLine({ price: trade.sl, color: '#ff3b30', lineWidth: 2, title: 'SAFE SL' });
 
-            document.getElementById('disp-entry').innerText = "$" + t.entry.toFixed(1);
-            document.getElementById('disp-sl').innerText = "$" + t.sl.toFixed(1);
-            document.getElementById('disp-tp').innerText = "$" + t.tp.toFixed(1);
-            document.getElementById('gain-pts').innerText = "+$" + t.reward.toFixed(1);
-            document.getElementById('loss-pts').innerText = "-$" + t.risk.toFixed(1);
-            document.getElementById('trade-badge').innerText = t.type;
-            document.getElementById('trade-badge').style.color = t.type === 'LONG' ? '#00e676' : '#ff3b30';
-            localStorage.setItem('btc_sniper_active_trade', JSON.stringify(t));
+            document.getElementById('disp-entry').innerText = "$" + trade.entry.toFixed(1);
+            document.getElementById('disp-sl').innerText = "$" + trade.sl.toFixed(1);
+            document.getElementById('disp-tp').innerText = "$" + trade.tp.toFixed(1);
+            document.getElementById('gain-pts').innerText = "+$" + trade.reward.toFixed(1);
+            document.getElementById('loss-pts').innerText = "-$" + trade.risk.toFixed(1);
+            
+            const badge = document.getElementById('status-badge');
+            badge.innerText = trade.type + " ACTIVE";
+            badge.style.background = trade.type === "LONG" ? "rgba(0, 230, 118, 0.2)" : "rgba(255, 59, 48, 0.2)";
+            badge.style.color = trade.type === "LONG" ? "#00e676" : "#ff3b30";
+            badge.style.border = "1px solid " + (trade.type === "LONG" ? "#00e676" : "#ff3b30");
         }
 
-        function clearLines() {
+        function clearTradeLines() {
             if (entryLine) { series.removePriceLine(entryLine); entryLine = null; }
             if (slLine) { series.removePriceLine(slLine); slLine = null; }
             if (tpLine) { series.removePriceLine(tpLine); tpLine = null; }
@@ -349,9 +371,11 @@ terminal_html = """
             document.getElementById('disp-tp').innerText = "--";
             document.getElementById('gain-pts').innerText = "--";
             document.getElementById('loss-pts').innerText = "--";
-            document.getElementById('trade-badge').innerText = "NONE";
-            document.getElementById('trade-badge').style.color = "#848e9c";
-            localStorage.removeItem('btc_sniper_active_trade');
+            const badge = document.getElementById('status-badge');
+            badge.innerText = "SCANNING";
+            badge.style.background = "#151c2a";
+            badge.style.color = "#848e9c";
+            badge.style.border = "1px solid #232d42";
         }
 
         fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100')
@@ -362,8 +386,7 @@ terminal_html = """
                     open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4])
                 }));
                 series.setData(candles);
-                if (activeTrade) drawLines(activeTrade);
-                connectLiveSocket();
+                initWebSocket();
             });
 
         function calcEMA(p, arr) {
@@ -374,7 +397,7 @@ terminal_html = """
         }
 
         function calcATR(c, p = 14) {
-            if (c.length < p + 1) return 120;
+            if (c.length < p + 1) return 140;
             let sum = 0;
             for (let i = c.length - p; i < c.length; i++) {
                 sum += Math.max(c[i].high - c[i].low, Math.abs(c[i].high - c[i-1].close), Math.abs(c[i].low - c[i-1].close));
@@ -386,13 +409,16 @@ terminal_html = """
             if (closes.length < p + 1) return 50;
             let g = 0, l = 0;
             for (let i = closes.length - p; i < closes.length; i++) {
-                const d = closes[i] - closes[i - 1];
-                if (d >= 0) g += d; else l -= d;
+                const diff = closes[i] - closes[i - 1];
+                if (diff >= 0) g += diff; else l -= diff;
             }
             return l === 0 ? 100 : 100 - (100 / (1 + ((g / p) / (l / p))));
         }
 
-        function runLiveAnalysis(candle) {
+        // ONLY TRIGGER ON CLOSED CANDLE EVENT (ZERO DUPLICATE SIGNALS)
+        function processClosedCandle(c_last) {
+            if (c_last.time <= lastTriggeredCandle) return;
+
             const closes = candles.map(c => c.close);
             const ema20 = calcEMA(20, closes);
             const ema50 = calcEMA(50, closes);
@@ -406,69 +432,90 @@ terminal_html = """
             document.getElementById('trend-val').innerText = isBull ? "BULL" : "BEAR";
             document.getElementById('trend-val').style.color = isBull ? "#00e676" : "#ff3b30";
 
-            if (activeTrade) {
-                if (activeTrade.type === "LONG") {
-                    if (candle.high >= activeTrade.tp) { activeTrade = null; clearLines(); }
-                    else if (candle.low <= activeTrade.sl) { activeTrade = null; clearLines(); }
-                } else if (activeTrade.type === "SHORT") {
-                    if (candle.low <= activeTrade.tp) { activeTrade = null; clearLines(); }
-                    else if (candle.high >= activeTrade.sl) { activeTrade = null; clearLines(); }
-                }
-                return;
-            }
+            if (activeTrade) return;
 
-            const c0 = candles[candles.length - 1];
-            const prev = candles.slice(-8, -1);
-            const highLvl = Math.max(...prev.map(c => c.high));
-            const lowLvl = Math.min(...prev.map(c => c.low));
-            const body = Math.abs(c0.close - c0.open);
+            const lookback = candles.slice(-13, -1);
+            const boxHigh = Math.max(...lookback.map(c => c.high));
+            const boxLow = Math.min(...lookback.map(c => c.low));
+            const boxRange = boxHigh - boxLow;
+            const body = Math.abs(c_last.close - c_last.open);
 
             let score = 0;
-            let bias = "NEUTRAL";
+            if (boxRange >= 100 && boxRange <= 350) score += 30; // Compression confirmed
 
-            if (c0.close > highLvl && c0.close > ema20 && isBull) { bias = "LONG"; score += 45; }
-            else if (c0.close < lowLvl && c0.close < ema20 && !isBull) { bias = "SHORT"; score += 45; }
+            let bias = "NONE";
+            if (c_last.close > boxHigh && c_last.close > ema20 && isBull && rsi >= 54 && rsi <= 68) {
+                bias = "LONG"; score += 50;
+            } else if (c_last.close < boxLow && c_last.close < ema20 && !isBull && rsi <= 46 && rsi >= 32) {
+                bias = "SHORT"; score += 50;
+            }
 
-            if (body >= (atr * 0.70)) score += 35;
-            if (bias === "LONG" && rsi >= 54) score += 20;
-            if (bias === "SHORT" && rsi <= 46) score += 20;
-
+            if (body >= (atr * 0.75)) score += 20;
             document.getElementById('score-text').innerText = score + " / 100";
 
             if (score >= 80) {
-                const p = c0.close;
-                const risk = Math.max(120, Math.min(180, atr * 1.2));
-                const reward = risk * 2.2;
+                lastTriggeredCandle = c_last.time;
+                const p = c_last.close;
+                let risk = bias === "LONG" ? (p - boxLow) : (boxHigh - p);
+                if (risk < 120) risk = 140;
+                if (risk > 220) risk = 200;
+                const reward = risk * 2.5;
 
                 if (bias === "LONG") {
                     activeTrade = { type: "LONG", entry: p, sl: p - risk, tp: p + reward, risk: risk, reward: reward };
-                    markers.push({ time: candle.time, position: 'belowBar', color: '#00e676', shape: 'arrowUp', text: 'BUY' });
-                    series.setMarkers(markers.slice(-4));
-                    drawLines(activeTrade);
-                } else if (bias === "SHORT") {
+                    markers.push({ time: c_last.time, position: 'belowBar', color: '#00e676', shape: 'arrowUp', text: 'BUY' });
+                } else {
                     activeTrade = { type: "SHORT", entry: p, sl: p + risk, tp: p - reward, risk: risk, reward: reward };
-                    markers.push({ time: candle.time, position: 'aboveBar', color: '#ff3b30', shape: 'arrowDown', text: 'SELL' });
-                    series.setMarkers(markers.slice(-4));
-                    drawLines(activeTrade);
+                    markers.push({ time: c_last.time, position: 'aboveBar', color: '#ff3b30', shape: 'arrowDown', text: 'SELL' });
                 }
+                series.setMarkers(markers.slice(-3));
+                drawTradeLines(activeTrade);
             }
         }
 
-        function connectLiveSocket() {
+        function initWebSocket() {
             const ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@kline_5m");
             ws.onmessage = (e) => {
                 const k = JSON.parse(e.data).k;
-                const c = { time: Math.floor(k.t / 1000), open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c) };
-                document.getElementById('live-price').innerText = "$" + c.close.toFixed(1);
-                series.update(c);
+                const candle = { 
+                    time: Math.floor(k.t / 1000), 
+                    open: parseFloat(k.o), 
+                    high: parseFloat(k.h), 
+                    low: parseFloat(k.l), 
+                    close: parseFloat(k.c) 
+                };
+
+                document.getElementById('live-price').innerText = "$" + candle.close.toFixed(1);
+                series.update(candle);
 
                 const last = candles.length - 1;
-                if (candles[last].time === c.time) candles[last] = c;
-                else candles.push(c);
+                if (candles[last].time === candle.time) {
+                    candles[last] = candle;
+                } else {
+                    candles.push(candle);
+                }
 
-                runLiveAnalysis(c);
+                // Active Trade TP / SL Live Exit Monitoring
+                if (activeTrade) {
+                    if (activeTrade.type === "LONG") {
+                        if (candle.high >= activeTrade.tp || candle.low <= activeTrade.sl) {
+                            activeTrade = null;
+                            clearTradeLines();
+                        }
+                    } else if (activeTrade.type === "SHORT") {
+                        if (candle.low <= activeTrade.tp || candle.high >= activeTrade.sl) {
+                            activeTrade = null;
+                            clearTradeLines();
+                        }
+                    }
+                }
+
+                // Candle Closed Event (k.x === true)
+                if (k.x === true) {
+                    processClosedCandle(candle);
+                }
             };
-            ws.onclose = () => { setTimeout(connectLiveSocket, 2000); };
+            ws.onclose = () => { setTimeout(initWebSocket, 2000); };
         }
 
         window.addEventListener('resize', () => {
