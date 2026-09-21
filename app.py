@@ -5,21 +5,15 @@ import time
 import requests
 import json
 import os
-import uuid
 from datetime import datetime
 
 # ==============================================================================
-# BTC SNIPER 5M - TRI-ENGINE AI (WITH SUB-SECOND HEAD OVERSEER WATCHDOG)
+# BTC SNIPER 5M - SINGLE ENGINE GUARANTEE (NO MORE GHOSTS)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
 CHAT_ID = "7886716805"
 DATA_FILE = "sniper_brain_data.json"
-LOCK_FILE = "master_engine_lock.txt"
-
-CURRENT_ENGINE_ID = str(uuid.uuid4())
-with open(LOCK_FILE, "w") as f:
-    f.write(CURRENT_ENGINE_ID)
 
 def get_default_state():
     return {
@@ -27,8 +21,7 @@ def get_default_state():
         "win_rate": 0.0, "active_trade": None, 
         "metrics": {"trend": "ANALYZING...", "rsi": "--", "atr": "--", "news": "SCANNING..."},
         "news_score": {"sentiment": "NEUTRAL", "score": 0},
-        "config": {"capital": 100.0, "leverage": 10},
-        "heartbeats": {"main": time.time(), "news": time.time(), "head": time.time()} # New Heartbeat System
+        "config": {"capital": 100.0, "leverage": 10}
     }
 
 if st.query_params.get("clear") == "1":
@@ -39,10 +32,7 @@ if st.query_params.get("clear") == "1":
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
-            with open(DATA_FILE, "r") as f: 
-                d = json.load(f)
-                if "heartbeats" not in d: d["heartbeats"] = {"main": time.time(), "news": time.time(), "head": time.time()}
-                return d
+            with open(DATA_FILE, "r") as f: return json.load(f)
         except: return get_default_state()
     return get_default_state()
 
@@ -73,91 +63,9 @@ def get_market_data():
     return None, None
 
 # ==============================================================================
-# ENGINE 3: THE HEAD OVERSEER (Monitors Engine 1 & 2 every 0.5 seconds)
+# SINGLETON ENGINE (Runs strictly ONCE per server boot)
 # ==============================================================================
-class HeadOverseerEngine:
-    def __init__(self):
-        self.alert_sent = False
-
-    def run(self):
-        # Startup ping
-        send_tg_command("🛡️ [HEAD OVERSEER] Tri-Engine System Booted Successfully. Sub-second monitoring active.")
-        
-        while True:
-            try:
-                with open(LOCK_FILE, "r") as f:
-                    if f.read() != CURRENT_ENGINE_ID: break
-            except: pass
-
-            now = time.time()
-            state = load_data()
-            hb_main = state["heartbeats"].get("main", now)
-            hb_news = state["heartbeats"].get("news", now)
-
-            # Check if any engine hasn't responded in 30 seconds
-            main_dead = (now - hb_main) > 30
-            news_dead = (now - hb_news) > 45
-
-            if (main_dead or news_dead) and not self.alert_sent:
-                status_main = "🔴 DEAD / HUNG" if main_dead else "🟢 ONLINE"
-                status_news = "🔴 DEAD / HUNG" if news_dead else "🟢 ONLINE"
-                send_tg_command(f"🚨 [OVERSEER CRITICAL ALERT]\n\nEngine Failure Detected!\n\nEngine 1 (Master): {status_main}\nEngine 2 (News): {status_news}\n\nPlease check server or reboot app immediately!")
-                self.alert_sent = True
-            elif not main_dead and not news_dead and self.alert_sent:
-                send_tg_command("✅ [OVERSEER RECOVERY] All Engines are back online and syncing perfectly.")
-                self.alert_sent = False
-
-            # Update head's own heartbeat
-            state["heartbeats"]["head"] = now
-            save_data(state)
-            
-            # Sub-second loop (Reads both engines in less than 1 sec)
-            time.sleep(0.5)
-
-# ==============================================================================
-# ENGINE 2: GLOBAL NEWS & DATA ANALYZER
-# ==============================================================================
-class GlobalNewsDataEngine:
-    def run(self):
-        while True:
-            try:
-                with open(LOCK_FILE, "r") as f:
-                    if f.read() != CURRENT_ENGINE_ID: break
-            except: pass
-
-            score = 0
-            sentiment_text = "NEUTRAL"
-            
-            try:
-                fg_resp = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3).json()
-                fng_value = int(fg_resp['data'][0]['value'])
-                if fng_value > 60: score += 5
-                elif fng_value < 40: score -= 5
-            except: pass
-
-            try:
-                tk_resp = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=3).json()
-                price_change = float(tk_resp['priceChangePercent'])
-                if price_change > 2.0: score += 5
-                elif price_change < -2.0: score -= 5
-            except: pass
-
-            if score >= 5: sentiment_text = "HIGHLY BULLISH 🚀"
-            elif score <= -5: sentiment_text = "BEARISH 🩸"
-            else: sentiment_text = "NEUTRAL ⚖️"
-
-            state = load_data()
-            state["news_score"] = {"sentiment": sentiment_text, "score": score}
-            state["metrics"]["news"] = sentiment_text
-            state["heartbeats"]["news"] = time.time() # Ping heartbeat
-            save_data(state)
-            
-            time.sleep(15)
-
-# ==============================================================================
-# ENGINE 1: CENTRAL COMMANDER
-# ==============================================================================
-class CentralCommandEngine:
+class MasterTriEngine:
     def __init__(self):
         self.last_candle_time = 0
 
@@ -174,17 +82,23 @@ class CentralCommandEngine:
         for cl in closes[1:]: ema30 = (cl * k) + (ema30 * (1 - k))
         trend = "BULLISH ▲" if live['close'] > ema30 else "BEARISH ▼"
 
-        gains, losses = 0, 0
-        for i in range(len(closes) - 14, len(closes)):
-            diff = closes[i] - closes[i - 1]
-            if diff >= 0: gains += diff
-            else: losses -= diff
-        rsi = round(100 - (100 / (1 + (gains / max(losses, 0.0001)))), 1)
-
         state["metrics"]["trend"] = trend
-        state["metrics"]["rsi"] = str(rsi)
         state["metrics"]["atr"] = f"${atr:.1f}"
         return atr, ema30
+
+    def update_news(self, state):
+        score = 0
+        sentiment_text = "NEUTRAL ⚖️"
+        try:
+            fg_resp = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3).json()
+            fng_value = int(fg_resp['data'][0]['value'])
+            if fng_value > 60: score += 5
+            elif fng_value < 40: score -= 5
+            if score >= 5: sentiment_text = "HIGHLY BULLISH 🚀"
+            elif score <= -5: sentiment_text = "BEARISH 🩸"
+        except: pass
+        state["news_score"] = {"sentiment": sentiment_text, "score": score}
+        state["metrics"]["news"] = sentiment_text
 
     def close_trade(self, state, result, pnl_pts, pnl_usd, qty):
         t = state["active_trade"]
@@ -214,14 +128,14 @@ class CentralCommandEngine:
             if live['high'] >= t['tp']:
                 pts = round(t['tp'] - t['entry'], 1)
                 self.close_trade(state, "TP HIT", f"+{pts:.0f}", f"+${round(pts * qty, 2)}", qty)
-                send_tg_command(f"🚀 AI TP HIT: +${round(pts * qty, 2)} (+{pts:.0f} pts)\nClosed @ ${t['tp']:.1f}")
+                send_tg_command(f"🚀 AI TP HIT: +${round(pts * qty, 2)} (+{pts:.0f} pts)\nClosed @${t['tp']:.1f}")
             elif live['low'] <= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 pts = 25.0 if t.get('be_hit', False) else -(t['entry'] - t['sl'])
                 usd = round(pts * qty, 2)
                 sign = "+" if usd >= 0 else ""
                 self.close_trade(state, res, f"{sign}{pts:.0f}", f"{sign}${usd}", qty)
-                send_tg_command(f"🛡️ AI EXIT: {res} | {sign}${usd} ({sign}{pts:.0f} pts)\nClosed @ ${t['sl']:.1f}")
+                send_tg_command(f"🛡️ AI EXIT: {res} | {sign}${usd} ({sign}{pts:.0f} pts)\nClosed @${t['sl']:.1f}")
 
         elif t['type'] == 'SHORT':
             if not t.get('be_hit', False) and live['low'] <= (t['entry'] - 150.0):
@@ -233,14 +147,14 @@ class CentralCommandEngine:
             if live['low'] <= t['tp']:
                 pts = round(t['entry'] - t['tp'], 1)
                 self.close_trade(state, "TP HIT", f"+{pts:.0f}", f"+${round(pts * qty, 2)}", qty)
-                send_tg_command(f"🩸 AI TP HIT: +${round(pts * qty, 2)} (+{pts:.0f} pts)\nClosed @ ${t['tp']:.1f}")
+                send_tg_command(f"🩸 AI TP HIT: +${round(pts * qty, 2)} (+{pts:.0f} pts)\nClosed @${t['tp']:.1f}")
             elif live['high'] >= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 pts = 25.0 if t.get('be_hit', False) else -(t['sl'] - t['entry'])
                 usd = round(pts * qty, 2)
                 sign = "+" if usd >= 0 else ""
                 self.close_trade(state, res, f"{sign}{pts:.0f}", f"{sign}${usd}", qty)
-                send_tg_command(f"🛡️ AI EXIT: {res} | {sign}${usd} ({sign}{pts:.0f} pts)\nClosed @ ${t['sl']:.1f}")
+                send_tg_command(f"🛡️ AI EXIT: {res} | {sign}${usd} ({sign}{pts:.0f} pts)\nClosed @${t['sl']:.1f}")
 
     def scan_new_targets(self, state, closed, live, atr, ema30):
         c0 = closed[-1]
@@ -256,9 +170,8 @@ class CentralCommandEngine:
         is_long = is_up and (c0['close'] > h_range) and (body >= 30.0)
         is_short = is_dn and (c0['close'] < l_range) and (body <= -30.0)
 
-        news_state = state.get("news_score", {"sentiment": "NEUTRAL", "score": 0})
-        n_score = news_state["score"]
-        n_text = news_state["sentiment"]
+        n_score = state["news_score"]["score"]
+        n_text = state["news_score"]["sentiment"]
 
         if is_long:
             if n_score <= -5:
@@ -268,15 +181,13 @@ class CentralCommandEngine:
             entry = round(c0['close'], 1)
             risk = round(atr * 1.3, 1) if n_score >= 5 else round(atr * 1.5, 1)
             sl = round(entry - risk, 1)
-            tp_mult = 2.5 if n_score >= 5 else 1.8
-            tp = round(entry + (risk * tp_mult), 1)
-
+            tp = round(entry + (risk * (2.5 if n_score >= 5 else 1.8)), 1)
             cfg = state.get("config", {"capital": 100, "leverage": 10})
             qty = round((float(cfg['capital']) * int(cfg['leverage'])) / entry, 4) or 0.001
 
             state["active_trade"] = {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False}
             save_data(state)
-            send_tg_command(f"🤖 [AI DUAL-CONFIRMED] LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f}\n🎯 TP: ${tp:.1f}\n📦 Qty: {qty} BTC\n\n📰 Global Data: {n_text}")
+            send_tg_command(f"🤖 [AI CONFIRMED] LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f}\n🎯 TP: ${tp:.1f}\n📦 Qty: {qty} BTC\n\n📰 Data: {n_text}")
 
         elif is_short:
             if n_score >= 5:
@@ -286,42 +197,42 @@ class CentralCommandEngine:
             entry = round(c0['close'], 1)
             risk = round(atr * 1.3, 1) if n_score <= -5 else round(atr * 1.5, 1)
             sl = round(entry + risk, 1)
-            tp_mult = 2.5 if n_score <= -5 else 1.8
-            tp = round(entry - (risk * tp_mult), 1)
-
+            tp = round(entry - (risk * (2.5 if n_score <= -5 else 1.8)), 1)
             cfg = state.get("config", {"capital": 100, "leverage": 10})
             qty = round((float(cfg['capital']) * int(cfg['leverage'])) / entry, 4) or 0.001
 
             state["active_trade"] = {'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False}
             save_data(state)
-            send_tg_command(f"🤖 [AI DUAL-CONFIRMED] SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f}\n🎯 TP: ${tp:.1f}\n📦 Qty: {qty} BTC\n\n📰 Global Data: {n_text}")
+            send_tg_command(f"🤖 [AI CONFIRMED] SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f}\n🎯 TP: ${tp:.1f}\n📦 Qty: {qty} BTC\n\n📰 Data: {n_text}")
 
     def run(self):
+        send_tg_command("🛡️ SERVER REBOOTED: All old ghosts killed. New Master Engine Online.")
+        loop_count = 0
         while True:
-            try:
-                with open(LOCK_FILE, "r") as f:
-                    if f.read() != CURRENT_ENGINE_ID: break
-            except: pass
-
             closed, live = get_market_data()
             state = load_data()
+            
+            if loop_count % 10 == 0: self.update_news(state) # Update news every 20 seconds
+            
             if closed and live:
                 atr, ema30 = self.update_technical_metrics(state, closed, live)
-                
                 if state.get("active_trade"): self.manage_active_trade(state, live)
                 else: self.scan_new_targets(state, closed, live, atr, ema30)
+                save_data(state)
 
-            # Ping heartbeat
-            state["heartbeats"]["main"] = time.time()
-            save_data(state)
+            loop_count += 1
             time.sleep(2)
 
-# --- BOOT ALL 3 ENGINES PARALLEL ---
-if "TRI_ENGINES_BOOTED" not in st.session_state:
-    st.session_state["TRI_ENGINES_BOOTED"] = True
-    threading.Thread(target=CentralCommandEngine().run, name="MasterCmd", daemon=True).start()
-    threading.Thread(target=GlobalNewsDataEngine().run, name="NewsData", daemon=True).start()
-    threading.Thread(target=HeadOverseerEngine().run, name="HeadOverseer", daemon=True).start() # The Head
+# ==============================================================================
+# SECURE BOOT (Runs only ONCE per Streamlit Reboot)
+# ==============================================================================
+@st.cache_resource
+def boot_master_engine():
+    t = threading.Thread(target=MasterTriEngine().run, daemon=True)
+    t.start()
+    return True
+
+boot_master_engine()
 
 # ==============================================================================
 # UI DISPLAY 
@@ -335,7 +246,6 @@ js_history = json.dumps(state.get("history", []))
 js_stats = json.dumps({"total": state.get("total_signals", 0), "win_rate": state.get("win_rate", 0)})
 js_metrics = json.dumps(state.get("metrics", {"trend": "--", "rsi": "--", "atr": "--", "news": "SCANNING..."}))
 js_cfg = json.dumps(state.get("config", {"capital": 100, "leverage": 10}))
-js_hbs = json.dumps(state.get("heartbeats", {}))
 
 terminal_html = f"""<!DOCTYPE html>
 <html>
@@ -371,7 +281,7 @@ terminal_html = f"""<!DOCTYPE html>
 </head>
 <body>
     <div class="top-nav">
-        <div class="brand">⚡ TRI-ENGINE <span class="badge-scan">AI WATCHDOG</span></div>
+        <div class="brand">⚡ TRI-ENGINE <span class="badge-scan">MASTER AI</span></div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">GUARD SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
         <div class="stat-card"><div class="stat-label">TARGET TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
@@ -446,7 +356,6 @@ terminal_html = f"""<!DOCTYPE html>
         let stats = {js_stats};
         let metrics = {js_metrics};
         let cfg = {js_cfg};
-        let hbs = {js_hbs};
 
         document.getElementById('input-amount').value = cfg.capital;
         document.getElementById('input-lev').value = cfg.leverage;
@@ -495,17 +404,6 @@ terminal_html = f"""<!DOCTYPE html>
             document.getElementById('val-trend').innerText = metrics.trend;
             document.getElementById('val-trend').style.color = metrics.trend.includes("BULLISH") ? "#00e676" : "#ff3b30";
             
-            // Health Check Display
-            const now = Date.now() / 1000;
-            const mainDead = (now - (hbs.main || now)) > 30;
-            if (mainDead) {{
-                document.getElementById('val-health').innerText = "🔴 ENGINE OFFLINE";
-                document.getElementById('val-health').style.color = "#ff3b30";
-            }} else {{
-                document.getElementById('val-health').innerText = "🟢 100% SECURE";
-                document.getElementById('val-health').style.color = "#00e676";
-            }}
-
             document.getElementById('hist-count').innerText = tradeHistory.length;
             document.getElementById('stat-total').innerText = stats.total;
             document.getElementById('stat-rate').innerText = stats.win_rate + "%";
@@ -575,7 +473,9 @@ terminal_html = f"""<!DOCTYPE html>
                     const newBar = {{ time: barTime, open: price, high: price, low: price, close: price }};
                     cdata.push(newBar);
                     series.update(newBar);
-                    setTimeout(() => window.parent.location.reload(), 2000); 
+                    
+                    // FIXED BUG: SMART 8-SECOND DELAY!
+                    setTimeout(() => window.parent.location.reload(), 8000); 
                 }}
 
                 if (activeTrade) {{
@@ -600,6 +500,5 @@ terminal_html = terminal_html.replace("__HISTORY_DATA__", json.dumps(state.get("
 terminal_html = terminal_html.replace("__STATS_DATA__", json.dumps({"total": state.get("total_signals", 0), "win_rate": state.get("win_rate", 0)}))
 terminal_html = terminal_html.replace("__METRICS_DATA__", json.dumps(state.get("metrics", {"trend": "--", "rsi": "--", "atr": "--", "news": "SCANNING..."})))
 terminal_html = terminal_html.replace("__CONFIG_DATA__", json.dumps(state.get("config", {"capital": 100, "leverage": 10})))
-terminal_html = terminal_html.replace("__HEARTBEATS__", json.dumps(state.get("heartbeats", {})))
 
 components.html(terminal_html, height=720, scrolling=False)
