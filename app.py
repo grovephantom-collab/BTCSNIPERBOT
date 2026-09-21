@@ -8,29 +8,39 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# BTC SNIPER 5M - PERMANENT PERSISTENT HISTORY + ROCK-SOLID VISUAL LINES
+# BTC SNIPER 5M - AUTO-TRADE EXECUTION (AMOUNT, LEV, QTY & PNL HISTORY SYNC)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
 CHAT_ID = "7886716805"
 DATA_FILE = "trade_history.json"
 
-def load_data():
-    default_data = {
+def get_default_state():
+    return {
         "history": [],
         "total_signals": 0,
         "tp_count": 0,
         "sl_count": 0,
         "win_rate": 0.0,
-        "active_trade": None
+        "active_trade": None,
+        "auto_trade_config": {
+            "enabled": True,
+            "capital": 100.0,
+            "leverage": 10
+        }
     }
+
+def load_data():
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r") as f:
-                return json.load(f)
+                d = json.load(f)
+                if "auto_trade_config" not in d:
+                    d["auto_trade_config"] = {"enabled": True, "capital": 100.0, "leverage": 10}
+                return d
         except Exception:
-            return default_data
-    return default_data
+            return get_default_state()
+    return get_default_state()
 
 def save_data(data):
     try:
@@ -39,16 +49,20 @@ def save_data(data):
     except Exception:
         pass
 
-# Initialize Persistent Session State
-if "PERSISTENT_STATE" not in st.session_state:
-    st.session_state["PERSISTENT_STATE"] = load_data()
+if st.query_params.get("action") == "clear_all":
+    save_data(get_default_state())
+    st.query_params.clear()
+    st.rerun()
 
-GLOBAL_APP = st.session_state["PERSISTENT_STATE"]
+if "MASTER_DATA" not in st.session_state:
+    st.session_state["MASTER_DATA"] = load_data()
+
+GLOBAL_DATA = st.session_state["MASTER_DATA"]
 
 def send_tg(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": str(CHAT_ID).strip(), "text": msg}
-    for _ in range(4):
+    for _ in range(3):
         try:
             r = requests.post(url, json=payload, timeout=5)
             if r.status_code == 200:
@@ -59,16 +73,16 @@ def send_tg(msg):
 
 def get_cloud_klines():
     urls = [
-        "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=35",
-        "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=35",
-        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=35"
+        "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=55",
+        "https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=55",
+        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=55"
     ]
     for u in urls:
         try:
             r = requests.get(u, timeout=2.5)
             if r.status_code == 200:
                 raw = r.json()
-                if isinstance(raw, list) and len(raw) >= 15:
+                if isinstance(raw, list) and len(raw) >= 45:
                     closed = [{
                         'open': float(d[1]), 'high': float(d[2]),
                         'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])
@@ -83,36 +97,38 @@ def get_cloud_klines():
             continue
     return None, None
 
-class PersistentHistoryEngine:
+class SniperTrendEngine:
     def __init__(self):
-        self.active_trade = GLOBAL_APP.get("active_trade", None)
+        self.active_trade = GLOBAL_DATA.get("active_trade", None)
         self.last_signal_time = 0
 
-    def record_trade(self, trade_type, entry, result, pnl_pts):
+    def record_trade(self, trade_type, entry, result, pnl_pts, pnl_usd, qty):
         now_str = datetime.now().strftime("%H:%M")
-        GLOBAL_APP["total_signals"] += 1
+        GLOBAL_DATA["total_signals"] += 1
         if "TP" in result:
-            GLOBAL_APP["tp_count"] += 1
+            GLOBAL_DATA["tp_count"] += 1
         elif "SL" in result:
-            GLOBAL_APP["sl_count"] += 1
+            GLOBAL_DATA["sl_count"] += 1
 
-        total = GLOBAL_APP["tp_count"] + GLOBAL_APP["sl_count"]
+        total = GLOBAL_DATA["tp_count"] + GLOBAL_DATA["sl_count"]
         if total > 0:
-            GLOBAL_APP["win_rate"] = round((GLOBAL_APP["tp_count"] / total) * 100, 1)
+            GLOBAL_DATA["win_rate"] = round((GLOBAL_DATA["tp_count"] / total) * 100, 1)
 
-        GLOBAL_APP["history"].insert(0, {
+        GLOBAL_DATA["history"].insert(0, {
             "time": now_str,
             "type": trade_type,
             "entry": float(entry),
             "result": result,
-            "pts": pnl_pts
+            "pts": pnl_pts,
+            "pnl_usd": pnl_usd,
+            "qty": qty
         })
-        if len(GLOBAL_APP["history"]) > 500:
-            GLOBAL_APP["history"].pop()
+        if len(GLOBAL_DATA["history"]) > 500:
+            GLOBAL_DATA["history"].pop()
 
         self.active_trade = None
-        GLOBAL_APP["active_trade"] = None
-        save_data(GLOBAL_APP)
+        GLOBAL_DATA["active_trade"] = None
+        save_data(GLOBAL_DATA)
 
     def run(self):
         while True:
@@ -121,114 +137,169 @@ class PersistentHistoryEngine:
                 if self.active_trade:
                     self.manage_position(live)
                 else:
-                    self.detect_setup(closed, live)
+                    self.detect_trend_breakout(closed, live)
             time.sleep(1.2)
 
     def manage_position(self, live):
         t = self.active_trade
+        qty = t.get("qty", 0.01)
+
         if t['type'] == 'LONG':
             if not t['tp1_hit'] and live['high'] >= t['tp1']:
                 t['tp1_hit'] = True
-                t['sl'] = round(t['entry'] + 15.0, 1)
-                GLOBAL_APP["active_trade"] = t
-                save_data(GLOBAL_APP)
-                send_tg(f"🎯 BTC LONG TP1 HIT (+90 pts) at ${t['tp1']:.1f}\nSL shifted to BE (${t['sl']:.1f}). Position Risk-Free.")
+                t['sl'] = round(t['entry'] + 20.0, 1)
+                GLOBAL_DATA["active_trade"] = t
+                save_data(GLOBAL_DATA)
+                send_tg(f"🎯 BTC LONG TP1 REACHED (+{t['tp1_pts']:.0f} pts)\nQty: {qty} BTC | SL moved to Breakeven: ${t['sl']:.1f}")
 
             if live['high'] >= t['tp2']:
-                send_tg(f"🚀 BTC LONG RUNNER REACHED (+${t['reward']:.1f}) at${t['tp2']:.1f}!")
-                self.record_trade("LONG", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
+                pnl_pts = t['reward']
+                pnl_usd = round(pnl_pts * qty, 2)
+                send_tg(f"🚀 BTC LONG RUNNER CLOSED!\nProfit: +${pnl_usd} (+{pnl_pts:.0f} pts)\nSold Qty: {qty} BTC @ ${t['tp2']:.1f}")
+                self.record_trade("LONG", t['entry'], "TP RUNNER", f"+{pnl_pts:.0f}", f"+${pnl_usd}", qty)
                 return
             elif live['low'] <= t['sl']:
                 res = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
-                pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ BTC LONG {res} at ${t['sl']:.1f}")
-                self.record_trade("LONG", t['entry'], res, pts)
+                pnl_pts = 20.0 if t['tp1_hit'] else -t['risk']
+                pnl_usd = round(pnl_pts * qty, 2)
+                sign = "+" if pnl_usd >= 0 else ""
+                send_tg(f"🛡️ BTC LONG {res}\nNet PnL: {sign}${pnl_usd} ({sign}{pnl_pts:.0f} pts)\nClosed Qty: {qty} BTC @ ${t['sl']:.1f}")
+                self.record_trade("LONG", t['entry'], res, f"{sign}{pnl_pts:.0f}", f"{sign}${pnl_usd}", qty)
                 return
 
         elif t['type'] == 'SHORT':
             if not t['tp1_hit'] and live['low'] <= t['tp1']:
                 t['tp1_hit'] = True
-                t['sl'] = round(t['entry'] - 15.0, 1)
-                GLOBAL_APP["active_trade"] = t
-                save_data(GLOBAL_APP)
-                send_tg(f"🎯 BTC SHORT TP1 HIT (+90 pts) at ${t['tp1']:.1f}\nSL shifted to BE (${t['sl']:.1f}). Position Risk-Free.")
+                t['sl'] = round(t['entry'] - 20.0, 1)
+                GLOBAL_DATA["active_trade"] = t
+                save_data(GLOBAL_DATA)
+                send_tg(f"🎯 BTC SHORT TP1 REACHED (+{t['tp1_pts']:.0f} pts)\nQty: {qty} BTC | SL moved to Breakeven: ${t['sl']:.1f}")
 
             if live['low'] <= t['tp2']:
-                send_tg(f"🩸 BTC SHORT RUNNER REACHED (+${t['reward']:.1f}) at${t['tp2']:.1f}!")
-                self.record_trade("SHORT", t['entry'], "TP RUNNER", f"+{t['reward']:.0f}")
+                pnl_pts = t['reward']
+                pnl_usd = round(pnl_pts * qty, 2)
+                send_tg(f"🩸 BTC SHORT RUNNER CLOSED!\nProfit: +${pnl_usd} (+{pnl_pts:.0f} pts)\nCovered Qty: {qty} BTC @ ${t['tp2']:.1f}")
+                self.record_trade("SHORT", t['entry'], "TP RUNNER", f"+{pnl_pts:.0f}", f"+${pnl_usd}", qty)
                 return
             elif live['high'] >= t['sl']:
                 res = "BE LOCKED" if t['tp1_hit'] else "SL HIT"
-                pts = "+15" if t['tp1_hit'] else f"-{t['risk']:.0f}"
-                send_tg(f"🛡️ BTC SHORT {res} at ${t['sl']:.1f}")
-                self.record_trade("SHORT", t['entry'], res, pts)
+                pnl_pts = 20.0 if t['tp1_hit'] else -t['risk']
+                pnl_usd = round(pnl_pts * qty, 2)
+                sign = "+" if pnl_usd >= 0 else ""
+                send_tg(f"🛡️ BTC SHORT {res}\nNet PnL: {sign}${pnl_usd} ({sign}{pnl_pts:.0f} pts)\nClosed Qty: {qty} BTC @ ${t['sl']:.1f}")
+                self.record_trade("SHORT", t['entry'], res, f"{sign}{pnl_pts:.0f}", f"{sign}${pnl_usd}", qty)
                 return
 
-    def detect_setup(self, closed, live):
+    def detect_trend_breakout(self, closed, live):
         now = time.time()
-        if now - self.last_signal_time < 120:
+        if now - self.last_signal_time < 180:
             return
 
-        c0 = closed[-1]
-        swing_high = max(c['high'] for c in closed[-6:])
-        swing_low = min(c['low'] for c in closed[-6:])
+        cfg = GLOBAL_DATA.get("auto_trade_config", {"enabled": True, "capital": 100.0, "leverage": 10})
+        if not cfg.get("enabled", True):
+            return
+
+        tr_list = []
+        for i in range(len(closed) - 14, len(closed)):
+            c, p = closed[i], closed[i-1]
+            tr_list.append(max(c['high'] - c['low'], abs(c['high'] - p['close']), abs(c['low'] - p['close'])))
+        atr = max(sum(tr_list) / len(tr_list), 100.0)
+
+        closes = [c['close'] for c in closed]
+        k = 2 / (30 + 1)
+        ema30 = closes[0]
+        for cl in closes[1:]:
+            ema30 = (cl * k) + (ema30 * (1 - k))
+
+        is_uptrend = live['close'] > ema30
+        is_downtrend = live['close'] < ema30
+
+        swing_high = max(c['high'] for c in closed[-8:])
+        swing_low = min(c['low'] for c in closed[-8:])
         body = live['close'] - live['open']
 
-        long_cond = (live['close'] > max(c0['high'], swing_high * 0.9995)) and (body >= 22.0)
-        short_cond = (live['close'] < min(c0['low'], swing_low * 1.0005)) and (body <= -22.0)
+        long_cond = is_uptrend and (live['close'] > swing_high) and (body >= 28.0)
+        short_cond = is_downtrend and (live['close'] < swing_low) and (body <= -28.0)
+
+        capital = float(cfg.get("capital", 100.0))
+        lev = int(cfg.get("leverage", 10))
+        position_size_usd = capital * lev
 
         if long_cond:
             self.last_signal_time = now
             entry = round(live['close'], 1)
-            sl = round(min(live['low'], swing_low) - 25.0, 1)
-            risk = round(entry - sl, 1)
-            if risk < 85.0: risk = 95.0; sl = round(entry - 95.0, 1)
-            if risk > 160.0: risk = 140.0; sl = round(entry - 140.0, 1)
-
-            tp1 = round(entry + 90.0, 1)
-            reward = round(risk * 2.2, 1)
+            risk = round(max(atr * 1.05, 180.0), 1)
+            sl = round(entry - risk, 1)
+            tp1_pts = round(risk * 0.9, 1)
+            tp1 = round(entry + tp1_pts, 1)
+            reward = round(risk * 2.0, 1)
             tp2 = round(entry + reward, 1)
+
+            # Accurate Quantity Calculation
+            qty = round(position_size_usd / entry, 4)
+            if qty <= 0: qty = 0.001
 
             self.active_trade = {
                 'type': 'LONG', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2,
-                'risk': risk, 'reward': reward, 'tp1_hit': False, 'active': True
+                'tp1_pts': tp1_pts, 'risk': risk, 'reward': reward, 'tp1_hit': False,
+                'qty': qty, 'capital': capital, 'leverage': lev
             }
-            GLOBAL_APP["active_trade"] = self.active_trade
-            save_data(GLOBAL_APP)
+            GLOBAL_DATA["active_trade"] = self.active_trade
+            save_data(GLOBAL_DATA)
 
-            send_tg(f"⚡ BTC CONFIRMED LONG (5M)\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-${risk:.1f})\n🎯 TP 1: ${tp1:.1f} (+90 pts BE)\n🚀 TP 2: ${tp2:.1f} (+${reward:.1f})")
+            send_tg(
+                f"🤖 [AUTO-TRADE EXECUTED] BTC LONG\n\n"
+                f"💵 Capital: ${capital} | Lev: {lev}x\n"
+                f"📦 Bought Qty: {qty} BTC (~${position_size_usd:.0f})\n"
+                f"📍 Entry: ${entry:.1f}\n"
+                f"🛡️ Safe SL: ${sl:.1f} (-${risk:.1f})\n"
+                f"🎯 TP 1: ${tp1:.1f} (Auto-BE)\n"
+                f"🚀 TP 2: ${tp2:.1f} (+${reward:.1f})\n\n"
+                f"Status: Live in Market"
+            )
 
         elif short_cond:
             self.last_signal_time = now
             entry = round(live['close'], 1)
-            sl = round(max(live['high'], swing_high) + 25.0, 1)
-            risk = round(sl - entry, 1)
-            if risk < 85.0: risk = 95.0; sl = round(entry + 95.0, 1)
-            if risk > 160.0: risk = 140.0; sl = round(entry - 140.0, 1)
-
-            tp1 = round(entry - 90.0, 1)
-            reward = round(risk * 2.2, 1)
+            risk = round(max(atr * 1.05, 180.0), 1)
+            sl = round(entry + risk, 1)
+            tp1_pts = round(risk * 0.9, 1)
+            tp1 = round(entry - tp1_pts, 1)
+            reward = round(risk * 2.0, 1)
             tp2 = round(entry - reward, 1)
+
+            qty = round(position_size_usd / entry, 4)
+            if qty <= 0: qty = 0.001
 
             self.active_trade = {
                 'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2,
-                'risk': risk, 'reward': reward, 'tp1_hit': False, 'active': True
+                'tp1_pts': tp1_pts, 'risk': risk, 'reward': reward, 'tp1_hit': False,
+                'qty': qty, 'capital': capital, 'leverage': lev
             }
-            GLOBAL_APP["active_trade"] = self.active_trade
-            save_data(GLOBAL_APP)
+            GLOBAL_DATA["active_trade"] = self.active_trade
+            save_data(GLOBAL_DATA)
 
-            send_tg(f"⚡ BTC CONFIRMED SHORT (5M)\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-${risk:.1f})\n🎯 TP 1: ${tp1:.1f} (+90 pts BE)\n🩸 TP 2: ${tp2:.1f} (+${reward:.1f})")
+            send_tg(
+                f"🤖 [AUTO-TRADE EXECUTED] BTC SHORT\n\n"
+                f"💵 Capital: ${capital} | Lev: {lev}x\n"
+                f"📦 Sold Qty: {qty} BTC (~${position_size_usd:.0f})\n"
+                f"📍 Entry: ${entry:.1f}\n"
+                f"🛡️ Safe SL: ${sl:.1f} (-${risk:.1f})\n"
+                f"🎯 TP 1: ${tp1:.1f} (Auto-BE)\n"
+                f"🩸 TP 2: ${tp2:.1f} (+${reward:.1f})\n\n"
+                f"Status: Live in Market"
+            )
 
-if "bg_engine_active" not in st.session_state:
-    st.session_state["bg_engine_active"] = True
-    active_th = False
+if "sniper_master_thread" not in st.session_state:
+    st.session_state["sniper_master_thread"] = True
+    running = False
     for th in threading.enumerate():
-        if th.name == "PersistentWorker":
-            active_th = True
+        if th.name == "SniperMasterEngine":
+            running = True
             break
-    if not active_th:
-        engine = PersistentHistoryEngine()
-        t = threading.Thread(target=engine.run, name="PersistentWorker", daemon=True)
+    if not running:
+        engine = SniperTrendEngine()
+        t = threading.Thread(target=engine.run, name="SniperMasterEngine", daemon=True)
         t.start()
 
 # --- STREAMLIT DASHBOARD CONFIG ---
@@ -243,7 +314,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Direct Live Disk Read on every render
 current_data = load_data()
 history_str = json.dumps(current_data["history"])
 stats_str = json.dumps({
@@ -253,6 +323,7 @@ stats_str = json.dumps({
     "win_rate": current_data["win_rate"]
 })
 trade_str = json.dumps(current_data.get("active_trade"))
+cfg_str = json.dumps(current_data.get("auto_trade_config", {"enabled": True, "capital": 100.0, "leverage": 10}))
 
 terminal_html = """<!DOCTYPE html>
 <html>
@@ -290,17 +361,39 @@ terminal_html = """<!DOCTYPE html>
         
         #chart-zone { 
             width: 100vw; 
-            height: 60vh; 
+            height: 55vh; 
             background: #080a0f; 
+        }
+
+        /* AUTO TRADE CONTROL DOCK */
+        .trade-dock {
+            width: 100vw;
+            height: 38px;
+            background: #0a0e17;
+            border-top: 1px solid #1a2336;
+            padding: 2px 8px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 10px;
+        }
+        .dock-group { display: flex; align-items: center; gap: 6px; }
+        .dock-input {
+            background: #121824; border: 1px solid #23304a; color: #00e676;
+            font-size: 11px; font-weight: 800; border-radius: 4px; padding: 2px 6px; width: 55px; text-align: center;
+        }
+        .toggle-btn {
+            background: #00e676; color: #000; font-size: 9px; font-weight: 900;
+            padding: 4px 8px; border-radius: 4px; border: none; cursor: pointer;
         }
 
         .bottom-bar {
             width: 100vw;
-            height: calc(40vh - 38px);
-            max-height: 50px;
+            height: calc(45vh - 76px);
+            max-height: 48px;
             background: #0d121c;
             border-top: 1px solid #1a2336;
-            padding: 4px 8px;
+            padding: 3px 8px;
             display: grid;
             grid-template-columns: 1fr 1fr 1fr 1.5fr;
             gap: 6px;
@@ -311,10 +404,10 @@ terminal_html = """<!DOCTYPE html>
             flex-direction: column;
             justify-content: center;
             background: #101624;
-            padding: 3px 6px;
+            padding: 2px 6px;
             border-radius: 4px;
             border: 1px solid #192233;
-            height: 38px;
+            height: 36px;
         }
         .cell-head {
             font-size: 7px;
@@ -325,7 +418,7 @@ terminal_html = """<!DOCTYPE html>
             margin-bottom: 2px;
         }
         .cell-body {
-            font-size: 10.5px;
+            font-size: 10px;
             font-weight: 800;
             color: #fff;
             white-space: nowrap;
@@ -340,7 +433,7 @@ terminal_html = """<!DOCTYPE html>
         }
         .modal-box {
             background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px;
-            width: 90vw; max-width: 400px; max-height: 80vh; display: flex; flex-direction: column;
+            width: 92vw; max-width: 420px; max-height: 80vh; display: flex; flex-direction: column;
             padding: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8);
         }
         .history-list { overflow-y: auto; max-height: 280px; font-size: 10px; }
@@ -349,7 +442,7 @@ terminal_html = """<!DOCTYPE html>
 </head>
 <body>
     <div class="top-nav">
-        <div class="brand">⚡ SNIPER 5M <span class="badge-scan">PRO RADAR</span></div>
+        <div class="brand">⚡ SNIPER 5M <span class="badge-scan">PRO AUTO</span></div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
         <div class="stat-card"><div class="stat-label">BIG TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
@@ -361,6 +454,21 @@ terminal_html = """<!DOCTYPE html>
 
     <div class="workspace">
         <div id="chart-zone"></div>
+
+        <!-- DEDICATED AUTO TRADE AMOUNT & QTY CONTROLLER -->
+        <div class="trade-dock">
+            <div class="dock-group">
+                <button id="btn-auto-toggle" class="toggle-btn" onclick="toggleAutoTrade()">AUTO TRADE: ON</button>
+                <span style="color:#62697a; font-weight:800;">AMT ($):</span>
+                <input id="input-amount" class="dock-input" type="number" value="100" onchange="updateTradeConfig()">
+                <span style="color:#62697a; font-weight:800;">LEV:</span>
+                <input id="input-lev" class="dock-input" type="number" value="10" style="width:45px;" onchange="updateTradeConfig()">
+            </div>
+            <div class="dock-group">
+                <span style="color:#62697a;">QTY:</span>
+                <b id="calc-qty" style="color:#38bdf8; font-size:11px;">0.0118 BTC</b>
+            </div>
+        </div>
 
         <div class="bottom-bar">
             <div class="metric-cell">
@@ -376,8 +484,8 @@ terminal_html = """<!DOCTYPE html>
                 <div class="cell-body" id="val-atr" style="color:#f0b90b;">--</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">ACTIVE SETUP</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">RADAR ACTIVE</div>
+                <span class="cell-head">POSITION STATUS</span>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">READY TO BUY/SELL</div>
             </div>
         </div>
     </div>
@@ -385,15 +493,15 @@ terminal_html = """<!DOCTYPE html>
     <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
         <div class="modal-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <b style="color:#fff; font-size:12px;">TRADE HISTORY & STATS</b>
+                <b style="color:#fff; font-size:12px;">TRADE HISTORY & ACTUAL P&L</b>
                 <div style="display:flex; gap:6px; align-items:center;">
-                    <button onclick="clearAllHistory()" style="background:#ff3b30; border:none; color:#fff; font-size:9px; font-weight:800; padding:3px 8px; border-radius:3px; cursor:pointer;">CLEAR ALL</button>
+                    <button onclick="clearServerHistoryPermanently()" style="background:#ff3b30; border:none; color:#fff; font-size:9px; font-weight:800; padding:3px 8px; border-radius:3px; cursor:pointer;">CLEAR ALL</button>
                     <button onclick="toggleModal(false)" style="background:transparent; border:none; color:#888; font-size:16px; cursor:pointer; margin-left:4px;">✕</button>
                 </div>
             </div>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-bottom:10px;">
                 <div style="background:#131a26; padding:5px 8px; border-radius:4px; font-size:10px; display:flex; justify-content:space-between;">
-                    <span>Total Signals</span><b id="stat-total" style="color:#fff;">0</b>
+                    <span>Total Trades</span><b id="stat-total" style="color:#fff;">0</b>
                 </div>
                 <div style="background:#131a26; padding:5px 8px; border-radius:4px; font-size:10px; display:flex; justify-content:space-between;">
                     <span>Win Rate</span><b id="stat-rate" style="color:#00e676;">0.0%</b>
@@ -410,15 +518,48 @@ terminal_html = """<!DOCTYPE html>
         let stats = __STATS_PLACEHOLDER__;
         let historyData = __HISTORY_PLACEHOLDER__;
         let activeTrade = __TRADE_PLACEHOLDER__;
+        let cfg = __CFG_PLACEHOLDER__;
 
         let candles = [];
         let lineEntry = null, lineSL = null, lineTP = null;
+        let currentLivePrice = 85000.0;
 
         function toggleModal(show) {
             document.getElementById('modal-bg').style.display = show ? 'flex' : 'none';
         }
         function handleBgClick(e) {
             if (e.target.id === 'modal-bg') toggleModal(false);
+        }
+
+        function clearServerHistoryPermanently() {
+            window.parent.location.search = '?action=clear_all';
+        }
+
+        function toggleAutoTrade() {
+            cfg.enabled = !cfg.enabled;
+            const btn = document.getElementById('btn-auto-toggle');
+            if (cfg.enabled) {
+                btn.innerText = "AUTO TRADE: ON";
+                btn.style.background = "#00e676";
+                btn.style.color = "#000";
+            } else {
+                btn.innerText = "AUTO TRADE: OFF";
+                btn.style.background = "#ff3b30";
+                btn.style.color = "#fff";
+            }
+        }
+
+        function updateTradeConfig() {
+            cfg.capital = parseFloat(document.getElementById('input-amount').value) || 100;
+            cfg.leverage = parseInt(document.getElementById('input-lev').value) || 10;
+            updateCalcQty(currentLivePrice);
+        }
+
+        function updateCalcQty(price) {
+            if (!price || price <= 0) return;
+            let totalUsd = (cfg.capital || 100) * (cfg.leverage || 10);
+            let qty = (totalUsd / price).toFixed(4);
+            document.getElementById('calc-qty').innerText = qty + " BTC";
         }
 
         const chartZone = document.getElementById('chart-zone');
@@ -455,7 +596,7 @@ terminal_html = """<!DOCTYPE html>
                 lineWidth: 2,
                 lineStyle: LightweightCharts.LineStyle.Dashed,
                 axisLabelVisible: true,
-                title: 'ENTRY $' + activeTrade.entry.toFixed(1)
+                title: 'BOUGHT @ $' + activeTrade.entry.toFixed(1)
             });
 
             lineSL = series.createPriceLine({
@@ -488,10 +629,12 @@ terminal_html = """<!DOCTYPE html>
                 historyData.forEach(item => {
                     let resCol = item.result.includes("TP") ? "#00e676" : "#ff3b30";
                     let typeCol = item.type === "LONG" ? "#00e676" : "#ff3b30";
+                    let pnlDisp = item.pnl_usd ? `<b style="color:${resCol}; margin-left:4px;">(${item.pnl_usd})</b>` : '';
+                    let qtyDisp = item.qty ? `<span style="color:#62697a; font-size:8px;">[${item.qty} BTC]</span>` : '';
                     histCont.innerHTML += `
                         <div class="history-item">
-                            <span>${item.time} <b style="color:${typeCol};">${item.type}</b> @ $${item.entry.toFixed(1)}</span>
-                            <span><b style="color:${resCol};">${item.result}</b> (${item.pts} pts)</span>
+                            <span>${item.time} <b style="color:${typeCol};">${item.type}</b> ${qtyDisp} @ $${item.entry.toFixed(1)}</span>
+                            <span><b style="color:${resCol};">${item.result}</b> ${pnlDisp}</span>
                         </div>
                     `;
                 });
@@ -503,23 +646,15 @@ terminal_html = """<!DOCTYPE html>
                 document.getElementById('disp-entry').innerText = "$" + activeTrade.entry.toFixed(1);
                 document.getElementById('disp-sl').innerText = "$" + activeTrade.sl.toFixed(1);
                 document.getElementById('disp-tp').innerText = "$" + activeTrade.tp2.toFixed(1);
-                document.getElementById('val-setup').innerText = activeTrade.type + " RUNNING 🔥";
+                document.getElementById('val-setup').innerText = activeTrade.type + " AUTO EXECUTED 🔥";
                 document.getElementById('val-setup').style.color = activeTrade.type === "LONG" ? "#00e676" : "#ff3b30";
             } else {
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = "RADAR ACTIVE";
+                document.getElementById('val-setup').innerText = "READY TO BUY/SELL";
                 document.getElementById('val-setup').style.color = "#38bdf8";
             }
-        }
-
-        function clearAllHistory() {
-            historyData = [];
-            stats = { total: 0, tp: 0, sl: 0, win_rate: 0 };
-            activeTrade = null;
-            renderLines();
-            renderUI();
         }
 
         function updateMetricsUI() {
@@ -570,6 +705,9 @@ terminal_html = """<!DOCTYPE html>
 
         function updateLiveCandle(price, rawTimeSec) {
             if (candles.length === 0) return;
+            currentLivePrice = price;
+            updateCalcQty(price);
+
             const barTime = get5MBoundary(rawTimeSec);
             let last = candles[candles.length - 1];
 
@@ -610,9 +748,10 @@ terminal_html = """<!DOCTYPE html>
 
         renderUI();
         renderLines();
+        updateCalcQty(85000.0);
         window.onresize = () => chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
     </script>
 </body>
-</html>""".replace("__STATS_PLACEHOLDER__", stats_str).replace("__HISTORY_PLACEHOLDER__", history_str).replace("__TRADE_PLACEHOLDER__", trade_str)
+</html>""".replace("__STATS_PLACEHOLDER__", stats_str).replace("__HISTORY_PLACEHOLDER__", history_str).replace("__TRADE_PLACEHOLDER__", trade_str).replace("__CFG_PLACEHOLDER__", cfg_str)
 
 components.html(terminal_html, height=720, scrolling=False)
