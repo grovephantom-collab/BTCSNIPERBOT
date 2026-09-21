@@ -11,7 +11,7 @@ from datetime import datetime
 # BTC SNIPER 5M - SINGLE ENGINE GUARANTEE (NO MORE GHOSTS)
 # ==============================================================================
 
-BOT_TOKEN = "8941403990:AAGEFNyFrEG-piIEpSri18QdcJHWLkU4J_4"
+BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
 CHAT_ID = "7886716805"
 DATA_FILE = "sniper_brain_data.json"
 
