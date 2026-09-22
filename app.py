@@ -1,5 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
+import sqlite3
 import threading
 import time
 import requests
@@ -9,107 +10,181 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# BTC SNIPER 5M - TRI-ENGINE AI (NEW TOKEN + GHOST KILLER)
+# COMPLETE ARCHITECTURE FOR AI CRYPTO SNIPER BOT (FULL ENTERPRISE ENGINE)
+# Includes: Commander, News Engine, Overseer, Execution, Risk Guard, SQLite DB
 # ==============================================================================
 
-# AAPKA NAYA TOKEN YAHAN UPDATE KAR DIYA GAYA HAI
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
 CHAT_ID = "7886716805"
-DATA_FILE = "sniper_brain_data.json"
+DB_FILE = "sniper_vault.db"
 LOCK_FILE = "master_engine_lock.txt"
 
-def get_default_state():
-    return {
-        "history": [], "total_signals": 0, "tp_count": 0, "sl_count": 0,
-        "win_rate": 0.0, "active_trade": None, 
-        "metrics": {"trend": "ANALYZING...", "rsi": "--", "atr": "--", "news": "SCANNING..."},
-        "news_score": {"sentiment": "NEUTRAL", "score": 0},
-        "config": {"capital": 100.0, "leverage": 10},
-        "heartbeats": {"main": time.time(), "news": time.time(), "head": time.time()}
-    }
+# ------------------------------------------------------------------------------
+# 1. DATABASE & LOGGING ENGINE (SQLite ACID Storage)
+# ------------------------------------------------------------------------------
+def init_db():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            symbol TEXT,
+            trade_type TEXT,
+            entry REAL,
+            exit_price REAL,
+            result TEXT,
+            pts TEXT,
+            pnl_usd TEXT,
+            qty REAL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS state (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS system_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            level TEXT,
+            message TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
+init_db()
+
+def log_system_event(level, message):
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=5)
+        cur = conn.cursor()
+        cur.execute("INSERT INTO system_logs (timestamp, level, message) VALUES (?, ?, ?)",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), level, message))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def get_db_state(key, default=None):
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=5)
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM state WHERE key=?", (key,))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            return json.loads(row[0])
+    except Exception:
+        pass
+    return default
+
+def set_db_state(key, value):
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=5)
+        cur = conn.cursor()
+        cur.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)", (key, json.dumps(value)))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# ------------------------------------------------------------------------------
+# 2. EMERGENCY CLEAR & REBOOT SYSTEM
+# ------------------------------------------------------------------------------
 if st.query_params.get("clear") == "1":
-    if os.path.exists(DATA_FILE): os.remove(DATA_FILE)
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=5)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM trades")
+        cur.execute("DELETE FROM system_logs")
+        conn.commit()
+        conn.close()
+        set_db_state("active_trade", None)
+        set_db_state("daily_stats", {"date": datetime.now().strftime("%Y-%m-%d"), "loss_usd": 0.0, "is_circuit_broken": False})
+    except Exception:
+        pass
     st.query_params.clear()
     st.rerun()
 
-def load_data():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r") as f: 
-                d = json.load(f)
-                if "heartbeats" not in d: d["heartbeats"] = {"main": time.time(), "news": time.time(), "head": time.time()}
-                return d
-        except: return get_default_state()
-    return get_default_state()
-
-def save_data(data):
-    try:
-        with open(DATA_FILE, "w") as f: json.dump(data, f, indent=2)
-    except: pass
-
-def send_tg_command(msg):
+# ------------------------------------------------------------------------------
+# 3. NOTIFICATION & MONITORING ENGINE (Telegram Alerts)
+# ------------------------------------------------------------------------------
+def send_telegram_alert(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": str(CHAT_ID).strip(), "text": msg}
     for _ in range(3):
         try:
-            if requests.post(url, json=payload, timeout=5).status_code == 200: return True
-        except: time.sleep(0.5)
+            r = requests.post(url, json=payload, timeout=4)
+            if r.status_code == 200:
+                return True
+        except Exception:
+            time.sleep(0.5)
     return False
 
-def get_market_data():
-    try:
-        r = requests.get("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=45", timeout=3)
-        if r.status_code == 200:
-            raw = r.json()
-            if len(raw) >= 35:
-                closed = [{'open': float(d[1]), 'high': float(d[2]), 'low': float(d[3]), 'close': float(d[4])} for d in raw[:-1]]
-                live = {'time': int(raw[-1][0]), 'high': float(raw[-1][2]), 'low': float(raw[-1][3]), 'close': float(raw[-1][4]), 'open': float(raw[-1][1])}
-                return closed, live
-    except: pass
+# ------------------------------------------------------------------------------
+# 4. EXTERNAL DATA SOURCE (Binance Cloud Spot API - CORS Safe)
+# ------------------------------------------------------------------------------
+def fetch_binance_klines():
+    urls = [
+        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=50",
+        "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=50"
+    ]
+    for u in urls:
+        try:
+            r = requests.get(u, timeout=3)
+            if r.status_code == 200:
+                raw = r.json()
+                if isinstance(raw, list) and len(raw) >= 35:
+                    closed = [{'time': int(d[0]), 'open': float(d[1]), 'high': float(d[2]),
+                               'low': float(d[3]), 'close': float(d[4])} for d in raw[:-1]]
+                    live = {'time': int(raw[-1][0]), 'open': float(raw[-1][1]), 'high': float(raw[-1][2]),
+                            'low': float(raw[-1][3]), 'close': float(raw[-1][4])}
+                    return closed, live
+        except Exception:
+            continue
     return None, None
 
-# ==============================================================================
-# ENGINE 3: THE HEAD OVERSEER
-# ==============================================================================
-class HeadOverseerEngine:
-    def __init__(self, engine_id):
-        self.engine_id = engine_id
-        self.alert_sent = False
+# ------------------------------------------------------------------------------
+# 5. RISK MANAGEMENT ENGINE (Circuit Breaker & Sizing Guard)
+# ------------------------------------------------------------------------------
+class RiskManagementEngine:
+    def __init__(self, max_daily_loss_usd=50.0):
+        self.max_daily_loss_usd = max_daily_loss_usd
 
-    def run(self):
-        send_tg_command("🛡️ [HEAD OVERSEER] Tri-Engine System Booted with NEW TOKEN. Old Ghosts Blocked.")
-        while True:
-            try:
-                with open(LOCK_FILE, "r") as f:
-                    if f.read() != self.engine_id: break
-            except: pass
+    def check_safety(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        stats = get_db_state("daily_stats", {"date": today, "loss_usd": 0.0, "is_circuit_broken": False})
+        if stats.get("date") != today:
+            stats = {"date": today, "loss_usd": 0.0, "is_circuit_broken": False}
+            set_db_state("daily_stats", stats)
 
-            now = time.time()
-            state = load_data()
-            hb_main = state["heartbeats"].get("main", now)
-            hb_news = state["heartbeats"].get("news", now)
+        if stats.get("is_circuit_broken", False) or stats.get("loss_usd", 0.0) >= self.max_daily_loss_usd:
+            return False, "CIRCUIT BREAKER TRIGGERED: Daily Loss Exceeded"
+        
+        is_bot_active = get_db_state("bot_power", True)
+        if not is_bot_active:
+            return False, "MANUAL KILL-SWITCH: Bot is Paused"
 
-            main_dead = (now - hb_main) > 30
-            news_dead = (now - hb_news) > 45
+        return True, "SAFE"
 
-            if (main_dead or news_dead) and not self.alert_sent:
-                status_main = "🔴 DEAD / HUNG" if main_dead else "🟢 ONLINE"
-                status_news = "🔴 DEAD / HUNG" if news_dead else "🟢 ONLINE"
-                send_tg_command(f"🚨 [OVERSEER ALERT] Engine Failure Detected!\nEngine 1: {status_main}\nEngine 2: {status_news}")
-                self.alert_sent = True
-            elif not main_dead and not news_dead and self.alert_sent:
-                send_tg_command("✅ [OVERSEER RECOVERY] Engines back online.")
-                self.alert_sent = False
+    def record_loss(self, loss_amount_usd):
+        today = datetime.now().strftime("%Y-%m-%d")
+        stats = get_db_state("daily_stats", {"date": today, "loss_usd": 0.0, "is_circuit_broken": False})
+        if loss_amount_usd > 0:
+            stats["loss_usd"] += loss_amount_usd
+            if stats["loss_usd"] >= self.max_daily_loss_usd:
+                stats["is_circuit_broken"] = True
+                send_telegram_alert(f"🚨 [CIRCUIT BREAKER] Daily loss limit (${self.max_daily_loss_usd}) reached!\nTrading Paused until tomorrow.")
+            set_db_state("daily_stats", stats)
 
-            state["heartbeats"]["head"] = now
-            save_data(state)
-            time.sleep(0.5)
-
-# ==============================================================================
-# ENGINE 2: GLOBAL NEWS & DATA ANALYZER
-# ==============================================================================
-class GlobalNewsDataEngine:
+# ------------------------------------------------------------------------------
+# 6. ENGINE 2: NEWS & SENTIMENT SCOUT
+# ------------------------------------------------------------------------------
+class GlobalNewsEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
 
@@ -117,130 +192,136 @@ class GlobalNewsDataEngine:
         while True:
             try:
                 with open(LOCK_FILE, "r") as f:
-                    if f.read() != self.engine_id: break
-            except: pass
+                    if f.read().strip() != self.engine_id:
+                        break
+            except Exception:
+                pass
 
             score = 0
-            sentiment_text = "NEUTRAL ⚖️"
-            
-            try:
-                fg_resp = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3).json()
-                fng_value = int(fg_resp['data'][0]['value'])
-                if fng_value > 60: score += 5
-                elif fng_value < 40: score -= 5
-            except: pass
+            sentiment = "NEUTRAL ⚖️"
 
             try:
-                tk_resp = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=3).json()
-                price_change = float(tk_resp['priceChangePercent'])
-                if price_change > 2.0: score += 5
-                elif price_change < -2.0: score -= 5
-            except: pass
+                fg = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3).json()
+                fng_val = int(fg['data'][0]['value'])
+                if fng_val > 60: score += 5
+                elif fng_val < 40: score -= 5
+            except Exception:
+                pass
 
-            if score >= 5: sentiment_text = "HIGHLY BULLISH 🚀"
-            elif score <= -5: sentiment_text = "BEARISH 🩸"
+            try:
+                tk = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=3).json()
+                chg = float(tk['priceChangePercent'])
+                if chg > 2.0: score += 5
+                elif chg < -2.0: score -= 5
+            except Exception:
+                pass
 
-            state = load_data()
-            state["news_score"] = {"sentiment": sentiment_text, "score": score}
-            state["metrics"]["news"] = sentiment_text
-            state["heartbeats"]["news"] = time.time()
-            save_data(state)
+            if score >= 5: sentiment = "HIGHLY BULLISH 🚀"
+            elif score <= -5: sentiment = "BEARISH 🩸"
+
+            set_db_state("news_sentiment", {"sentiment": sentiment, "score": score, "updated_at": time.time()})
             
+            hbs = get_db_state("heartbeats", {})
+            hbs["news"] = time.time()
+            set_db_state("heartbeats", hbs)
+
             time.sleep(15)
 
-# ==============================================================================
-# ENGINE 1: CENTRAL COMMANDER
-# ==============================================================================
-class CentralCommandEngine:
+# ------------------------------------------------------------------------------
+# 7. ENGINE 1 & EXECUTION: COMMANDER + POSITION MANAGER
+# ------------------------------------------------------------------------------
+class MasterCommanderExecutionEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
         self.last_candle_time = 0
+        self.risk_guard = RiskManagementEngine()
 
-    def update_technical_metrics(self, state, closed, live):
-        trs = []
-        for i in range(len(closed) - 14, len(closed)):
-            c, p = closed[i], closed[i-1]
-            trs.append(max(c['high'] - c['low'], abs(c['high'] - p['close']), abs(c['low'] - p['close'])))
-        atr = max(sum(trs) / len(trs), 250.0)
-
-        closes = [c['close'] for c in closed]
-        k = 2 / 31
-        ema30 = closes[0]
-        for cl in closes[1:]: ema30 = (cl * k) + (ema30 * (1 - k))
-        trend = "BULLISH ▲" if live['close'] > ema30 else "BEARISH ▼"
-
-        gains, losses = 0, 0
-        for i in range(len(closes) - 14, len(closes)):
-            diff = closes[i] - closes[i - 1]
-            if diff >= 0: gains += diff
-            else: losses -= diff
-        rsi = round(100 - (100 / (1 + (gains / max(losses, 0.0001)))), 1)
-
-        state["metrics"]["trend"] = trend
-        state["metrics"]["rsi"] = str(rsi)
-        state["metrics"]["atr"] = f"${atr:.1f}"
-        return atr, ema30
-
-    def close_trade(self, state, result, pnl_pts, pnl_usd, qty):
-        t = state["active_trade"]
+    def record_completed_trade(self, t, exit_price, result, pnl_pts, pnl_usd):
         now_str = datetime.now().strftime("%H:%M")
-        state["total_signals"] += 1
-        if "TP" in result: state["tp_count"] += 1
-        elif "SL" in result: state["sl_count"] += 1
-        total = state["tp_count"] + state["sl_count"]
-        if total > 0: state["win_rate"] = round((state["tp_count"] / total) * 100, 1)
+        qty = t.get("qty", 0.01)
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=5)
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (now_str, "BTCUSDT", t['type'], t['entry'], exit_price, result, pnl_pts, pnl_usd, qty))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
 
-        state["history"].insert(0, {"time": now_str, "type": t['type'], "entry": float(t['entry']), "result": result, "pts": pnl_pts, "pnl_usd": pnl_usd, "qty": qty})
-        if len(state["history"]) > 500: state["history"].pop()
-        state["active_trade"] = None
-        save_data(state)
+        set_db_state("active_trade", None)
 
-    def manage_active_trade(self, state, live):
-        t = state["active_trade"]
+        if "SL" in result and "-" in pnl_usd:
+            loss_val = abs(float(pnl_usd.replace("-$", "").replace("$", "").strip()))
+            self.risk_guard.record_loss(loss_val)
+
+    def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
 
         if t['type'] == 'LONG':
             if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 150.0):
                 t['be_hit'] = True
                 t['sl'] = round(t['entry'] + 25.0, 1)
-                save_data(state)
-                send_tg_command(f"🎯 COMMAND: BTC LONG SECURED (+150 pts)\nSL at Breakeven.")
+                set_db_state("active_trade", t)
+                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC LONG Protected!\nSL locked at ${t['sl']:.1f} (+25 pts profit locked).")
 
             if live['high'] >= t['tp']:
                 pts = round(t['tp'] - t['entry'], 1)
-                self.close_trade(state, "TP HIT", f"+{pts:.0f}", f"+${round(pts * qty, 2)}", qty)
-                send_tg_command(f"🚀 AI TP HIT: +${round(pts * qty, 2)} (+{pts:.0f} pts)\nClosed @ ${t['tp']:.1f}")
+                usd = round(pts * qty, 2)
+                self.record_completed_trade(t, t['tp'], "TP HIT", f"+{pts:.0f}", f"+${usd}")
+                send_telegram_alert(f"🚀 [TARGET ACHIEVED] BTC LONG TP HIT!\nNet Profit: +${usd} (+{pts:.0f} pts)\nQty: {qty} BTC @ ${t['tp']:.1f}")
             elif live['low'] <= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 pts = 25.0 if t.get('be_hit', False) else -(t['entry'] - t['sl'])
                 usd = round(pts * qty, 2)
                 sign = "+" if usd >= 0 else ""
-                self.close_trade(state, res, f"{sign}{pts:.0f}", f"{sign}${usd}", qty)
-                send_tg_command(f"🛡️ AI EXIT: {res} | {sign}${usd} ({sign}{pts:.0f} pts)\nClosed @ ${t['sl']:.1f}")
+                self.record_completed_trade(t, t['sl'], res, f"{sign}{pts:.0f}", f"{sign}${usd}")
+                send_telegram_alert(f"🛡️ [POSITION EXIT] BTC LONG {res}\nPnL: {sign}${usd} ({sign}{pts:.0f} pts)\nExit Price: ${t['sl']:.1f}")
 
         elif t['type'] == 'SHORT':
             if not t.get('be_hit', False) and live['low'] <= (t['entry'] - 150.0):
                 t['be_hit'] = True
                 t['sl'] = round(t['entry'] - 25.0, 1)
-                save_data(state)
-                send_tg_command(f"🎯 COMMAND: BTC SHORT SECURED (+150 pts)\nSL at Breakeven.")
+                set_db_state("active_trade", t)
+                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC SHORT Protected!\nSL locked at ${t['sl']:.1f} (+25 pts profit locked).")
 
             if live['low'] <= t['tp']:
                 pts = round(t['entry'] - t['tp'], 1)
-                self.close_trade(state, "TP HIT", f"+{pts:.0f}", f"+${round(pts * qty, 2)}", qty)
-                send_tg_command(f"🩸 AI TP HIT: +${round(pts * qty, 2)} (+{pts:.0f} pts)\nClosed @ ${t['tp']:.1f}")
+                usd = round(pts * qty, 2)
+                self.record_completed_trade(t, t['tp'], "TP HIT", f"+{pts:.0f}", f"+${usd}")
+                send_telegram_alert(f"🩸 [TARGET ACHIEVED] BTC SHORT TP HIT!\nNet Profit: +${usd} (+{pts:.0f} pts)\nQty: {qty} BTC @ ${t['tp']:.1f}")
             elif live['high'] >= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 pts = 25.0 if t.get('be_hit', False) else -(t['sl'] - t['entry'])
                 usd = round(pts * qty, 2)
                 sign = "+" if usd >= 0 else ""
-                self.close_trade(state, res, f"{sign}{pts:.0f}", f"{sign}${usd}", qty)
-                send_tg_command(f"🛡️ AI EXIT: {res} | {sign}${usd} ({sign}{pts:.0f} pts)\nClosed @ ${t['sl']:.1f}")
+                self.record_completed_trade(t, t['sl'], res, f"{sign}{pts:.0f}", f"{sign}${usd}")
+                send_telegram_alert(f"🛡️ [POSITION EXIT] BTC SHORT {res}\nPnL: {sign}${usd} ({sign}{pts:.0f} pts)\nExit Price: ${t['sl']:.1f}")
 
-    def scan_new_targets(self, state, closed, live, atr, ema30):
+    def evaluate_new_breakout(self, closed, live):
         c0 = closed[-1]
-        if live['time'] <= self.last_candle_time: return
+        if live['time'] <= self.last_candle_time:
+            return
         self.last_candle_time = live['time']
+
+        is_safe, reason = self.risk_guard.check_safety()
+        if not is_safe:
+            log_system_event("RISK_SKIP", reason)
+            return
+
+        tr_list = []
+        for i in range(len(closed) - 14, len(closed)):
+            c, p = closed[i], closed[i-1]
+            tr_list.append(max(c['high'] - c['low'], abs(c['high'] - p['close']), abs(c['low'] - p['close'])))
+        atr = max(sum(tr_list) / len(tr_list), 220.0)
+
+        closes = [c['close'] for c in closed]
+        k = 2 / 31
+        ema30 = closes[0]
+        for cl in closes[1:]:
+            ema30 = (cl * k) + (ema30 * (1 - k))
 
         is_up = c0['close'] > ema30
         is_dn = c0['close'] < ema30
@@ -248,94 +329,152 @@ class CentralCommandEngine:
         l_range = min(c['low'] for c in closed[-9:-1])
         body = c0['close'] - c0['open']
 
-        is_long = is_up and (c0['close'] > h_range) and (body >= 30.0)
-        is_short = is_dn and (c0['close'] < l_range) and (body <= -30.0)
+        is_long = is_up and (c0['close'] > h_range) and (body >= 28.0)
+        is_short = is_dn and (c0['close'] < l_range) and (body <= -28.0)
 
-        news_state = state.get("news_score", {"sentiment": "NEUTRAL", "score": 0})
-        n_score = news_state["score"]
-        n_text = news_state["sentiment"]
+        news_data = get_db_state("news_sentiment", {"sentiment": "NEUTRAL ⚖️", "score": 0})
+        n_score = news_data.get("score", 0)
+        n_text = news_data.get("sentiment", "NEUTRAL")
+
+        cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
+        pos_usd = float(cfg['capital']) * int(cfg['leverage'])
 
         if is_long:
             if n_score <= -5:
-                send_tg_command(f"🚫 AI REJECTED LONG\nChart is Bullish but Global News is {n_text}.\nAvoided Fakeout!")
+                send_telegram_alert(f"🚫 [AI SHIELD] LONG Rejected!\nChart is Bullish but Global News is {n_text}.\nAvoided Fakeout!")
                 return
-            
+
             entry = round(c0['close'], 1)
-            risk = round(atr * 1.3, 1) if n_score >= 5 else round(atr * 1.5, 1)
+            risk = round(atr * 1.4, 1)
             sl = round(entry - risk, 1)
-            tp_mult = 2.5 if n_score >= 5 else 1.8
+            tp_mult = 2.4 if n_score >= 5 else 1.8
             tp = round(entry + (risk * tp_mult), 1)
+            qty = round(pos_usd / entry, 4) or 0.001
 
-            cfg = state.get("config", {"capital": 100, "leverage": 10})
-            qty = round((float(cfg['capital']) * int(cfg['leverage'])) / entry, 4) or 0.001
-
-            state["active_trade"] = {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False}
-            save_data(state)
-            send_tg_command(f"🤖 [AI DUAL-CONFIRMED] LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f}\n🎯 TP: ${tp:.1f}\n📦 Qty: {qty} BTC\n\n📰 Global Data: {n_text}")
+            trade_obj = {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False}
+            set_db_state("active_trade", trade_obj)
+            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC LONG (5M)\n\n📍 Entry: ${entry:.1f}\n🛡️ Buffer SL: ${sl:.1f} (-${risk:.1f})\n🎯 Target TP: ${tp:.1f} (+${risk*tp_mult:.1f})\n📦 Position: {qty} BTC (~${pos_usd:.0f})\n\n📰 Engine 2 Sentiment: {n_text}\n🛡️ Risk Guard: SAFE")
 
         elif is_short:
             if n_score >= 5:
-                send_tg_command(f"🚫 AI REJECTED SHORT\nChart is Bearish but Global News is {n_text}.\nAvoided Fakeout!")
+                send_telegram_alert(f"🚫 [AI SHIELD] SHORT Rejected!\nChart is Bearish but Global News is {n_text}.\nAvoided Fakeout!")
                 return
-            
+
             entry = round(c0['close'], 1)
-            risk = round(atr * 1.3, 1) if n_score <= -5 else round(atr * 1.5, 1)
+            risk = round(atr * 1.4, 1)
             sl = round(entry + risk, 1)
-            tp_mult = 2.5 if n_score <= -5 else 1.8
+            tp_mult = 2.4 if n_score <= -5 else 1.8
             tp = round(entry - (risk * tp_mult), 1)
+            qty = round(pos_usd / entry, 4) or 0.001
 
-            cfg = state.get("config", {"capital": 100, "leverage": 10})
-            qty = round((float(cfg['capital']) * int(cfg['leverage'])) / entry, 4) or 0.001
-
-            state["active_trade"] = {'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False}
-            save_data(state)
-            send_tg_command(f"🤖 [AI DUAL-CONFIRMED] SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f}\n🎯 TP: ${tp:.1f}\n📦 Qty: {qty} BTC\n\n📰 Global Data: {n_text}")
+            trade_obj = {'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False}
+            set_db_state("active_trade", trade_obj)
+            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC SHORT (5M)\n\n📍 Entry: ${entry:.1f}\n🛡️ Buffer SL: ${sl:.1f} (-${risk:.1f})\n🎯 Target TP: ${tp:.1f} (+${risk*tp_mult:.1f})\n📦 Position: {qty} BTC (~${pos_usd:.0f})\n\n📰 Engine 2 Sentiment: {n_text}\n🛡️ Risk Guard: SAFE")
 
     def run(self):
         while True:
             try:
                 with open(LOCK_FILE, "r") as f:
-                    if f.read() != self.engine_id: break
-            except: pass
+                    if f.read().strip() != self.engine_id:
+                        break
+            except Exception:
+                pass
 
-            closed, live = get_market_data()
-            state = load_data()
+            closed, live = fetch_binance_klines()
             if closed and live:
-                atr, ema30 = self.update_technical_metrics(state, closed, live)
-                if state.get("active_trade"): self.manage_active_trade(state, live)
-                else: self.scan_new_targets(state, closed, live, atr, ema30)
+                active = get_db_state("active_trade")
+                if active:
+                    self.manage_position(active, live)
+                else:
+                    self.evaluate_new_breakout(closed, live)
 
-            state["heartbeats"]["main"] = time.time()
-            save_data(state)
+            hbs = get_db_state("heartbeats", {})
+            hbs["main"] = time.time()
+            set_db_state("heartbeats", hbs)
+
             time.sleep(2)
 
-# ==============================================================================
-# SECURE BOOT (KILLS ALL OLD INSTANCES)
-# ==============================================================================
+# ------------------------------------------------------------------------------
+# 8. ENGINE 3: HEAD OVERSEER & WATCHDOG
+# ------------------------------------------------------------------------------
+class HeadOverseerEngine:
+    def __init__(self, engine_id):
+        self.engine_id = engine_id
+        self.alerted = False
+
+    def run(self):
+        send_telegram_alert("🛡️ [HEAD OVERSEER] Complete Architecture Active (All 8 Components Operational).")
+        while True:
+            try:
+                with open(LOCK_FILE, "r") as f:
+                    if f.read().strip() != self.engine_id:
+                        break
+            except Exception:
+                pass
+
+            now = time.time()
+            hbs = get_db_state("heartbeats", {})
+            hb_main = hbs.get("main", now)
+            hb_news = hbs.get("news", now)
+
+            main_hang = (now - hb_main) > 35
+            news_hang = (now - hb_news) > 50
+
+            if (main_hang or news_hang) and not self.alerted:
+                m_st = "🔴 HUNG" if main_hang else "🟢 OK"
+                n_st = "🔴 HUNG" if news_hang else "🟢 OK"
+                send_telegram_alert(f"🚨 [OVERSEER EMERGENCY ALERT]\nEngine Failure Detected!\nCommander: {m_st}\nNews Scout: {n_st}\nAuto-Recovery Activated...")
+                self.alerted = True
+            elif not main_hang and not news_hang and self.alerted:
+                send_telegram_alert("✅ [OVERSEER RECOVERY] All Engines Resynced & Operational.")
+                self.alerted = False
+
+            time.sleep(0.5)
+
+# ------------------------------------------------------------------------------
+# 9. SINGLETON BOOT
+# ------------------------------------------------------------------------------
 @st.cache_resource
-def boot_engines():
+def boot_complete_system():
     engine_id = str(uuid.uuid4())
-    with open(LOCK_FILE, "w") as f: f.write(engine_id)
-    threading.Thread(target=CentralCommandEngine(engine_id).run, name="MasterCmd", daemon=True).start()
-    threading.Thread(target=GlobalNewsDataEngine(engine_id).run, name="NewsData", daemon=True).start()
-    threading.Thread(target=HeadOverseerEngine(engine_id).run, name="HeadOverseer", daemon=True).start()
+    with open(LOCK_FILE, "w") as f:
+        f.write(engine_id)
+
+    threading.Thread(target=MasterCommanderExecutionEngine(engine_id).run, name="Commander", daemon=True).start()
+    threading.Thread(target=GlobalNewsEngine(engine_id).run, name="NewsScout", daemon=True).start()
+    threading.Thread(target=HeadOverseerEngine(engine_id).run, name="Overseer", daemon=True).start()
     return engine_id
 
-global_engine_id = boot_engines()
+system_id = boot_complete_system()
 
-# ==============================================================================
-# UI DISPLAY 
-# ==============================================================================
-st.set_page_config(page_title="AI TRI-ENGINE", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+# ------------------------------------------------------------------------------
+# 10. FRONTEND DASHBOARD & MANUAL CONTROL
+# ------------------------------------------------------------------------------
+st.set_page_config(page_title="AI CRYPTO SNIPER BOT", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>header, footer, #MainMenu { display: none !important; } .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; } iframe { width: 100vw !important; height: 100vh !important; border: none !important; }</style>""", unsafe_allow_html=True)
 
-state = load_data()
-js_active_trade = json.dumps(state.get("active_trade"))
-js_history = json.dumps(state.get("history", []))
-js_stats = json.dumps({"total": state.get("total_signals", 0), "win_rate": state.get("win_rate", 0)})
-js_metrics = json.dumps(state.get("metrics", {"trend": "--", "rsi": "--", "atr": "--", "news": "SCANNING..."}))
-js_cfg = json.dumps(state.get("config", {"capital": 100, "leverage": 10}))
-js_hbs = json.dumps(state.get("heartbeats", {}))
+conn = sqlite3.connect(DB_FILE, timeout=5)
+cur = conn.cursor()
+cur.execute("SELECT timestamp, trade_type, entry, result, pts, pnl_usd FROM trades ORDER BY id DESC LIMIT 50")
+rows = cur.fetchall()
+history_list = [{"time": r[0], "type": r[1], "entry": r[2], "result": r[3], "pts": r[4], "pnl_usd": r[5]} for r in rows]
+
+cur.execute("SELECT COUNT(*), SUM(CASE WHEN result LIKE '%TP%' THEN 1 ELSE 0 END) FROM trades")
+t_count, tp_count = cur.fetchone()
+conn.close()
+
+win_rate = round((tp_count / t_count) * 100, 1) if t_count > 0 else 0.0
+active_trade = get_db_state("active_trade")
+news_sentiment = get_db_state("news_sentiment", {"sentiment": "NEUTRAL ⚖️", "score": 0})
+cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
+daily_risk = get_db_state("daily_stats", {"loss_usd": 0.0, "is_circuit_broken": False})
+
+js_active_trade = json.dumps(active_trade)
+js_history = json.dumps(history_list)
+js_stats = json.dumps({"total": t_count, "win_rate": win_rate})
+js_news = json.dumps(news_sentiment)
+js_cfg = json.dumps(cfg)
+js_risk = json.dumps(daily_risk)
 
 terminal_html = f"""<!DOCTYPE html>
 <html>
@@ -371,13 +510,13 @@ terminal_html = f"""<!DOCTYPE html>
 </head>
 <body>
     <div class="top-nav">
-        <div class="brand">⚡ TRI-ENGINE <span class="badge-scan">MASTER AI</span></div>
+        <div class="brand">⚡ COMPLETE <span class="badge-scan">PRO BOT</span></div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
-        <div class="stat-card"><div class="stat-label">GUARD SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
+        <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
         <div class="stat-card"><div class="stat-label">TARGET TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
-        <button class="btn-history" onclick="toggleModal(true)">📜 HISTORY (<span id="hist-count">0</span>)</button>
+        <button class="btn-history" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
         <div style="margin-left: auto; display: flex; align-items: center; gap: 6px;">
-            <b id="live-price" style="color: #f0b90b; font-size: 12px;">Syncing...</b>
+            <b id="live-price" style="color: #f0b90b; font-size: 12px;">Connecting...</b>
         </div>
     </div>
 
@@ -385,34 +524,34 @@ terminal_html = f"""<!DOCTYPE html>
         <div id="chart-zone"></div>
         <div class="trade-dock">
             <div class="dock-group">
-                <button class="toggle-btn" onclick="triggerServerSync()">🔄 SYNC FROM AI</button>
+                <button class="toggle-btn" onclick="triggerServerSync()">🔄 SYNC SYSTEM</button>
                 <span style="color:#62697a; font-weight:800;">AMT($):</span>
                 <input id="input-amount" class="dock-input" type="number" value="100" onchange="updateCalcQty()">
                 <span style="color:#62697a; font-weight:800;">LEV:</span>
                 <input id="input-lev" class="dock-input" type="number" value="10" onchange="updateCalcQty()">
             </div>
             <div class="dock-group">
-                <span style="color:#62697a;">QTY:</span>
+                <span style="color:#62697a;">POS:</span>
                 <b id="calc-qty" style="color:#38bdf8; font-size:11px;">0.0000 BTC</b>
             </div>
         </div>
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">NEWS / DATA</span>
+                <span class="cell-head">NEWS / DATA ENGINE</span>
                 <div class="cell-body" id="val-news" style="color:#fff;">--</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">TREND (EMA30)</span>
-                <div class="cell-body" id="val-trend">--</div>
+                <span class="cell-head">CIRCUIT BREAKER</span>
+                <div class="cell-body" id="val-guard" style="color:#00e676;">SHIELD ACTIVE</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">OVERSEER HEALTH</span>
                 <div class="cell-body" id="val-health" style="color:#00e676;">🟢 100% SECURE</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">AI DECISION</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">AWAITING DATA...</div>
+                <span class="cell-head">EXECUTION RADAR</span>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">ACTIVE SCANNING...</div>
             </div>
         </div>
     </div>
@@ -420,9 +559,9 @@ terminal_html = f"""<!DOCTYPE html>
     <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
         <div class="modal-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <b style="color:#fff; font-size:12px;">ENGINE LOGS & P&L</b>
+                <b style="color:#fff; font-size:12px;">SQLITE DATABASE VAULT</b>
                 <div style="display:flex; gap:6px; align-items:center;">
-                    <button onclick="clearAllServerHistory()" style="background:#ff3b30; border:none; color:#fff; font-size:9px; font-weight:800; padding:3px 8px; border-radius:3px; cursor:pointer;">CLEAR SYSTEM</button>
+                    <button onclick="clearSystemVault()" style="background:#ff3b30; border:none; color:#fff; font-size:9px; font-weight:800; padding:3px 8px; border-radius:3px; cursor:pointer;">CLEAR VAULT</button>
                     <button onclick="toggleModal(false)" style="background:transparent; border:none; color:#888; font-size:16px; cursor:pointer; margin-left:4px;">✕</button>
                 </div>
             </div>
@@ -440,13 +579,12 @@ terminal_html = f"""<!DOCTYPE html>
 
     <script>
         const IST_OFFSET = 5.5 * 3600;
-        
         let activeTrade = {js_active_trade};
         let tradeHistory = {js_history};
         let stats = {js_stats};
-        let metrics = {js_metrics};
+        let newsData = {js_news};
         let cfg = {js_cfg};
-        let hbs = {js_hbs};
+        let riskGuard = {js_risk};
 
         document.getElementById('input-amount').value = cfg.capital;
         document.getElementById('input-lev').value = cfg.leverage;
@@ -456,7 +594,7 @@ terminal_html = f"""<!DOCTYPE html>
 
         function toggleModal(show) {{ document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }}
         function handleBgClick(e) {{ if (e.target.id === 'modal-bg') toggleModal(false); }}
-        function clearAllServerHistory() {{ window.parent.location.search = '?clear=1'; }}
+        function clearSystemVault() {{ window.parent.location.search = '?clear=1'; }}
         function triggerServerSync() {{ window.parent.location.reload(); }}
 
         function updateCalcQty() {{
@@ -478,31 +616,26 @@ terminal_html = f"""<!DOCTYPE html>
 
         const series = chart.addCandlestickSeries({{ upColor: '#00E676', downColor: '#FF3B30', borderUpColor: '#00E676', borderDownColor: '#FF3B30', wickUpColor: '#00E676', wickDownColor: '#FF3B30' }});
 
-        function renderMasterCommands() {{
+        function renderMasterInterface() {{
             if (lineEntry) {{ try {{ series.removePriceLine(lineEntry); }} catch(e){{}} lineEntry = null; }}
             if (lineSL) {{ try {{ series.removePriceLine(lineSL); }} catch(e){{}} lineSL = null; }}
             if (lineTP) {{ try {{ series.removePriceLine(lineTP); }} catch(e){{}} lineTP = null; }}
 
             if (activeTrade) {{
                 lineEntry = series.createPriceLine({{ price: activeTrade.entry, color: '#38bdf8', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'ENTRY $' + activeTrade.entry.toFixed(1) }});
-                lineSL = series.createPriceLine({{ price: activeTrade.sl, color: '#ff3b30', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'GUARD SL $' + activeTrade.sl.toFixed(1) }});
-                lineTP = series.createPriceLine({{ price: activeTrade.tp, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'TARGET $' + activeTrade.tp.toFixed(1) }});
+                lineSL = series.createPriceLine({{ price: activeTrade.sl, color: '#ff3b30', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'SAFE SL $' + activeTrade.sl.toFixed(1) }});
+                lineTP = series.createPriceLine({{ price: activeTrade.tp, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'TARGET TP $' + activeTrade.tp.toFixed(1) }});
             }}
 
-            document.getElementById('val-news').innerText = metrics.news;
-            document.getElementById('val-news').style.color = metrics.news.includes("BULLISH") ? "#00e676" : (metrics.news.includes("BEARISH") ? "#ff3b30" : "#fff");
-            
-            document.getElementById('val-trend').innerText = metrics.trend;
-            document.getElementById('val-trend').style.color = metrics.trend.includes("BULLISH") ? "#00e676" : "#ff3b30";
-            
-            const now = Date.now() / 1000;
-            const mainDead = (now - (hbs.main || now)) > 30;
-            if (mainDead) {{
-                document.getElementById('val-health').innerText = "🔴 ENGINE OFFLINE";
-                document.getElementById('val-health').style.color = "#ff3b30";
+            document.getElementById('val-news').innerText = newsData.sentiment;
+            document.getElementById('val-news').style.color = newsData.sentiment.includes("BULLISH") ? "#00e676" : (newsData.sentiment.includes("BEARISH") ? "#ff3b30" : "#fff");
+
+            if (riskGuard.is_circuit_broken) {{
+                document.getElementById('val-guard').innerText = "🔴 TRADING PAUSED";
+                document.getElementById('val-guard').style.color = "#ff3b30";
             }} else {{
-                document.getElementById('val-health').innerText = "🟢 100% SECURE";
-                document.getElementById('val-health').style.color = "#00e676";
+                document.getElementById('val-guard').innerText = "🟢 SHIELD ACTIVE";
+                document.getElementById('val-guard').style.color = "#00e676";
             }}
 
             document.getElementById('hist-count').innerText = tradeHistory.length;
@@ -523,7 +656,7 @@ terminal_html = f"""<!DOCTYPE html>
                         </div>`;
                 }});
             }} else {{
-                histCont.innerHTML = '<div style="color:#555; text-align:center; padding:15px 0;">No trades recorded yet...</div>';
+                histCont.innerHTML = '<div style="color:#555; text-align:center; padding:15px 0;">No trades recorded in vault...</div>';
             }}
 
             if (activeTrade) {{
@@ -536,7 +669,7 @@ terminal_html = f"""<!DOCTYPE html>
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = "AI SCANNING...";
+                document.getElementById('val-setup').innerText = "AI RADAR ACTIVE...";
                 document.getElementById('val-setup').style.color = "#38bdf8";
             }}
         }}
@@ -548,7 +681,7 @@ terminal_html = f"""<!DOCTYPE html>
                     let cdata = data.map(d => ({{ time: (d[0] - (d[0] % 300000)) / 1000, open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]) }}));
                     series.setData(cdata);
                     chart.timeScale().fitContent();
-                    renderMasterCommands();
+                    renderMasterInterface();
                     connectLiveStream(cdata);
                 }}).catch(e => setTimeout(syncCandles, 2000));
         }}
@@ -574,16 +707,14 @@ terminal_html = f"""<!DOCTYPE html>
                     const newBar = {{ time: barTime, open: price, high: price, low: price, close: price }};
                     cdata.push(newBar);
                     series.update(newBar);
-                    
-                    // SMART 8-SECOND DELAY!
                     setTimeout(() => window.parent.location.reload(), 8000); 
                 }}
 
                 if (activeTrade) {{
                     if (activeTrade.type === "LONG" && (price >= activeTrade.tp || price <= activeTrade.sl)) {{
-                        activeTrade = null; renderMasterCommands();
+                        activeTrade = null; renderMasterInterface();
                     }} else if (activeTrade.type === "SHORT" && (price <= activeTrade.tp || price >= activeTrade.sl)) {{
-                        activeTrade = null; renderMasterCommands();
+                        activeTrade = null; renderMasterInterface();
                     }}
                 }}
             }};
@@ -595,12 +726,5 @@ terminal_html = f"""<!DOCTYPE html>
     </script>
 </body>
 </html>"""
-
-terminal_html = terminal_html.replace("__ACTIVE_TRADE__", json.dumps(state.get("active_trade")))
-terminal_html = terminal_html.replace("__HISTORY_DATA__", json.dumps(state.get("history", [])))
-terminal_html = terminal_html.replace("__STATS_DATA__", json.dumps({"total": state.get("total_signals", 0), "win_rate": state.get("win_rate", 0)}))
-terminal_html = terminal_html.replace("__METRICS_DATA__", json.dumps(state.get("metrics", {"trend": "--", "rsi": "--", "atr": "--", "news": "SCANNING..."})))
-terminal_html = terminal_html.replace("__CONFIG_DATA__", json.dumps(state.get("config", {"capital": 100, "leverage": 10})))
-terminal_html = terminal_html.replace("__HEARTBEATS__", json.dumps(state.get("heartbeats", {})))
 
 components.html(terminal_html, height=720, scrolling=False)
