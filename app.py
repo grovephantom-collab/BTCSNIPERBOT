@@ -199,14 +199,13 @@ class MasterCommanderEngine:
         set_db_state("active_trade", None)
 
     def evaluate_market_moves(self, closed, live):
-        c0 = closed[-1] # Current finished candle
+        c0 = closed[-1]
         c1 = closed[-2]
         c2 = closed[-3]
 
         if live['time'] <= self.last_candle_time: return
         self.last_candle_time = live['time']
 
-        # Indicators
         closes = [c['close'] for c in closed]
         def calc_ema(period):
             k = 2 / (period + 1)
@@ -225,14 +224,11 @@ class MasterCommanderEngine:
         # -------------------------------------------------------------
         # 1. SLOW CUMULATIVE TREND ENGINE (10-13 Candle Moves / 300-500 Pts)
         # -------------------------------------------------------------
-        # 8-10 candles ka net net move calculate karte hain
         net_move_10 = c0['close'] - closed[-10]['close']
         green_candles_10 = sum(1 for c in closed[-10:] if c['close'] > c['open'])
         red_candles_10 = sum(1 for c in closed[-10:] if c['close'] < c['open'])
 
-        # Slow Upward Grind (10 candle me gradual climb)
         is_slow_grind_long = (net_move_10 >= 180.0) and (green_candles_10 >= 6) and (c0['close'] > ema9) and (c0['close'] > c0['open'])
-        # Slow Downward Drop (10 candle me gradual decline)
         is_slow_grind_short = (net_move_10 <= -180.0) and (red_candles_10 >= 6) and (c0['close'] < ema9) and (c0['close'] < c0['open'])
 
         # -------------------------------------------------------------
@@ -277,7 +273,7 @@ class MasterCommanderEngine:
             set_db_state("active_trade", {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
             send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC LONG (UP MOVE)\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
 
-        # TRIGGER SHORT (DOWN MOVE - 100% EQUAL WEIGHT)
+        # TRIGGER SHORT (DOWN MOVE)
         elif is_slow_grind_short or is_fast_blast_short or is_staircase_short:
             setup_name = "SLOW STAIRCASE DUMP 📉 (10-Candle Drop)" if is_slow_grind_short else ("FAST BREAKDOWN BLAST 🩸" if is_fast_blast_short else "LOCAL STAIRCASE DROP")
             recent_high = max(c['high'] for c in closed[-4:])
