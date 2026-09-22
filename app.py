@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# BALANCED BI-DIRECTIONAL BTC SNIPER: EQUAL LONG & SHORT (HIGH & LOW) SIGNALS
+# BALANCED BI-DIRECTIONAL MASTER ENGINE (CLEAN SYNTAX - ZERO PARSING ERROR)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -144,13 +144,12 @@ class MasterCommanderEngine:
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
 
-        # In-Trade Breakeven Locking (+90 pts)
         if t['type'] == 'LONG':
             if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 90.0):
                 t['be_hit'] = True
                 t['sl'] = round(t['entry'] + 20.0, 1)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC LONG Protected!\nSL locked at ${t['sl']:.1f} (+20 pts guaranteed profit).")
+                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC LONG Protected!\nSL locked at ${t['sl']:.1f} (+20 pts profit).")
 
             if live['high'] >= t['tp']:
                 pts = round(t['tp'] - t['entry'], 1)
@@ -170,7 +169,7 @@ class MasterCommanderEngine:
                 t['be_hit'] = True
                 t['sl'] = round(t['entry'] - 20.0, 1)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC SHORT Protected!\nSL locked at ${t['sl']:.1f} (+20 pts guaranteed profit).")
+                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC SHORT Protected!\nSL locked at ${t['sl']:.1f} (+20 pts profit).")
 
             if live['low'] <= t['tp']:
                 pts = round(t['entry'] - t['tp'], 1)
@@ -198,14 +197,13 @@ class MasterCommanderEngine:
         set_db_state("active_trade", None)
 
     def evaluate_market_moves(self, closed, live):
-        c0 = closed[-1] # Latest completed candle
+        c0 = closed[-1]
         c1 = closed[-2]
         c2 = closed[-3]
 
         if live['time'] <= self.last_candle_time: return
         self.last_candle_time = live['time']
 
-        # Moving Averages
         closes = [c['close'] for c in closed]
         def calc_ema(period):
             k = 2 / (period + 1)
@@ -216,7 +214,6 @@ class MasterCommanderEngine:
         ema21 = calc_ema(21)
         ema50 = calc_ema(50)
 
-        # Dynamic Range & Body
         h_range = max(c['high'] for c in closed[-8:-1])
         l_range = min(c['low'] for c in closed[-8:-1])
         body0 = c0['close'] - c0['open']
@@ -224,12 +221,8 @@ class MasterCommanderEngine:
         upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
         lower_wick0 = min(c0['open'], c0['close']) - c0['low']
 
-        # -------------------------------------------------------------
-        # 1. UP MOVE SIGNALS (LONG)
-        # -------------------------------------------------------------
-        # Mode A: Explosive Breakout
+        # UP MOVE CONDITIONS
         is_breakout_long = (c0['close'] > ema50) and (c0['close'] > h_range) and (body0 >= 24.0)
-        # Mode B: Staircase Trend Climb (Consecutive Higher Lows)
         is_staircase_long = (
             (ema9 >= ema21) and (c0['close'] > ema9) and
             (c0['low'] >= c1['low'] >= c2['low']) and
@@ -237,12 +230,8 @@ class MasterCommanderEngine:
             (upper_wick0 / range0 < 0.35)
         )
 
-        # -------------------------------------------------------------
-        # 2. DOWN / LOW MOVE SIGNALS (SHORT) - FULL EQUAL BALANCE
-        # -------------------------------------------------------------
-        # Mode A: Explosive Breakdown (Dumping through support)
+        # DOWN MOVE CONDITIONS
         is_breakout_short = (c0['close'] < ema50) and (c0['close'] < l_range) and (body0 <= -24.0)
-        # Mode B: Staircase Trend Drop (Consecutive Lower Highs)
         is_staircase_short = (
             (ema9 <= ema21) and (c0['close'] < ema9) and
             (c0['high'] <= c1['high'] <= c2['high']) and
@@ -255,27 +244,25 @@ class MasterCommanderEngine:
         entry = round(c0['close'], 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
-        # EXECUTE LONG (UP MOVE)
         if is_breakout_long or is_staircase_long:
-            move_type = "EXPLOSIVE BREAKOUT 🔥" if is_breakout_long else "STAIRCASE CLIMB 📈"
+            move_type = "BREAKOUT MOVE" if is_breakout_long else "STAIRCASE CLIMB"
             recent_low = min(c['low'] for c in closed[-4:])
             risk = max(entry - recent_low + 20.0, 90.0)
             sl = round(entry - risk, 1)
             tp = round(entry + (risk * 2.0), 1)
 
             set_db_state("active_trade", {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
-            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC LONG (UP MOVE)\n\n🎯 Type: {move_type}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC LONG\n\n🎯 Type: {move_type}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
 
-        # EXECUTE SHORT (DOWN / LOW MOVE)
         elif is_breakout_short or is_staircase_short:
-            move_type = "EXPLOSIVE BREAKDOWN 🩸" if is_breakout_short else "STAIRCASE DUMP 📉"
+            move_type = "BREAKDOWN MOVE" if is_breakout_short else "STAIRCASE DUMP"
             recent_high = max(c['high'] for c in closed[-4:])
             risk = max(recent_high - entry + 20.0, 90.0)
             sl = round(entry + risk, 1)
             tp = round(entry - (risk * 2.0), 1)
 
             set_db_state("active_trade", {'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
-            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC SHORT (DOWN MOVE)\n\n🎯 Type: {move_type}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC SHORT\n\n🎯 Type: {move_type}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -297,7 +284,7 @@ class HeadOverseerEngine:
         self.engine_id = engine_id
 
     def run(self):
-        send_telegram_alert("🛡️ [BALANCED ENGINE ACTIVE] Bi-Directional Scanner (Equal UP & DOWN Detection) Live.")
+        send_telegram_alert("🛡️ [MASTER ENGINE BOOTED] Bi-Directional Scanner (Long & Short Active).")
         while True:
             try:
                 with open(LOCK_FILE, "r") as f:
@@ -317,7 +304,7 @@ def boot_complete_system():
 boot_complete_system()
 
 # -------------------------------------------------------------
-# RESTORED FULL 8-COMPONENT DASHBOARD
+# STREAMLIT UI
 # -------------------------------------------------------------
 st.set_page_config(page_title="AI CRYPTO SNIPER BOT", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>header, footer, #MainMenu { display: none !important; } .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; } iframe { width: 100vw !important; height: 100vh !important; border: none !important; }</style>""", unsafe_allow_html=True)
@@ -345,36 +332,36 @@ js_news = json.dumps(news_sentiment)
 js_cfg = json.dumps(cfg)
 js_risk = json.dumps(daily_risk)
 
-terminal_html = f"""<!DOCTYPE html>
+terminal_html = """<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     <style>
-        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        html, body {{ background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100vh; overflow: hidden; }}
-        .top-nav {{ display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 4px 8px; font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; }}
-        .brand {{ font-weight: 800; color: #fff; font-size: 10px; display: flex; align-items: center; gap: 4px; }}
-        .badge-scan {{ background: #00e676; color: #000; font-size: 8px; padding: 2px 5px; border-radius: 3px; font-weight: 900; }}
-        .stat-card {{ display: flex; flex-direction: column; min-width: 55px; }}
-        .stat-label {{ font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 800; }}
-        .stat-val {{ font-size: 10px; font-weight: 800; color: #fff; }}
-        .btn-history {{ background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 8px; font-size: 9px; font-weight: 800; cursor: pointer; }}
-        .workspace {{ display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }}
-        #chart-zone {{ width: 100vw; height: 55vh; background: #080a0f; }}
-        .trade-dock {{ width: 100vw; height: 38px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 2px 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }}
-        .dock-group {{ display: flex; align-items: center; gap: 6px; }}
-        .dock-input {{ background: #121824; border: 1px solid #23304a; color: #00e676; font-size: 11px; font-weight: 800; border-radius: 4px; padding: 2px 6px; width: 50px; text-align: center; }}
-        .toggle-btn {{ background: #00e676; color: #000; font-size: 9px; font-weight: 900; padding: 4px 8px; border-radius: 4px; border: none; cursor: pointer; }}
-        .bottom-bar {{ width: 100vw; height: calc(45vh - 76px); max-height: 48px; background: #0d121c; border-top: 1px solid #1a2336; padding: 3px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.5fr; gap: 6px; align-items: center; }}
-        .metric-cell {{ display: flex; flex-direction: column; justify-content: center; background: #101624; padding: 2px 6px; border-radius: 4px; border: 1px solid #192233; height: 36px; }}
-        .cell-head {{ font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 2px; }}
-        .cell-body {{ font-size: 10px; font-weight: 800; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-        .modal-bg {{ display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.75); backdrop-filter: blur(4px); z-index: 999; align-items: center; justify-content: center; }}
-        .modal-box {{ background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 92vw; max-width: 420px; max-height: 80vh; display: flex; flex-direction: column; padding: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); }}
-        .history-list {{ overflow-y: auto; max-height: 280px; font-size: 10px; }}
-        .history-item {{ display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #151d2b; }}
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100vh; overflow: hidden; }
+        .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 4px 8px; font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; }
+        .brand { font-weight: 800; color: #fff; font-size: 10px; display: flex; align-items: center; gap: 4px; }
+        .badge-scan { background: #00e676; color: #000; font-size: 8px; padding: 2px 5px; border-radius: 3px; font-weight: 900; }
+        .stat-card { display: flex; flex-direction: column; min-width: 55px; }
+        .stat-label { font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 800; }
+        .stat-val { font-size: 10px; font-weight: 800; color: #fff; }
+        .btn-history { background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 8px; font-size: 9px; font-weight: 800; cursor: pointer; }
+        .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
+        #chart-zone { width: 100vw; height: 55vh; background: #080a0f; }
+        .trade-dock { width: 100vw; height: 38px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 2px 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
+        .dock-group { display: flex; align-items: center; gap: 6px; }
+        .dock-input { background: #121824; border: 1px solid #23304a; color: #00e676; font-size: 11px; font-weight: 800; border-radius: 4px; padding: 2px 6px; width: 50px; text-align: center; }
+        .toggle-btn { background: #00e676; color: #000; font-size: 9px; font-weight: 900; padding: 4px 8px; border-radius: 4px; border: none; cursor: pointer; }
+        .bottom-bar { width: 100vw; height: calc(45vh - 76px); max-height: 48px; background: #0d121c; border-top: 1px solid #1a2336; padding: 3px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.5fr; gap: 6px; align-items: center; }
+        .metric-cell { display: flex; flex-direction: column; justify-content: center; background: #101624; padding: 2px 6px; border-radius: 4px; border: 1px solid #192233; height: 36px; }
+        .cell-head { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 2px; }
+        .cell-body { font-size: 10px; font-weight: 800; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .modal-bg { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.75); backdrop-filter: blur(4px); z-index: 999; align-items: center; justify-content: center; }
+        .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 92vw; max-width: 420px; max-height: 80vh; display: flex; flex-direction: column; padding: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); }
+        .history-list { overflow-y: auto; max-height: 280px; font-size: 10px; }
+        .history-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #151d2b; }
     </style>
 </head>
 <body>
@@ -448,12 +435,12 @@ terminal_html = f"""<!DOCTYPE html>
 
     <script>
         const IST_OFFSET = 5.5 * 3600;
-        let activeTrade = {js_active_trade};
-        let tradeHistory = {js_history};
-        let stats = {js_stats};
-        let newsData = {js_news};
-        let cfg = {js_cfg};
-        let riskGuard = {js_risk};
+        let activeTrade = __ACTIVE_TRADE__;
+        let tradeHistory = __TRADE_HISTORY__;
+        let stats = __STATS__;
+        let newsData = __NEWS_DATA__;
+        let cfg = __CFG__;
+        let riskGuard = __RISK_GUARD__;
 
         document.getElementById('input-amount').value = cfg.capital;
         document.getElementById('input-lev').value = cfg.leverage;
@@ -461,103 +448,103 @@ terminal_html = f"""<!DOCTYPE html>
         let lineEntry = null, lineSL = null, lineTP = null;
         let currentPrice = 85500.0;
 
-        function toggleModal(show) {{ document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }}
-        function handleBgClick(e) {{ if (e.target.id === 'modal-bg') toggleModal(false); }}
-        function clearSystemVault() {{ window.parent.location.search = '?clear=1'; }}
-        function triggerServerSync() {{ window.parent.location.reload(); }}
+        function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
+        function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
+        function clearSystemVault() { window.parent.location.search = '?clear=1'; }
+        function triggerServerSync() { window.parent.location.reload(); }
 
-        function updateCalcQty() {{
+        function updateCalcQty() {
             let amt = parseFloat(document.getElementById('input-amount').value) || 100;
             let lev = parseFloat(document.getElementById('input-lev').value) || 10;
             let qty = ((amt * lev) / currentPrice).toFixed(4);
             document.getElementById('calc-qty').innerText = qty + " BTC";
-        }}
+        }
 
         const chartZone = document.getElementById('chart-zone');
-        const chart = LightweightCharts.createChart(chartZone, {{
+        const chart = LightweightCharts.createChart(chartZone, {
             width: chartZone.clientWidth, height: chartZone.clientHeight,
-            layout: {{ background: {{ color: '#080a0f' }}, textColor: '#787b86' }},
-            grid: {{ vertLines: {{ color: '#111622' }}, horzLines: {{ color: '#111622' }} }},
-            rightPriceScale: {{ borderColor: '#192130' }},
-            timeScale: {{ borderColor: '#192130', timeVisible: true, secondsVisible: false }},
-            localization: {{ timeFormatter: t => {{ const d = new Date((t + IST_OFFSET) * 1000); return d.toUTCString().match(/\\d{{2}}:\\d{{2}}/)[0]; }} }}
-        }});
+            layout: { background: { color: '#080a0f' }, textColor: '#787b86' },
+            grid: { vertLines: { color: '#111622' }, horzLines: { color: '#111622' } },
+            rightPriceScale: { borderColor: '#192130' },
+            timeScale: { borderColor: '#192130', timeVisible: true, secondsVisible: false },
+            localization: { timeFormatter: t => { const d = new Date((t + IST_OFFSET) * 1000); return d.toUTCString().match(/\\d{2}:\\d{2}/)[0]; } }
+        });
 
-        const series = chart.addCandlestickSeries({{ upColor: '#00E676', downColor: '#FF3B30', borderUpColor: '#00E676', borderDownColor: '#FF3B30', wickUpColor: '#00E676', wickDownColor: '#FF3B30' }});
+        const series = chart.addCandlestickSeries({ upColor: '#00E676', downColor: '#FF3B30', borderUpColor: '#00E676', borderDownColor: '#FF3B30', wickUpColor: '#00E676', wickDownColor: '#FF3B30' });
 
-        function renderMasterInterface() {{
-            if (lineEntry) {{ try {{ series.removePriceLine(lineEntry); }} catch(e){{}} lineEntry = null; }}
-            if (lineSL) {{ try {{ series.removePriceLine(lineSL); }} catch(e){{}} lineSL = null; }}
-            if (lineTP) {{ try {{ series.removePriceLine(lineTP); }} catch(e){{}} lineTP = null; }}
+        function renderMasterInterface() {
+            if (lineEntry) { try { series.removePriceLine(lineEntry); } catch(e){} lineEntry = null; }
+            if (lineSL) { try { series.removePriceLine(lineSL); } catch(e){} lineSL = null; }
+            if (lineTP) { try { series.removePriceLine(lineTP); } catch(e){} lineTP = null; }
 
-            if (activeTrade) {{
-                lineEntry = series.createPriceLine({{ price: activeTrade.entry, color: '#38bdf8', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'ENTRY $' + activeTrade.entry.toFixed(1) }});
-                lineSL = series.createPriceLine({{ price: activeTrade.sl, color: '#ff3b30', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'SAFE SL $' + activeTrade.sl.toFixed(1) }});
-                lineTP = series.createPriceLine({{ price: activeTrade.tp, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'TARGET TP $' + activeTrade.tp.toFixed(1) }});
-            }}
+            if (activeTrade) {
+                lineEntry = series.createPriceLine({ price: activeTrade.entry, color: '#38bdf8', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'ENTRY $' + activeTrade.entry.toFixed(1) });
+                lineSL = series.createPriceLine({ price: activeTrade.sl, color: '#ff3b30', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'SAFE SL $' + activeTrade.sl.toFixed(1) });
+                lineTP = series.createPriceLine({ price: activeTrade.tp, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'TARGET TP $' + activeTrade.tp.toFixed(1) });
+            }
 
             document.getElementById('val-news').innerText = newsData.sentiment;
             document.getElementById('val-news').style.color = newsData.sentiment.includes("BULLISH") ? "#00e676" : (newsData.sentiment.includes("BEARISH") ? "#ff3b30" : "#fff");
 
-            if (riskGuard.is_circuit_broken) {{
+            if (riskGuard.is_circuit_broken) {
                 document.getElementById('val-guard').innerText = "🔴 TRADING PAUSED";
                 document.getElementById('val-guard').style.color = "#ff3b30";
-            }} else {{
+            } else {
                 document.getElementById('val-guard').innerText = "🟢 SHIELD ACTIVE";
                 document.getElementById('val-guard').style.color = "#00e676";
-            }}
+            }
 
             document.getElementById('hist-count').innerText = tradeHistory.length;
             document.getElementById('stat-total').innerText = stats.total;
             document.getElementById('stat-rate').innerText = stats.win_rate + "%";
 
             const histCont = document.getElementById('history-container');
-            if (tradeHistory.length > 0) {{
+            if (tradeHistory.length > 0) {
                 histCont.innerHTML = "";
-                tradeHistory.forEach(item => {{
+                tradeHistory.forEach(item => {
                     let resCol = item.result.includes("TP") ? "#00e676" : "#ff3b30";
                     let typeCol = item.type === "LONG" ? "#00e676" : "#ff3b30";
-                    let pnlDisp = item.pnl_usd ? `<b style="color:${{resCol}}; margin-left:4px;">(${{item.pnl_usd}})</b>` : '';
+                    let pnlDisp = item.pnl_usd ? `<b style="color:${resCol}; margin-left:4px;">(${item.pnl_usd})</b>` : '';
                     histCont.innerHTML += `
                         <div class="history-item">
-                            <span>${{item.time}} <b style="color:${{typeCol}};">${{item.type}}</b> @ $${{item.entry.toFixed(1)}}</span>
-                            <span><b style="color:${{resCol}};">${{item.result}}</b> ${{pnlDisp}}</span>
+                            <span>${item.time} <b style="color:${typeCol};">${item.type}</b> @ $${item.entry.toFixed(1)}</span>
+                            <span><b style="color:${resCol};">${item.result}</b> ${pnlDisp}</span>
                         </div>`;
-                }});
-            }} else {{
+                });
+            } else {
                 histCont.innerHTML = '<div style="color:#555; text-align:center; padding:15px 0;">No trades recorded in vault...</div>';
-            }}
+            }
 
-            if (activeTrade) {{
+            if (activeTrade) {
                 document.getElementById('disp-entry').innerText = "$" + activeTrade.entry.toFixed(1);
                 document.getElementById('disp-sl').innerText = "$" + activeTrade.sl.toFixed(1);
                 document.getElementById('disp-tp').innerText = "$" + activeTrade.tp.toFixed(1);
                 document.getElementById('val-setup').innerText = "EXECUTING " + activeTrade.type + " 🔥";
                 document.getElementById('val-setup').style.color = activeTrade.type === "LONG" ? "#00e676" : "#ff3b30";
-            }} else {{
+            } else {
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp').innerText = "--";
                 document.getElementById('val-setup').innerText = "RADAR SCANNING (UP & DOWN)...";
                 document.getElementById('val-setup').style.color = "#38bdf8";
-            }}
-        }}
+            }
+        }
 
-        function syncCandles() {{
+        function syncCandles() {
             fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100')
                 .then(r => r.json())
-                .then(data => {{
-                    let cdata = data.map(d => ({{ time: (d[0] - (d[0] % 300000)) / 1000, open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]) }}));
+                .then(data => {
+                    let cdata = data.map(d => ({ time: (d[0] - (d[0] % 300000)) / 1000, open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]) }));
                     series.setData(cdata);
                     chart.timeScale().fitContent();
                     renderMasterInterface();
                     connectLiveStream(cdata);
-                }}).catch(e => setTimeout(syncCandles, 2000));
-        }}
+                }).catch(e => setTimeout(syncCandles, 2000));
+        }
 
-        function connectLiveStream(cdata) {{
+        function connectLiveStream(cdata) {
             const ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@kline_5m");
-            ws.onmessage = (e) => {{
+            ws.onmessage = (e) => {
                 const k = JSON.parse(e.data).k;
                 const price = parseFloat(k.c);
                 const barTime = (k.t - (k.t % 300000)) / 1000;
@@ -567,33 +554,41 @@ terminal_html = f"""<!DOCTYPE html>
                 document.getElementById('live-price').innerText = "$" + price.toFixed(1);
 
                 let last = cdata[cdata.length - 1];
-                if (barTime === last.time) {{
+                if (barTime === last.time) {
                     last.close = price;
                     if (price > last.high) last.high = price;
                     if (price < last.low) last.low = price;
                     series.update(last);
-                }} else if (barTime > last.time) {{
-                    const newBar = {{ time: barTime, open: price, high: price, low: price, close: price }};
+                } else if (barTime > last.time) {
+                    const newBar = { time: barTime, open: price, high: price, low: price, close: price };
                     cdata.push(newBar);
                     series.update(newBar);
                     setTimeout(() => window.parent.location.reload(), 8000); 
-                }}
+                }
 
-                if (activeTrade) {{
-                    if (activeTrade.type === "LONG" && (price >= activeTrade.tp || price <= activeTrade.sl)) {{
+                if (activeTrade) {
+                    if (activeTrade.type === "LONG" && (price >= activeTrade.tp || price <= activeTrade.sl)) {
                         activeTrade = null; renderMasterInterface();
-                    }} else if (activeTrade.type === "SHORT" && (price <= activeTrade.tp || price >= activeTrade.sl)) {{
+                    } else if (activeTrade.type === "SHORT" && (price <= activeTrade.tp || price >= activeTrade.sl)) {
                         activeTrade = null; renderMasterInterface();
-                    }}
-                }}
-            }};
+                    }
+                }
+            };
             ws.onclose = () => setTimeout(() => connectLiveStream(cdata), 1500);
-        }}
+        }
 
         syncCandles();
-        window.onresize = () => chart.applyOptions({{ width: chartZone.clientWidth, height: chartZone.clientHeight }});
+        window.onresize = () => chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
     </script>
 </body>
 </html>"""
 
-components.html(terminal_html, height=720, scrolling=False)
+# Inject state values into HTML template
+final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
+                          .replace("__TRADE_HISTORY__", js_history)\
+                          .replace("__STATS__", js_stats)\
+                          .replace("__NEWS_DATA__", js_news)\
+                          .replace("__CFG__", js_cfg)\
+                          .replace("__RISK_GUARD__", js_risk)
+
+components.html(final_html, height=720, scrolling=False)
