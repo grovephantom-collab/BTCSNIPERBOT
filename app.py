@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# ORIGINAL MASTER PRODUCTION CODE (COMPLETE 8-COMPONENT ARCHITECTURE)
+# BALANCED BI-DIRECTIONAL BTC SNIPER: EQUAL LONG & SHORT (HIGH & LOW) SIGNALS
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -35,12 +35,7 @@ def init_db():
             qty REAL
         )
     """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS state (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
+    cur.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
     conn.commit()
     conn.close()
 
@@ -91,19 +86,19 @@ def send_telegram_alert(msg):
 
 def fetch_binance_klines():
     urls = [
-        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=50",
-        "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=50"
+        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60",
+        "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60"
     ]
     for u in urls:
         try:
             r = requests.get(u, timeout=3)
             if r.status_code == 200:
                 raw = r.json()
-                if isinstance(raw, list) and len(raw) >= 35:
+                if isinstance(raw, list) and len(raw) >= 40:
                     closed = [{'time': int(d[0]), 'open': float(d[1]), 'high': float(d[2]),
-                               'low': float(d[3]), 'close': float(d[4])} for d in raw[:-1]]
+                               'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])} for d in raw[:-1]]
                     live = {'time': int(raw[-1][0]), 'open': float(raw[-1][1]), 'high': float(raw[-1][2]),
-                            'low': float(raw[-1][3]), 'close': float(raw[-1][4])}
+                            'low': float(raw[-1][3]), 'close': float(raw[-1][4]), 'vol': float(raw[-1][5])}
                     return closed, live
         except: continue
     return None, None
@@ -135,13 +130,10 @@ class GlobalNewsEngine:
                 elif chg < -2.0: score -= 5
             except: pass
 
-            if score >= 5: sentiment = "HIGHLY BULLISH 🚀"
+            if score >= 5: sentiment = "BULLISH 🚀"
             elif score <= -5: sentiment = "BEARISH 🩸"
 
             set_db_state("news_sentiment", {"sentiment": sentiment, "score": score})
-            hbs = get_db_state("heartbeats", {})
-            hbs["news"] = time.time()
-            set_db_state("heartbeats", hbs)
             time.sleep(15)
 
 class MasterCommanderEngine:
@@ -151,41 +143,43 @@ class MasterCommanderEngine:
 
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
+
+        # In-Trade Breakeven Locking (+90 pts)
         if t['type'] == 'LONG':
-            if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 150.0):
+            if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 90.0):
                 t['be_hit'] = True
-                t['sl'] = round(t['entry'] + 25.0, 1)
+                t['sl'] = round(t['entry'] + 20.0, 1)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC LONG Protected!\nSL locked at ${t['sl']:.1f}.")
+                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC LONG Protected!\nSL locked at ${t['sl']:.1f} (+20 pts guaranteed profit).")
 
             if live['high'] >= t['tp']:
                 pts = round(t['tp'] - t['entry'], 1)
                 usd = round(pts * qty, 2)
-                self.record_trade(t, t['tp'], "TP HIT", f"+{pts:.0f}", f"+${usd}")
-                send_telegram_alert(f"🚀 [TP HIT] BTC LONG\nNet: +${usd} (+{pts:.0f} pts)")
+                self.record_trade(t, t['tp'], "TP HIT 🎯", f"+{pts:.0f}", f"+${usd}")
+                send_telegram_alert(f"🚀 [TARGET HIT] BTC LONG\nNet: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
             elif live['low'] <= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
-                pts = 25.0 if t.get('be_hit', False) else -(t['entry'] - t['sl'])
+                pts = 20.0 if t.get('be_hit', False) else -(t['entry'] - t['sl'])
                 usd = round(pts * qty, 2)
                 sign = "+" if usd >= 0 else ""
                 self.record_trade(t, t['sl'], res, f"{sign}{pts:.0f}", f"{sign}${usd}")
                 send_telegram_alert(f"🛡️ [EXIT] BTC LONG {res}\nPnL: {sign}${usd} ({sign}{pts:.0f} pts)")
 
         elif t['type'] == 'SHORT':
-            if not t.get('be_hit', False) and live['low'] <= (t['entry'] - 150.0):
+            if not t.get('be_hit', False) and live['low'] <= (t['entry'] - 90.0):
                 t['be_hit'] = True
-                t['sl'] = round(t['entry'] - 25.0, 1)
+                t['sl'] = round(t['entry'] - 20.0, 1)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC SHORT Protected!\nSL locked at ${t['sl']:.1f}.")
+                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC SHORT Protected!\nSL locked at ${t['sl']:.1f} (+20 pts guaranteed profit).")
 
             if live['low'] <= t['tp']:
                 pts = round(t['entry'] - t['tp'], 1)
                 usd = round(pts * qty, 2)
-                self.record_trade(t, t['tp'], "TP HIT", f"+{pts:.0f}", f"+${usd}")
-                send_telegram_alert(f"🩸 [TP HIT] BTC SHORT\nNet: +${usd} (+{pts:.0f} pts)")
+                self.record_trade(t, t['tp'], "TP HIT 🎯", f"+{pts:.0f}", f"+${usd}")
+                send_telegram_alert(f"🩸 [TARGET HIT] BTC SHORT\nNet: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
             elif live['high'] >= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
-                pts = 25.0 if t.get('be_hit', False) else -(t['sl'] - t['entry'])
+                pts = 20.0 if t.get('be_hit', False) else -(t['sl'] - t['entry'])
                 usd = round(pts * qty, 2)
                 sign = "+" if usd >= 0 else ""
                 self.record_trade(t, t['sl'], res, f"{sign}{pts:.0f}", f"{sign}${usd}")
@@ -203,59 +197,85 @@ class MasterCommanderEngine:
         except: pass
         set_db_state("active_trade", None)
 
-    def evaluate_new_breakout(self, closed, live):
-        c0 = closed[-1]
+    def evaluate_market_moves(self, closed, live):
+        c0 = closed[-1] # Latest completed candle
+        c1 = closed[-2]
+        c2 = closed[-3]
+
         if live['time'] <= self.last_candle_time: return
         self.last_candle_time = live['time']
 
-        trs = [max(closed[i]['high'] - closed[i]['low'], abs(closed[i]['high'] - closed[i-1]['close']), abs(closed[i]['low'] - closed[i-1]['close'])) for i in range(len(closed)-14, len(closed))]
-        atr = max(sum(trs)/len(trs), 220.0)
-
+        # Moving Averages
         closes = [c['close'] for c in closed]
-        k = 2 / 31
-        ema30 = closes[0]
-        for cl in closes[1:]: ema30 = (cl * k) + (ema30 * (1 - k))
+        def calc_ema(period):
+            k = 2 / (period + 1)
+            e = closes[0]
+            for cl in closes[1:]: e = (cl * k) + (e * (1 - k))
+            return e
+        ema9 = calc_ema(9)
+        ema21 = calc_ema(21)
+        ema50 = calc_ema(50)
 
-        is_up = c0['close'] > ema30
-        is_dn = c0['close'] < ema30
-        h_range = max(c['high'] for c in closed[-9:-1])
-        l_range = min(c['low'] for c in closed[-9:-1])
-        body = c0['close'] - c0['open']
+        # Dynamic Range & Body
+        h_range = max(c['high'] for c in closed[-8:-1])
+        l_range = min(c['low'] for c in closed[-8:-1])
+        body0 = c0['close'] - c0['open']
+        range0 = max(c0['high'] - c0['low'], 1.0)
+        upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
+        lower_wick0 = min(c0['open'], c0['close']) - c0['low']
 
-        is_long = is_up and (c0['close'] > h_range) and (body >= 28.0)
-        is_short = is_dn and (c0['close'] < l_range) and (body <= -28.0)
+        # -------------------------------------------------------------
+        # 1. UP MOVE SIGNALS (LONG)
+        # -------------------------------------------------------------
+        # Mode A: Explosive Breakout
+        is_breakout_long = (c0['close'] > ema50) and (c0['close'] > h_range) and (body0 >= 24.0)
+        # Mode B: Staircase Trend Climb (Consecutive Higher Lows)
+        is_staircase_long = (
+            (ema9 >= ema21) and (c0['close'] > ema9) and
+            (c0['low'] >= c1['low'] >= c2['low']) and
+            (c0['close'] > c0['open']) and (c0['close'] > c1['high']) and
+            (upper_wick0 / range0 < 0.35)
+        )
 
-        news = get_db_state("news_sentiment", {"sentiment": "NEUTRAL ⚖️", "score": 0})
-        n_score, n_text = news.get("score", 0), news.get("sentiment", "NEUTRAL")
+        # -------------------------------------------------------------
+        # 2. DOWN / LOW MOVE SIGNALS (SHORT) - FULL EQUAL BALANCE
+        # -------------------------------------------------------------
+        # Mode A: Explosive Breakdown (Dumping through support)
+        is_breakout_short = (c0['close'] < ema50) and (c0['close'] < l_range) and (body0 <= -24.0)
+        # Mode B: Staircase Trend Drop (Consecutive Lower Highs)
+        is_staircase_short = (
+            (ema9 <= ema21) and (c0['close'] < ema9) and
+            (c0['high'] <= c1['high'] <= c2['high']) and
+            (c0['close'] < c0['open']) and (c0['close'] < c1['low']) and
+            (lower_wick0 / range0 < 0.35)
+        )
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
         pos_usd = float(cfg['capital']) * int(cfg['leverage'])
+        entry = round(c0['close'], 1)
+        qty = round(pos_usd / entry, 4) or 0.001
 
-        if is_long:
-            if n_score <= -5:
-                send_telegram_alert(f"🚫 [AI SHIELD] LONG Filtered out! News is {n_text}.")
-                return
-            entry = round(c0['close'], 1)
-            risk = round(atr * 1.4, 1)
+        # EXECUTE LONG (UP MOVE)
+        if is_breakout_long or is_staircase_long:
+            move_type = "EXPLOSIVE BREAKOUT 🔥" if is_breakout_long else "STAIRCASE CLIMB 📈"
+            recent_low = min(c['low'] for c in closed[-4:])
+            risk = max(entry - recent_low + 20.0, 90.0)
             sl = round(entry - risk, 1)
-            tp_mult = 2.4 if n_score >= 5 else 1.8
-            tp = round(entry + (risk * tp_mult), 1)
-            qty = round(pos_usd / entry, 4) or 0.001
-            set_db_state("active_trade", {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
-            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f}\n🎯 TP: ${tp:.1f}\n📦 Qty: {qty} BTC\n\n📰 Sentiment: {n_text}")
+            tp = round(entry + (risk * 2.0), 1)
 
-        elif is_short:
-            if n_score >= 5:
-                send_telegram_alert(f"🚫 [AI SHIELD] SHORT Filtered out! News is {n_text}.")
-                return
-            entry = round(c0['close'], 1)
-            risk = round(atr * 1.4, 1)
+            set_db_state("active_trade", {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
+            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC LONG (UP MOVE)\n\n🎯 Type: {move_type}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
+
+        # EXECUTE SHORT (DOWN / LOW MOVE)
+        elif is_breakout_short or is_staircase_short:
+            move_type = "EXPLOSIVE BREAKDOWN 🩸" if is_breakout_short else "STAIRCASE DUMP 📉"
+            recent_high = max(c['high'] for c in closed[-4:])
+            risk = max(recent_high - entry + 20.0, 90.0)
             sl = round(entry + risk, 1)
-            tp_mult = 2.4 if n_score <= -5 else 1.8
-            tp = round(entry - (risk * tp_mult), 1)
-            qty = round(pos_usd / entry, 4) or 0.001
+            tp = round(entry - (risk * 2.0), 1)
+
             set_db_state("active_trade", {'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
-            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f}\n🎯 TP: ${tp:.1f}\n📦 Qty: {qty} BTC\n\n📰 Sentiment: {n_text}")
+            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC SHORT (DOWN MOVE)\n\n🎯 Type: {move_type}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -268,11 +288,8 @@ class MasterCommanderEngine:
             if closed and live:
                 active = get_db_state("active_trade")
                 if active: self.manage_position(active, live)
-                else: self.evaluate_new_breakout(closed, live)
+                else: self.evaluate_market_moves(closed, live)
 
-            hbs = get_db_state("heartbeats", {})
-            hbs["main"] = time.time()
-            set_db_state("heartbeats", hbs)
             time.sleep(2)
 
 class HeadOverseerEngine:
@@ -280,7 +297,7 @@ class HeadOverseerEngine:
         self.engine_id = engine_id
 
     def run(self):
-        send_telegram_alert("🛡️ [HEAD OVERSEER] Complete Architecture Active (All 8 Components Operational).")
+        send_telegram_alert("🛡️ [BALANCED ENGINE ACTIVE] Bi-Directional Scanner (Equal UP & DOWN Detection) Live.")
         while True:
             try:
                 with open(LOCK_FILE, "r") as f:
@@ -403,7 +420,7 @@ terminal_html = f"""<!DOCTYPE html>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">EXECUTION RADAR</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">ACTIVE SCANNING...</div>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">RADAR SCANNING (UP & DOWN)...</div>
             </div>
         </div>
     </div>
@@ -521,7 +538,7 @@ terminal_html = f"""<!DOCTYPE html>
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = "AI RADAR ACTIVE...";
+                document.getElementById('val-setup').innerText = "RADAR SCANNING (UP & DOWN)...";
                 document.getElementById('val-setup').style.color = "#38bdf8";
             }}
         }}
