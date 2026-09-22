@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# BALANCED BI-DIRECTIONAL MASTER ENGINE (CLEAN SYNTAX - ZERO PARSING ERROR)
+# MASTER QUANT ENGINE: DUAL FAST BREAKOUT + SLOW CUMULATIVE 10-CANDLE TREND
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -79,19 +79,20 @@ def send_telegram_alert(msg):
     payload = {"chat_id": str(CHAT_ID).strip(), "text": msg}
     for _ in range(3):
         try:
-            r = requests.post(url, json=payload, timeout=4)
+            r = requests.post(url, json=payload, timeout=5)
             if r.status_code == 200: return True
         except: time.sleep(0.5)
     return False
 
 def fetch_binance_klines():
     urls = [
+        "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60",
         "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60",
         "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60"
     ]
     for u in urls:
         try:
-            r = requests.get(u, timeout=3)
+            r = requests.get(u, timeout=4)
             if r.status_code == 200:
                 raw = r.json()
                 if isinstance(raw, list) and len(raw) >= 40:
@@ -124,7 +125,7 @@ class GlobalNewsEngine:
             except: pass
 
             try:
-                tk = requests.get("https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=3).json()
+                tk = requests.get("https://data-api.binance.vision/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=3).json()
                 chg = float(tk['priceChangePercent'])
                 if chg > 2.0: score += 5
                 elif chg < -2.0: score -= 5
@@ -144,18 +145,19 @@ class MasterCommanderEngine:
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
 
+        # In-Trade Trailing Breakeven (+85 pts)
         if t['type'] == 'LONG':
-            if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 90.0):
+            if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 85.0):
                 t['be_hit'] = True
                 t['sl'] = round(t['entry'] + 20.0, 1)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC LONG Protected!\nSL locked at ${t['sl']:.1f} (+20 pts profit).")
+                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC LONG Protected!\nSL locked at ${t['sl']:.1f} (+20 pts guaranteed).")
 
             if live['high'] >= t['tp']:
                 pts = round(t['tp'] - t['entry'], 1)
                 usd = round(pts * qty, 2)
                 self.record_trade(t, t['tp'], "TP HIT 🎯", f"+{pts:.0f}", f"+${usd}")
-                send_telegram_alert(f"🚀 [TARGET HIT] BTC LONG\nNet: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
+                send_telegram_alert(f"🚀 [TARGET HIT] BTC LONG\nGain: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
             elif live['low'] <= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 pts = 20.0 if t.get('be_hit', False) else -(t['entry'] - t['sl'])
@@ -165,17 +167,17 @@ class MasterCommanderEngine:
                 send_telegram_alert(f"🛡️ [EXIT] BTC LONG {res}\nPnL: {sign}${usd} ({sign}{pts:.0f} pts)")
 
         elif t['type'] == 'SHORT':
-            if not t.get('be_hit', False) and live['low'] <= (t['entry'] - 90.0):
+            if not t.get('be_hit', False) and live['low'] <= (t['entry'] - 85.0):
                 t['be_hit'] = True
                 t['sl'] = round(t['entry'] - 20.0, 1)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC SHORT Protected!\nSL locked at ${t['sl']:.1f} (+20 pts profit).")
+                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC SHORT Protected!\nSL locked at ${t['sl']:.1f} (+20 pts guaranteed).")
 
             if live['low'] <= t['tp']:
                 pts = round(t['entry'] - t['tp'], 1)
                 usd = round(pts * qty, 2)
                 self.record_trade(t, t['tp'], "TP HIT 🎯", f"+{pts:.0f}", f"+${usd}")
-                send_telegram_alert(f"🩸 [TARGET HIT] BTC SHORT\nNet: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
+                send_telegram_alert(f"🩸 [TARGET HIT] BTC SHORT\nGain: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
             elif live['high'] >= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 pts = 20.0 if t.get('be_hit', False) else -(t['sl'] - t['entry'])
@@ -197,13 +199,14 @@ class MasterCommanderEngine:
         set_db_state("active_trade", None)
 
     def evaluate_market_moves(self, closed, live):
-        c0 = closed[-1]
+        c0 = closed[-1] # Current finished candle
         c1 = closed[-2]
         c2 = closed[-3]
 
         if live['time'] <= self.last_candle_time: return
         self.last_candle_time = live['time']
 
+        # Indicators
         closes = [c['close'] for c in closed]
         def calc_ema(period):
             k = 2 / (period + 1)
@@ -214,29 +217,47 @@ class MasterCommanderEngine:
         ema21 = calc_ema(21)
         ema50 = calc_ema(50)
 
-        h_range = max(c['high'] for c in closed[-8:-1])
-        l_range = min(c['low'] for c in closed[-8:-1])
         body0 = c0['close'] - c0['open']
         range0 = max(c0['high'] - c0['low'], 1.0)
-        upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
         lower_wick0 = min(c0['open'], c0['close']) - c0['low']
+        upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
 
-        # UP MOVE CONDITIONS
-        is_breakout_long = (c0['close'] > ema50) and (c0['close'] > h_range) and (body0 >= 24.0)
+        # -------------------------------------------------------------
+        # 1. SLOW CUMULATIVE TREND ENGINE (10-13 Candle Moves / 300-500 Pts)
+        # -------------------------------------------------------------
+        # 8-10 candles ka net net move calculate karte hain
+        net_move_10 = c0['close'] - closed[-10]['close']
+        green_candles_10 = sum(1 for c in closed[-10:] if c['close'] > c['open'])
+        red_candles_10 = sum(1 for c in closed[-10:] if c['close'] < c['open'])
+
+        # Slow Upward Grind (10 candle me gradual climb)
+        is_slow_grind_long = (net_move_10 >= 180.0) and (green_candles_10 >= 6) and (c0['close'] > ema9) and (c0['close'] > c0['open'])
+        # Slow Downward Drop (10 candle me gradual decline)
+        is_slow_grind_short = (net_move_10 <= -180.0) and (red_candles_10 >= 6) and (c0['close'] < ema9) and (c0['close'] < c0['open'])
+
+        # -------------------------------------------------------------
+        # 2. FAST EXPLOSIVE BREAKOUT & BREAKDOWN (2-3 Candle Blast)
+        # -------------------------------------------------------------
+        h_range = max(c['high'] for c in closed[-7:-1])
+        l_range = min(c['low'] for c in closed[-7:-1])
+        is_fast_blast_long = (c0['close'] > h_range) and (body0 >= 28.0) and (c0['close'] > ema50)
+        is_fast_blast_short = (c0['close'] < l_range) and (body0 <= -28.0) and (c0['close'] < ema50)
+
+        # -------------------------------------------------------------
+        # 3. STAIRCASE STEP PATTERNS (Micro-Swings)
+        # -------------------------------------------------------------
         is_staircase_long = (
             (ema9 >= ema21) and (c0['close'] > ema9) and
             (c0['low'] >= c1['low'] >= c2['low']) and
             (c0['close'] > c0['open']) and (c0['close'] > c1['high']) and
-            (upper_wick0 / range0 < 0.35)
+            (upper_wick0 / range0 < 0.40)
         )
 
-        # DOWN MOVE CONDITIONS
-        is_breakout_short = (c0['close'] < ema50) and (c0['close'] < l_range) and (body0 <= -24.0)
         is_staircase_short = (
             (ema9 <= ema21) and (c0['close'] < ema9) and
             (c0['high'] <= c1['high'] <= c2['high']) and
             (c0['close'] < c0['open']) and (c0['close'] < c1['low']) and
-            (lower_wick0 / range0 < 0.35)
+            (lower_wick0 / range0 < 0.40)
         )
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
@@ -244,25 +265,29 @@ class MasterCommanderEngine:
         entry = round(c0['close'], 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
-        if is_breakout_long or is_staircase_long:
-            move_type = "BREAKOUT MOVE" if is_breakout_long else "STAIRCASE CLIMB"
+        # TRIGGER LONG (UP MOVE)
+        if is_slow_grind_long or is_fast_blast_long or is_staircase_long:
+            setup_name = "SLOW STAIRCASE TREND 📈 (10-Candle Grind)" if is_slow_grind_long else ("FAST BREAKOUT BLAST 🔥" if is_fast_blast_long else "LOCAL STAIRCASE CLIMB")
             recent_low = min(c['low'] for c in closed[-4:])
-            risk = max(entry - recent_low + 20.0, 90.0)
+            risk = max(entry - recent_low + 25.0, 95.0)
+            if risk > 220.0: risk = 180.0
             sl = round(entry - risk, 1)
             tp = round(entry + (risk * 2.0), 1)
 
             set_db_state("active_trade", {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
-            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC LONG\n\n🎯 Type: {move_type}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC LONG (UP MOVE)\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
 
-        elif is_breakout_short or is_staircase_short:
-            move_type = "BREAKDOWN MOVE" if is_breakout_short else "STAIRCASE DUMP"
+        # TRIGGER SHORT (DOWN MOVE - 100% EQUAL WEIGHT)
+        elif is_slow_grind_short or is_fast_blast_short or is_staircase_short:
+            setup_name = "SLOW STAIRCASE DUMP 📉 (10-Candle Drop)" if is_slow_grind_short else ("FAST BREAKDOWN BLAST 🩸" if is_fast_blast_short else "LOCAL STAIRCASE DROP")
             recent_high = max(c['high'] for c in closed[-4:])
-            risk = max(recent_high - entry + 20.0, 90.0)
+            risk = max(recent_high - entry + 25.0, 95.0)
+            if risk > 220.0: risk = 180.0
             sl = round(entry + risk, 1)
             tp = round(entry - (risk * 2.0), 1)
 
             set_db_state("active_trade", {'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
-            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC SHORT\n\n🎯 Type: {move_type}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC SHORT (DOWN MOVE)\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -284,7 +309,7 @@ class HeadOverseerEngine:
         self.engine_id = engine_id
 
     def run(self):
-        send_telegram_alert("🛡️ [MASTER ENGINE BOOTED] Bi-Directional Scanner (Long & Short Active).")
+        send_telegram_alert("🛡️ [AI QUANT ENGINE LIVE] 10-Candle Cumulative + Symmetrical Short Engine Engaged!")
         while True:
             try:
                 with open(LOCK_FILE, "r") as f:
@@ -292,19 +317,23 @@ class HeadOverseerEngine:
             except: pass
             time.sleep(1)
 
-@st.cache_resource
-def boot_complete_system():
-    eid = str(uuid.uuid4())
-    with open(LOCK_FILE, "w") as f: f.write(eid)
-    threading.Thread(target=MasterCommanderEngine(eid).run, daemon=True).start()
-    threading.Thread(target=GlobalNewsEngine(eid).run, daemon=True).start()
-    threading.Thread(target=HeadOverseerEngine(eid).run, daemon=True).start()
-    return eid
+def boot_system_process():
+    current_id = None
+    try:
+        with open(LOCK_FILE, "r") as f: current_id = f.read().strip()
+    except: pass
 
-boot_complete_system()
+    if not current_id:
+        eid = str(uuid.uuid4())
+        with open(LOCK_FILE, "w") as f: f.write(eid)
+        threading.Thread(target=MasterCommanderEngine(eid).run, daemon=True).start()
+        threading.Thread(target=GlobalNewsEngine(eid).run, daemon=True).start()
+        threading.Thread(target=HeadOverseerEngine(eid).run, daemon=True).start()
+
+boot_system_process()
 
 # -------------------------------------------------------------
-# STREAMLIT UI
+# RESTORED FULL 8-COMPONENT UI
 # -------------------------------------------------------------
 st.set_page_config(page_title="AI CRYPTO SNIPER BOT", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>header, footer, #MainMenu { display: none !important; } .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; } iframe { width: 100vw !important; height: 100vh !important; border: none !important; }</style>""", unsafe_allow_html=True)
@@ -531,7 +560,7 @@ terminal_html = """<!DOCTYPE html>
         }
 
         function syncCandles() {
-            fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100')
+            fetch('https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100')
                 .then(r => r.json())
                 .then(data => {
                     let cdata = data.map(d => ({ time: (d[0] - (d[0] % 300000)) / 1000, open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]) }));
@@ -583,7 +612,6 @@ terminal_html = """<!DOCTYPE html>
 </body>
 </html>"""
 
-# Inject state values into HTML template
 final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
                           .replace("__TRADE_HISTORY__", js_history)\
                           .replace("__STATS__", js_stats)\
