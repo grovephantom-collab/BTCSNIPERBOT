@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# SLEEK COMPACT QUANT ENGINE: IST TIME + INLINE COMPACT VAULT CONTROLS
+# MASTER QUANT ENGINE: EARLY ENTRY + SAFE BE + IST TIME + COMPACT UI
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -144,6 +144,7 @@ class MasterCommanderEngine:
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
 
+        # Pullback-Safe Breakeven (+110 pts Trigger, +10 pts Lock)
         if t['type'] == 'LONG':
             if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 110.0):
                 t['be_hit'] = True
@@ -175,7 +176,7 @@ class MasterCommanderEngine:
                 pts = round(t['entry'] - t['tp'], 1)
                 usd = round(pts * qty, 2)
                 self.record_trade(t, t['tp'], "TP HIT 🎯", f"+{pts:.0f}", f"+${usd}")
-                send_telegram_alert(f"🩸 [TARGET HIT] BTC SHORT\nGain: +${usd} (+{pts:.0f} pts)\nExit:${t['tp']:.1f}")
+                send_telegram_alert(f"🩸 [TARGET HIT] BTC SHORT\nGain: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
             elif live['high'] >= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 pts = 10.0 if t.get('be_hit', False) else -(t['sl'] - t['entry'])
@@ -217,6 +218,7 @@ class MasterCommanderEngine:
         lower_wick0 = min(c0['open'], c0['close']) - c0['low']
         upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
 
+        # Early Staircase vs Big Blast Long
         is_early_climb_long = (
             (c0['close'] > c0['open']) and (c1['close'] > c1['open']) and
             (c0['low'] > c1['low']) and (c0['close'] > ema9) and
@@ -225,6 +227,7 @@ class MasterCommanderEngine:
         h_range = max(c['high'] for c in closed[-6:-1])
         is_big_blast_long = (c0['close'] > h_range) and (body0 >= 28.0) and (c0['close'] > ema21)
 
+        # Early Staircase vs Big Blast Short
         is_early_drop_short = (
             (c0['close'] < c0['open']) and (c1['close'] < c1['open']) and
             (c0['high'] < c1['high']) and (c0['close'] < ema9) and
@@ -276,16 +279,17 @@ class MasterCommanderEngine:
             time.sleep(2)
 
 def boot_system_process():
-    current_id = None
+    eid = str(uuid.uuid4())
     try:
-        with open(LOCK_FILE, "r") as f: current_id = f.read().strip()
+        with open(LOCK_FILE, "w") as f:
+            f.write(eid)
     except: pass
 
-    if not current_id:
-        eid = str(uuid.uuid4())
-        with open(LOCK_FILE, "w") as f: f.write(eid)
-        threading.Thread(target=MasterCommanderEngine(eid).run, daemon=True).start()
-        threading.Thread(target=GlobalNewsEngine(eid).run, daemon=True).start()
+    # Turant Telegram Ping bhejna
+    send_telegram_alert("⚡ [SYSTEM REBOOT] Naya Early Momentum Engine Live Ho Gaya! Radar Scanning Active.")
+
+    threading.Thread(target=MasterCommanderEngine(eid).run, daemon=True).start()
+    threading.Thread(target=GlobalNewsEngine(eid).run, daemon=True).start()
 
 boot_system_process()
 
@@ -427,7 +431,7 @@ terminal_html = """<!DOCTYPE html>
     </div>
 
     <script>
-        const IST_OFFSET = 5.5 * 3600; // 5 hours 30 mins for India Standard Time
+        const IST_OFFSET = 5.5 * 3600;
         let activeTrade = __ACTIVE_TRADE__;
         let tradeHistory = __TRADE_HISTORY__;
         let stats = __STATS__;
@@ -566,6 +570,14 @@ terminal_html = """<!DOCTYPE html>
                     const newBar = { time: barTime, open: price, high: price, low: price, close: price };
                     cdata.push(newBar);
                     series.update(newBar);
+                }
+
+                if (activeTrade) {
+                    if (activeTrade.type === "LONG" && (price >= activeTrade.tp || price <= activeTrade.sl)) {
+                        activeTrade = null; renderMasterInterface();
+                    } else if (activeTrade.type === "SHORT" && (price <= activeTrade.tp || price >= activeTrade.sl)) {
+                        activeTrade = null; renderMasterInterface();
+                    }
                 }
             };
             ws.onclose = () => setTimeout(() => connectLiveStream(cdata), 1500);
