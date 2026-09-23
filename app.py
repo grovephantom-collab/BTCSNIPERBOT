@@ -9,6 +9,10 @@ import os
 import uuid
 from datetime import datetime
 
+# ==============================================================================
+# MASTER QUANT ENGINE: TICK-BY-TICK EXECUTION + COOLDOWN + REALTIME SYNC
+# ==============================================================================
+
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
 CHAT_ID = "7886716805"
 DB_FILE = "sniper_vault.db"
@@ -136,50 +140,59 @@ class GlobalNewsEngine:
 class MasterCommanderEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
-        self.last_candle_time = 0
+        self.last_trade_bar_time = 0
 
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
+        curr_price = live['close'] # REAL LIVE TICK PRICE (No candle wick trap)
 
+        # ---------------- LONG POSITION MONITOR ----------------
         if t['type'] == 'LONG':
-            if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 110.0):
+            # Check Breakeven Trigger
+            if not t.get('be_hit', False) and curr_price >= (t['entry'] + 110.0):
                 t['be_hit'] = True
                 t['sl'] = round(t['entry'] + 10.0, 1)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🛡️ [SAFE SHIELD] BTC LONG Breakeven Active!\nSL locked at ${t['sl']:.1f} (+10 pts safe cost).")
+                send_telegram_alert(f"🛡️ [SAFE SHIELD] BTC LONG Breakeven Active!\nPrice: ${curr_price:.1f}\nSL locked at ${t['sl']:.1f} (+10 pts safe cost).")
 
-            if live['high'] >= t['tp']:
+            # Check TP Hit
+            if curr_price >= t['tp']:
                 pts = round(t['tp'] - t['entry'], 1)
                 usd = round(pts * qty, 2)
                 self.record_trade(t, t['tp'], "TP HIT 🎯", f"+{pts:.0f}", f"+${usd}")
                 send_telegram_alert(f"🚀 [TARGET HIT] BTC LONG\nGain: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
-            elif live['low'] <= t['sl']:
+            # Check SL / BE Hit
+            elif curr_price <= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 pts = 10.0 if t.get('be_hit', False) else -(t['entry'] - t['sl'])
                 usd = round(pts * qty, 2)
                 sign = "+" if usd >= 0 else ""
                 self.record_trade(t, t['sl'], res, f"{sign}{pts:.0f}", f"{sign}${usd}")
-                send_telegram_alert(f"🛡️ [EXIT] BTC LONG {res}\nPnL: {sign}${usd} ({sign}{pts:.0f} pts)")
+                send_telegram_alert(f"🛡️ [EXIT] BTC LONG {res}\nPnL: {sign}${usd} ({sign}{pts:.0f} pts)\nExit Price: ${curr_price:.1f}")
 
+        # ---------------- SHORT POSITION MONITOR ----------------
         elif t['type'] == 'SHORT':
-            if not t.get('be_hit', False) and live['low'] <= (t['entry'] - 110.0):
+            # Check Breakeven Trigger
+            if not t.get('be_hit', False) and curr_price <= (t['entry'] - 110.0):
                 t['be_hit'] = True
                 t['sl'] = round(t['entry'] - 10.0, 1)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🛡️ [SAFE SHIELD] BTC SHORT Breakeven Active!\nSL locked at ${t['sl']:.1f} (+10 pts safe cost).")
+                send_telegram_alert(f"🛡️ [SAFE SHIELD] BTC SHORT Breakeven Active!\nPrice: ${curr_price:.1f}\nSL locked at ${t['sl']:.1f} (+10 pts safe cost).")
 
-            if live['low'] <= t['tp']:
+            # Check TP Hit
+            if curr_price <= t['tp']:
                 pts = round(t['entry'] - t['tp'], 1)
                 usd = round(pts * qty, 2)
                 self.record_trade(t, t['tp'], "TP HIT 🎯", f"+{pts:.0f}", f"+${usd}")
                 send_telegram_alert(f"🩸 [TARGET HIT] BTC SHORT\nGain: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
-            elif live['high'] >= t['sl']:
+            # Check SL / BE Hit
+            elif curr_price >= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 pts = 10.0 if t.get('be_hit', False) else -(t['sl'] - t['entry'])
                 usd = round(pts * qty, 2)
                 sign = "+" if usd >= 0 else ""
                 self.record_trade(t, t['sl'], res, f"{sign}{pts:.0f}", f"{sign}${usd}")
-                send_telegram_alert(f"🛡️ [EXIT] BTC SHORT {res}\nPnL: {sign}${usd} ({sign}{pts:.0f} pts)")
+                send_telegram_alert(f"🛡️ [EXIT] BTC SHORT {res}\nPnL: {sign}${usd} ({sign}{pts:.0f} pts)\nExit Price: ${curr_price:.1f}")
 
     def record_trade(self, t, exit_price, result, pts, pnl_usd):
         now_str = datetime.now().strftime("%H:%M")
@@ -194,11 +207,12 @@ class MasterCommanderEngine:
         set_db_state("active_trade", None)
 
     def evaluate_market_moves(self, closed, live):
+        # Prevent multiple executions within the same 5-minute candle
+        if live['time'] <= self.last_trade_bar_time:
+            return
+
         c0 = closed[-1]
         c1 = closed[-2]
-
-        if live['time'] <= self.last_candle_time: return
-        self.last_candle_time = live['time']
 
         closes = [c['close'] for c in closed]
         def calc_ema(period):
@@ -232,10 +246,11 @@ class MasterCommanderEngine:
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
         pos_usd = float(cfg['capital']) * int(cfg['leverage'])
-        entry = round(c0['close'], 1)
+        entry = round(live['close'], 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
         if is_early_climb_long or is_big_blast_long:
+            self.last_trade_bar_time = live['time']
             setup_name = "EARLY STAIR CLIMB 📈" if is_early_climb_long else "EXPLOSIVE BLAST 🔥"
             recent_low = min(c['low'] for c in closed[-3:])
             risk = max(entry - recent_low + 20.0, 85.0)
@@ -243,10 +258,12 @@ class MasterCommanderEngine:
             sl = round(entry - risk, 1)
             tp = round(entry + max(risk * 1.5, 220.0), 1)
 
-            set_db_state("active_trade", {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
+            trade_obj = {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False}
+            set_db_state("active_trade", trade_obj)
             send_telegram_alert(f"⚡ [EARLY EXECUTION] BTC LONG\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 Target TP: ${tp:.1f} (+{tp-entry:.0f} pts)\n📦 Qty: {qty} BTC")
 
         elif is_early_drop_short or is_big_blast_short:
+            self.last_trade_bar_time = live['time']
             setup_name = "EARLY STAIR DUMP 📉" if is_early_drop_short else "EXPLOSIVE DUMP 🩸"
             recent_high = max(c['high'] for c in closed[-3:])
             risk = max(recent_high - entry + 20.0, 85.0)
@@ -254,7 +271,8 @@ class MasterCommanderEngine:
             sl = round(entry + risk, 1)
             tp = round(entry - max(risk * 1.5, 220.0), 1)
 
-            set_db_state("active_trade", {'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
+            trade_obj = {'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False}
+            set_db_state("active_trade", trade_obj)
             send_telegram_alert(f"⚡ [EARLY EXECUTION] BTC SHORT\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 Target TP: ${tp:.1f} (+{entry-tp:.0f} pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
@@ -270,22 +288,20 @@ class MasterCommanderEngine:
                 if active: self.manage_position(active, live)
                 else: self.evaluate_market_moves(closed, live)
 
-            time.sleep(2)
+            time.sleep(1.5)
 
-def boot_system_process():
+# Thread lifecycle safe init
+if "engine_started" not in st.session_state:
+    st.session_state.engine_started = True
     eid = str(uuid.uuid4())
     try:
-        with open(LOCK_FILE, "w") as f:
-            f.write(eid)
+        with open(LOCK_FILE, "w") as f: f.write(eid)
     except: pass
-
     threading.Thread(target=MasterCommanderEngine(eid).run, daemon=True).start()
     threading.Thread(target=GlobalNewsEngine(eid).run, daemon=True).start()
 
-boot_system_process()
-
 # -------------------------------------------------------------
-# AUTO-SYNC STREAMLIT ENGINE
+# ZERO MARGIN STREAMLIT EMBED
 # -------------------------------------------------------------
 st.set_page_config(page_title="AI SNIPER BOT", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -364,7 +380,7 @@ terminal_html = """<!DOCTYPE html>
         <button class="btn-clear" onclick="triggerVaultClear()">🗑️ CLEAR</button>
         <button class="btn-compact" onclick="window.parent.location.reload()">🔄</button>
         <div style="margin-left: auto; display: flex; align-items: center;">
-            <b id="live-price" style="color: #f0b90b; font-size: 11px;">Connecting...</b>
+            <b id="live-price" style="color: #f0b90b; font-size: 11px;">$85,600.0</b>
         </div>
     </div>
 
@@ -526,7 +542,6 @@ terminal_html = """<!DOCTYPE html>
             }
         }
 
-        // Live WebSocket Feed
         function syncCandles() {
             fetch('https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100')
                 .then(r => r.json())
@@ -562,30 +577,17 @@ terminal_html = """<!DOCTYPE html>
                     series.update(newBar);
                 }
 
+                // If active trade hits in frontend, sync
                 if (activeTrade) {
                     if (activeTrade.type === "LONG" && (price >= activeTrade.tp || price <= activeTrade.sl)) {
                         activeTrade = null; renderMasterInterface();
-                        setTimeout(() => window.parent.location.reload(), 1000);
                     } else if (activeTrade.type === "SHORT" && (price <= activeTrade.tp || price >= activeTrade.sl)) {
                         activeTrade = null; renderMasterInterface();
-                        setTimeout(() => window.parent.location.reload(), 1000);
                     }
                 }
             };
             ws.onclose = () => setTimeout(() => connectLiveStream(cdata), 1500);
         }
-
-        // Auto-refresh state sync check
-        setInterval(() => {
-            if (!activeTrade) {
-                // Background check if a new trade was triggered
-                let checkTrade = __ACTIVE_TRADE__;
-                if (checkTrade) {
-                    activeTrade = checkTrade;
-                    renderMasterInterface();
-                }
-            }
-        }, 3000);
 
         syncCandles();
         window.onresize = () => chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
