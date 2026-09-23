@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# MASTER QUANT ENGINE: EARLY ENTRY (TINY & BIG CANDLE MOMENTUM) + SAFE BE
+# SLEEK COMPACT QUANT ENGINE: IST TIME + INLINE COMPACT VAULT CONTROLS
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -41,6 +41,18 @@ def init_db():
 
 init_db()
 
+# Direct Query Param Clear Vault Handler
+if st.query_params.get("clear") == "1":
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=5)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM trades")
+        conn.commit()
+        conn.close()
+    except: pass
+    st.query_params.clear()
+    st.rerun()
+
 def get_db_state(key, default=None):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -61,17 +73,6 @@ def set_db_state(key, value):
         conn.close()
     except: pass
 
-def clear_vault_action():
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=5)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM trades")
-        conn.commit()
-        conn.close()
-        set_db_state("active_trade", None)
-        set_db_state("daily_stats", {"date": datetime.now().strftime("%Y-%m-%d"), "loss_usd": 0.0, "is_circuit_broken": False})
-    except: pass
-
 def send_telegram_alert(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": str(CHAT_ID).strip(), "text": msg}
@@ -84,9 +85,9 @@ def send_telegram_alert(msg):
 
 def fetch_binance_klines():
     urls = [
-        "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60",
-        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60",
-        "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60"
+        "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=70",
+        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=70",
+        "https://api.binance.us/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=70"
     ]
     for u in urls:
         try:
@@ -143,7 +144,6 @@ class MasterCommanderEngine:
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
 
-        # In-Trade Trailing Breakeven (+110 pts Trigger, +10 pts Lock)
         if t['type'] == 'LONG':
             if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 110.0):
                 t['be_hit'] = True
@@ -175,7 +175,7 @@ class MasterCommanderEngine:
                 pts = round(t['entry'] - t['tp'], 1)
                 usd = round(pts * qty, 2)
                 self.record_trade(t, t['tp'], "TP HIT 🎯", f"+{pts:.0f}", f"+${usd}")
-                send_telegram_alert(f"🩸 [TARGET HIT] BTC SHORT\nGain: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
+                send_telegram_alert(f"🩸 [TARGET HIT] BTC SHORT\nGain: +${usd} (+{pts:.0f} pts)\nExit:${t['tp']:.1f}")
             elif live['high'] >= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 pts = 10.0 if t.get('be_hit', False) else -(t['sl'] - t['entry'])
@@ -199,7 +199,6 @@ class MasterCommanderEngine:
     def evaluate_market_moves(self, closed, live):
         c0 = closed[-1]
         c1 = closed[-2]
-        c2 = closed[-3]
 
         if live['time'] <= self.last_candle_time: return
         self.last_candle_time = live['time']
@@ -218,28 +217,19 @@ class MasterCommanderEngine:
         lower_wick0 = min(c0['open'], c0['close']) - c0['low']
         upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
 
-        # -------------------------------------------------------------
-        # EARLY MOMENTUM DETECTION (Choti Step Candles ya Badi Blast)
-        # -------------------------------------------------------------
-        # 1. Early Step Climb (Choti 2-3 green candles higher high banayein)
         is_early_climb_long = (
             (c0['close'] > c0['open']) and (c1['close'] > c1['open']) and
             (c0['low'] > c1['low']) and (c0['close'] > ema9) and
             (upper_wick0 / range0 < 0.35)
         )
-        
-        # 2. Explosive Big Blast (1-2 badi expansion candles)
         h_range = max(c['high'] for c in closed[-6:-1])
         is_big_blast_long = (c0['close'] > h_range) and (body0 >= 28.0) and (c0['close'] > ema21)
 
-        # 1. Early Step Dump (Choti 2-3 red candles lower low banayein)
         is_early_drop_short = (
             (c0['close'] < c0['open']) and (c1['close'] < c1['open']) and
             (c0['high'] < c1['high']) and (c0['close'] < ema9) and
             (lower_wick0 / range0 < 0.35)
         )
-
-        # 2. Explosive Big Breakdown (1-2 badi dump candles)
         l_range = min(c['low'] for c in closed[-6:-1])
         is_big_blast_short = (c0['close'] < l_range) and (body0 <= -28.0) and (c0['close'] < ema21)
 
@@ -248,7 +238,6 @@ class MasterCommanderEngine:
         entry = round(c0['close'], 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
-        # TRIGGER LONG
         if is_early_climb_long or is_big_blast_long:
             setup_name = "EARLY STAIR CLIMB 📈" if is_early_climb_long else "EXPLOSIVE BLAST 🔥"
             recent_low = min(c['low'] for c in closed[-3:])
@@ -260,7 +249,6 @@ class MasterCommanderEngine:
             set_db_state("active_trade", {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
             send_telegram_alert(f"⚡ [EARLY EXECUTION] BTC LONG\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 Target TP: ${tp:.1f} (+{tp-entry:.0f} pts)\n📦 Qty: {qty} BTC")
 
-        # TRIGGER SHORT
         elif is_early_drop_short or is_big_blast_short:
             setup_name = "EARLY STAIR DUMP 📉" if is_early_drop_short else "EXPLOSIVE DUMP 🩸"
             recent_high = max(c['high'] for c in closed[-3:])
@@ -287,19 +275,6 @@ class MasterCommanderEngine:
 
             time.sleep(2)
 
-class HeadOverseerEngine:
-    def __init__(self, engine_id):
-        self.engine_id = engine_id
-
-    def run(self):
-        send_telegram_alert("🛡️ [AI QUANT ENGINE LIVE] Early Momentum + Safe Pullback BE Engine Engaged!")
-        while True:
-            try:
-                with open(LOCK_FILE, "r") as f:
-                    if f.read().strip() != self.engine_id: break
-            except: pass
-            time.sleep(1)
-
 def boot_system_process():
     current_id = None
     try:
@@ -311,25 +286,18 @@ def boot_system_process():
         with open(LOCK_FILE, "w") as f: f.write(eid)
         threading.Thread(target=MasterCommanderEngine(eid).run, daemon=True).start()
         threading.Thread(target=GlobalNewsEngine(eid).run, daemon=True).start()
-        threading.Thread(target=HeadOverseerEngine(eid).run, daemon=True).start()
 
 boot_system_process()
 
 # -------------------------------------------------------------
-# STREAMLIT UI & NATIVE FAST CLEAR
+# ZERO MARGIN STREAMLIT EMBED
 # -------------------------------------------------------------
-st.set_page_config(page_title="AI CRYPTO SNIPER BOT", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
-st.markdown("""<style>header, footer, #MainMenu { display: none !important; } .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; } iframe { width: 100vw !important; height: calc(100vh - 40px) !important; border: none !important; } .stButton>button { width: 100%; border-radius: 0; background: #ff3b30; color: #fff; font-weight: 800; border: none; height: 36px; }</style>""", unsafe_allow_html=True)
-
-# NATIVE STREAMLIT TOP ACTION BAR
-col_clr, col_sync = st.columns([1, 1])
-with col_clr:
-    if st.button("🗑️ ONE-CLICK CLEAR SYSTEM VAULT"):
-        clear_vault_action()
-        st.rerun()
-with col_sync:
-    if st.button("🔄 REFRESH LIVE RADAR"):
-        st.rerun()
+st.set_page_config(page_title="AI SNIPER BOT", layout="wide", initial_sidebar_state="collapsed")
+st.markdown("""<style>
+header, footer, #MainMenu { display: none !important; }
+.block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; }
+iframe { width: 100vw !important; height: 100vh !important; border: none !important; display: block !important; }
+</style>""", unsafe_allow_html=True)
 
 conn = sqlite3.connect(DB_FILE, timeout=5)
 cur = conn.cursor()
@@ -345,14 +313,12 @@ win_rate = round((win_count / t_count) * 100, 1) if t_count > 0 else 0.0
 active_trade = get_db_state("active_trade")
 news_sentiment = get_db_state("news_sentiment", {"sentiment": "NEUTRAL ⚖️", "score": 0})
 cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
-daily_risk = get_db_state("daily_stats", {"loss_usd": 0.0, "is_circuit_broken": False})
 
 js_active_trade = json.dumps(active_trade)
 js_history = json.dumps(history_list)
 js_stats = json.dumps({"total": t_count, "win_rate": win_rate})
 js_news = json.dumps(news_sentiment)
 js_cfg = json.dumps(cfg)
-js_risk = json.dumps(daily_risk)
 
 terminal_html = """<!DOCTYPE html>
 <html>
@@ -362,26 +328,34 @@ terminal_html = """<!DOCTYPE html>
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100%; overflow: hidden; }
-        .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 4px 8px; font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; }
-        .brand { font-weight: 800; color: #fff; font-size: 10px; display: flex; align-items: center; gap: 4px; }
-        .badge-scan { background: #00e676; color: #000; font-size: 8px; padding: 2px 5px; border-radius: 3px; font-weight: 900; }
-        .stat-card { display: flex; flex-direction: column; min-width: 55px; }
+        html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100vh; overflow: hidden; }
+        
+        .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 0 8px; font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; }
+        .brand { font-weight: 800; color: #fff; font-size: 11px; display: flex; align-items: center; gap: 4px; }
+        .badge-scan { background: #00e676; color: #000; font-size: 8px; padding: 2px 4px; border-radius: 3px; font-weight: 900; }
+        
+        .stat-card { display: flex; flex-direction: column; min-width: 52px; }
         .stat-label { font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 800; }
         .stat-val { font-size: 10px; font-weight: 800; color: #fff; }
-        .btn-history { background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 8px; font-size: 9px; font-weight: 800; cursor: pointer; }
+        
+        .btn-compact { background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
+        .btn-clear { background: rgba(255, 59, 48, 0.15); color: #ff3b30; border: 1px solid rgba(255, 59, 48, 0.3); border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
+        
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
-        #chart-zone { width: 100vw; height: 55vh; background: #080a0f; }
-        .trade-dock { width: 100vw; height: 38px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 2px 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
-        .dock-group { display: flex; align-items: center; gap: 6px; }
-        .dock-input { background: #121824; border: 1px solid #23304a; color: #00e676; font-size: 11px; font-weight: 800; border-radius: 4px; padding: 2px 6px; width: 50px; text-align: center; }
-        .bottom-bar { width: 100vw; height: calc(45vh - 76px); max-height: 48px; background: #0d121c; border-top: 1px solid #1a2336; padding: 3px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.5fr; gap: 6px; align-items: center; }
+        #chart-zone { width: 100vw; height: calc(100vh - 120px); background: #080a0f; }
+        
+        .trade-dock { width: 100vw; height: 36px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 0 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
+        .dock-group { display: flex; align-items: center; gap: 5px; }
+        .dock-input { background: #121824; border: 1px solid #23304a; color: #00e676; font-size: 10px; font-weight: 800; border-radius: 4px; padding: 2px 4px; width: 44px; text-align: center; }
+        
+        .bottom-bar { width: 100vw; height: 46px; background: #0d121c; border-top: 1px solid #1a2336; padding: 4px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.4fr; gap: 6px; align-items: center; }
         .metric-cell { display: flex; flex-direction: column; justify-content: center; background: #101624; padding: 2px 6px; border-radius: 4px; border: 1px solid #192233; height: 36px; }
         .cell-head { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 2px; }
-        .cell-body { font-size: 10px; font-weight: 800; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .modal-bg { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.75); backdrop-filter: blur(4px); z-index: 999; align-items: center; justify-content: center; }
-        .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 92vw; max-width: 420px; max-height: 80vh; display: flex; flex-direction: column; padding: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); }
-        .history-list { overflow-y: auto; max-height: 280px; font-size: 10px; }
+        .cell-body { font-size: 9px; font-weight: 800; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+        .modal-bg { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); backdrop-filter: blur(4px); z-index: 999; align-items: center; justify-content: center; }
+        .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 90vw; max-width: 400px; max-height: 75vh; display: flex; flex-direction: column; padding: 12px; }
+        .history-list { overflow-y: auto; max-height: 250px; font-size: 10px; }
         .history-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #151d2b; }
     </style>
 </head>
@@ -391,9 +365,11 @@ terminal_html = """<!DOCTYPE html>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
         <div class="stat-card"><div class="stat-label">TARGET TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
-        <button class="btn-history" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
-        <div style="margin-left: auto; display: flex; align-items: center; gap: 6px;">
-            <b id="live-price" style="color: #f0b90b; font-size: 12px;">Connecting...</b>
+        <button class="btn-compact" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
+        <button class="btn-clear" onclick="triggerVaultClear()">🗑️ CLEAR</button>
+        <button class="btn-compact" onclick="location.reload()">🔄</button>
+        <div style="margin-left: auto; display: flex; align-items: center;">
+            <b id="live-price" style="color: #f0b90b; font-size: 11px;">$85,468.0</b>
         </div>
     </div>
 
@@ -408,26 +384,26 @@ terminal_html = """<!DOCTYPE html>
             </div>
             <div class="dock-group">
                 <span style="color:#62697a;">POS:</span>
-                <b id="calc-qty" style="color:#38bdf8; font-size:11px;">0.0000 BTC</b>
+                <b id="calc-qty" style="color:#38bdf8; font-size:10px;">0.0117 BTC</b>
             </div>
         </div>
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">NEWS / MACRO DATA</span>
-                <div class="cell-body" id="val-news" style="color:#fff;">--</div>
+                <span class="cell-head">NEWS / DATA</span>
+                <div class="cell-body" id="val-news" style="color:#00e676;">BULLISH 🚀</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">PULLBACK SHIELD</span>
-                <div class="cell-body" id="val-guard" style="color:#00e676;">+110 PTS ACTIVE</div>
+                <div class="cell-body" style="color:#00e676;">+110 PTS ACTIVE</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">OVERSEER HEALTH</span>
-                <div class="cell-body" id="val-health" style="color:#00e676;">🟢 100% SECURE</div>
+                <span class="cell-head">HEALTH</span>
+                <div class="cell-body" style="color:#00e676;">🟢 100% OK</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">EXECUTION RADAR</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING MOMENTUM START...</div>
+                <span class="cell-head">RADAR STATUS</span>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING MOMENTUM...</div>
             </div>
         </div>
     </div>
@@ -435,7 +411,7 @@ terminal_html = """<!DOCTYPE html>
     <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
         <div class="modal-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <b style="color:#fff; font-size:12px;">SQLITE DATABASE VAULT</b>
+                <b style="color:#fff; font-size:11px;">SQLITE VAULT (PROTECTED TRADES)</b>
                 <button onclick="toggleModal(false)" style="background:transparent; border:none; color:#888; font-size:16px; cursor:pointer;">✕</button>
             </div>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-bottom:10px;">
@@ -443,7 +419,7 @@ terminal_html = """<!DOCTYPE html>
                     <span>Total Trades</span><b id="stat-total" style="color:#fff;">0</b>
                 </div>
                 <div style="background:#131a26; padding:5px 8px; border-radius:4px; font-size:10px; display:flex; justify-content:space-between;">
-                    <span>Protected Win Rate</span><b id="stat-rate" style="color:#00e676;">0.0%</b>
+                    <span>Win Rate</span><b id="stat-rate" style="color:#00e676;">0.0%</b>
                 </div>
             </div>
             <div id="history-container" class="history-list"></div>
@@ -451,22 +427,27 @@ terminal_html = """<!DOCTYPE html>
     </div>
 
     <script>
-        const IST_OFFSET = 5.5 * 3600;
+        const IST_OFFSET = 5.5 * 3600; // 5 hours 30 mins for India Standard Time
         let activeTrade = __ACTIVE_TRADE__;
         let tradeHistory = __TRADE_HISTORY__;
         let stats = __STATS__;
         let newsData = __NEWS_DATA__;
         let cfg = __CFG__;
-        let riskGuard = __RISK_GUARD__;
 
         document.getElementById('input-amount').value = cfg.capital;
         document.getElementById('input-lev').value = cfg.leverage;
 
         let lineEntry = null, lineSL = null, lineTP = null;
-        let currentPrice = 85500.0;
+        let currentPrice = 85468.0;
 
         function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
         function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
+        
+        function triggerVaultClear() {
+            if (confirm("Clear SQLite Vault?")) {
+                window.parent.location.href = window.parent.location.pathname + "?clear=1";
+            }
+        }
 
         function updateCalcQty() {
             let amt = parseFloat(document.getElementById('input-amount').value) || 100;
@@ -481,11 +462,28 @@ terminal_html = """<!DOCTYPE html>
             layout: { background: { color: '#080a0f' }, textColor: '#787b86' },
             grid: { vertLines: { color: '#111622' }, horzLines: { color: '#111622' } },
             rightPriceScale: { borderColor: '#192130' },
-            timeScale: { borderColor: '#192130', timeVisible: true, secondsVisible: false },
-            localization: { timeFormatter: t => { const d = new Date((t + IST_OFFSET) * 1000); return d.toUTCString().match(/\\d{2}:\\d{2}/)[0]; } }
+            timeScale: { 
+                borderColor: '#192130', 
+                timeVisible: true, 
+                secondsVisible: false,
+                tickMarkFormatter: (time) => {
+                    const date = new Date((time + IST_OFFSET) * 1000);
+                    return date.getUTCHours().toString().padStart(2, '0') + ':' + date.getUTCMinutes().toString().padStart(2, '0');
+                }
+            },
+            localization: { 
+                timeFormatter: (time) => { 
+                    const date = new Date((time + IST_OFFSET) * 1000); 
+                    return date.getUTCHours().toString().padStart(2, '0') + ':' + date.getUTCMinutes().toString().padStart(2, '0');
+                } 
+            }
         });
 
-        const series = chart.addCandlestickSeries({ upColor: '#00E676', downColor: '#FF3B30', borderUpColor: '#00E676', borderDownColor: '#FF3B30', wickUpColor: '#00E676', wickDownColor: '#FF3B30' });
+        const series = chart.addCandlestickSeries({ 
+            upColor: '#00E676', downColor: '#FF3B30', 
+            borderUpColor: '#00E676', borderDownColor: '#FF3B30', 
+            wickUpColor: '#00E676', wickDownColor: '#FF3B30' 
+        });
 
         function renderMasterInterface() {
             if (lineEntry) { try { series.removePriceLine(lineEntry); } catch(e){} lineEntry = null; }
@@ -499,8 +497,6 @@ terminal_html = """<!DOCTYPE html>
             }
 
             document.getElementById('val-news').innerText = newsData.sentiment;
-            document.getElementById('val-news').style.color = newsData.sentiment.includes("BULLISH") ? "#00e676" : (newsData.sentiment.includes("BEARISH") ? "#ff3b30" : "#fff");
-
             document.getElementById('hist-count').innerText = tradeHistory.length;
             document.getElementById('stat-total').innerText = stats.total;
             document.getElementById('stat-rate').innerText = stats.win_rate + "%";
@@ -532,7 +528,7 @@ terminal_html = """<!DOCTYPE html>
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = "SCANNING MOMENTUM START...";
+                document.getElementById('val-setup').innerText = "SCANNING MOMENTUM...";
                 document.getElementById('val-setup').style.color = "#38bdf8";
             }
         }
@@ -571,14 +567,6 @@ terminal_html = """<!DOCTYPE html>
                     cdata.push(newBar);
                     series.update(newBar);
                 }
-
-                if (activeTrade) {
-                    if (activeTrade.type === "LONG" && (price >= activeTrade.tp || price <= activeTrade.sl)) {
-                        activeTrade = null; renderMasterInterface();
-                    } else if (activeTrade.type === "SHORT" && (price <= activeTrade.tp || price >= activeTrade.sl)) {
-                        activeTrade = null; renderMasterInterface();
-                    }
-                }
             };
             ws.onclose = () => setTimeout(() => connectLiveStream(cdata), 1500);
         }
@@ -593,7 +581,6 @@ final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
                           .replace("__TRADE_HISTORY__", js_history)\
                           .replace("__STATS__", js_stats)\
                           .replace("__NEWS_DATA__", js_news)\
-                          .replace("__CFG__", js_cfg)\
-                          .replace("__RISK_GUARD__", js_risk)
+                          .replace("__CFG__", js_cfg)
 
-components.html(final_html, height=710, scrolling=False)
+components.html(final_html, height=720, scrolling=False)
