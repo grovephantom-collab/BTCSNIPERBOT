@@ -37,6 +37,7 @@ def init_db():
 
 init_db()
 
+# Direct Query Param Clear Vault Handler
 if st.query_params.get("clear") == "1":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -44,6 +45,7 @@ if st.query_params.get("clear") == "1":
         cur.execute("DELETE FROM trades")
         conn.commit()
         conn.close()
+        set_db_state("active_trade", None)
     except: pass
     st.query_params.clear()
     st.rerun()
@@ -277,12 +279,14 @@ def boot_system_process():
             f.write(eid)
     except: pass
 
-    send_telegram_alert("⚡ [SYSTEM REBOOT] Early Engine Live! Proportions Aligned.")
     threading.Thread(target=MasterCommanderEngine(eid).run, daemon=True).start()
     threading.Thread(target=GlobalNewsEngine(eid).run, daemon=True).start()
 
 boot_system_process()
 
+# -------------------------------------------------------------
+# AUTO-SYNC STREAMLIT ENGINE
+# -------------------------------------------------------------
 st.set_page_config(page_title="AI SNIPER BOT", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
 header, footer, #MainMenu { display: none !important; }
@@ -358,9 +362,9 @@ terminal_html = """<!DOCTYPE html>
         <div class="stat-card"><div class="stat-label">TARGET TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
         <button class="btn-compact" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
         <button class="btn-clear" onclick="triggerVaultClear()">🗑️ CLEAR</button>
-        <button class="btn-compact" onclick="location.reload()">🔄</button>
+        <button class="btn-compact" onclick="window.parent.location.reload()">🔄</button>
         <div style="margin-left: auto; display: flex; align-items: center;">
-            <b id="live-price" style="color: #f0b90b; font-size: 11px;">$85,468.0</b>
+            <b id="live-price" style="color: #f0b90b; font-size: 11px;">Connecting...</b>
         </div>
     </div>
 
@@ -429,7 +433,7 @@ terminal_html = """<!DOCTYPE html>
         document.getElementById('input-lev').value = cfg.leverage;
 
         let lineEntry = null, lineSL = null, lineTP = null;
-        let currentPrice = 85468.0;
+        let currentPrice = 85600.0;
 
         function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
         function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
@@ -485,6 +489,18 @@ terminal_html = """<!DOCTYPE html>
                 lineEntry = series.createPriceLine({ price: activeTrade.entry, color: '#38bdf8', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'ENTRY $' + activeTrade.entry.toFixed(1) });
                 lineSL = series.createPriceLine({ price: activeTrade.sl, color: '#ff3b30', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'SAFE SL $' + activeTrade.sl.toFixed(1) });
                 lineTP = series.createPriceLine({ price: activeTrade.tp, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'TARGET TP $' + activeTrade.tp.toFixed(1) });
+
+                document.getElementById('disp-entry').innerText = "$" + activeTrade.entry.toFixed(1);
+                document.getElementById('disp-sl').innerText = "$" + activeTrade.sl.toFixed(1);
+                document.getElementById('disp-tp').innerText = "$" + activeTrade.tp.toFixed(1);
+                document.getElementById('val-setup').innerText = "RIDING " + activeTrade.type + " 🚀";
+                document.getElementById('val-setup').style.color = activeTrade.type === "LONG" ? "#00e676" : "#ff3b30";
+            } else {
+                document.getElementById('disp-entry').innerText = "--";
+                document.getElementById('disp-sl').innerText = "--";
+                document.getElementById('disp-tp').innerText = "--";
+                document.getElementById('val-setup').innerText = "SCANNING MOMENTUM...";
+                document.getElementById('val-setup').style.color = "#38bdf8";
             }
 
             document.getElementById('val-news').innerText = newsData.sentiment;
@@ -508,22 +524,9 @@ terminal_html = """<!DOCTYPE html>
             } else {
                 histCont.innerHTML = '<div style="color:#555; text-align:center; padding:15px 0;">Vault Clean (0 trades)...</div>';
             }
-
-            if (activeTrade) {
-                document.getElementById('disp-entry').innerText = "$" + activeTrade.entry.toFixed(1);
-                document.getElementById('disp-sl').innerText = "$" + activeTrade.sl.toFixed(1);
-                document.getElementById('disp-tp').innerText = "$" + activeTrade.tp.toFixed(1);
-                document.getElementById('val-setup').innerText = "RIDING " + activeTrade.type + " 🚀";
-                document.getElementById('val-setup').style.color = activeTrade.type === "LONG" ? "#00e676" : "#ff3b30";
-            } else {
-                document.getElementById('disp-entry').innerText = "--";
-                document.getElementById('disp-sl').innerText = "--";
-                document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = "SCANNING MOMENTUM...";
-                document.getElementById('val-setup').style.color = "#38bdf8";
-            }
         }
 
+        // Live WebSocket Feed
         function syncCandles() {
             fetch('https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100')
                 .then(r => r.json())
@@ -562,13 +565,27 @@ terminal_html = """<!DOCTYPE html>
                 if (activeTrade) {
                     if (activeTrade.type === "LONG" && (price >= activeTrade.tp || price <= activeTrade.sl)) {
                         activeTrade = null; renderMasterInterface();
+                        setTimeout(() => window.parent.location.reload(), 1000);
                     } else if (activeTrade.type === "SHORT" && (price <= activeTrade.tp || price >= activeTrade.sl)) {
                         activeTrade = null; renderMasterInterface();
+                        setTimeout(() => window.parent.location.reload(), 1000);
                     }
                 }
             };
             ws.onclose = () => setTimeout(() => connectLiveStream(cdata), 1500);
         }
+
+        // Auto-refresh state sync check
+        setInterval(() => {
+            if (!activeTrade) {
+                // Background check if a new trade was triggered
+                let checkTrade = __ACTIVE_TRADE__;
+                if (checkTrade) {
+                    activeTrade = checkTrade;
+                    renderMasterInterface();
+                }
+            }
+        }, 3000);
 
         syncCandles();
         window.onresize = () => chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
