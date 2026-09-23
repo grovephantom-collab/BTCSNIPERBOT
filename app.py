@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# MASTER QUANT ENGINE: DUAL FAST BREAKOUT + SLOW CUMULATIVE 10-CANDLE TREND
+# MASTER QUANT ENGINE: EARLY ENTRY (TINY & BIG CANDLE MOMENTUM) + SAFE BE
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -61,7 +61,7 @@ def set_db_state(key, value):
         conn.close()
     except: pass
 
-if st.query_params.get("clear") == "1":
+def clear_vault_action():
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
         cur = conn.cursor()
@@ -71,8 +71,6 @@ if st.query_params.get("clear") == "1":
         set_db_state("active_trade", None)
         set_db_state("daily_stats", {"date": datetime.now().strftime("%Y-%m-%d"), "loss_usd": 0.0, "is_circuit_broken": False})
     except: pass
-    st.query_params.clear()
-    st.rerun()
 
 def send_telegram_alert(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -145,13 +143,13 @@ class MasterCommanderEngine:
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
 
-        # In-Trade Trailing Breakeven (+85 pts)
+        # In-Trade Trailing Breakeven (+110 pts Trigger, +10 pts Lock)
         if t['type'] == 'LONG':
-            if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 85.0):
+            if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 110.0):
                 t['be_hit'] = True
-                t['sl'] = round(t['entry'] + 20.0, 1)
+                t['sl'] = round(t['entry'] + 10.0, 1)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC LONG Protected!\nSL locked at ${t['sl']:.1f} (+20 pts guaranteed).")
+                send_telegram_alert(f"🛡️ [SAFE SHIELD] BTC LONG Breakeven Active!\nSL locked at ${t['sl']:.1f} (+10 pts safe cost).")
 
             if live['high'] >= t['tp']:
                 pts = round(t['tp'] - t['entry'], 1)
@@ -160,18 +158,18 @@ class MasterCommanderEngine:
                 send_telegram_alert(f"🚀 [TARGET HIT] BTC LONG\nGain: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
             elif live['low'] <= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
-                pts = 20.0 if t.get('be_hit', False) else -(t['entry'] - t['sl'])
+                pts = 10.0 if t.get('be_hit', False) else -(t['entry'] - t['sl'])
                 usd = round(pts * qty, 2)
                 sign = "+" if usd >= 0 else ""
                 self.record_trade(t, t['sl'], res, f"{sign}{pts:.0f}", f"{sign}${usd}")
                 send_telegram_alert(f"🛡️ [EXIT] BTC LONG {res}\nPnL: {sign}${usd} ({sign}{pts:.0f} pts)")
 
         elif t['type'] == 'SHORT':
-            if not t.get('be_hit', False) and live['low'] <= (t['entry'] - 85.0):
+            if not t.get('be_hit', False) and live['low'] <= (t['entry'] - 110.0):
                 t['be_hit'] = True
-                t['sl'] = round(t['entry'] - 20.0, 1)
+                t['sl'] = round(t['entry'] - 10.0, 1)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🎯 [AUTO BREAKEVEN] BTC SHORT Protected!\nSL locked at ${t['sl']:.1f} (+20 pts guaranteed).")
+                send_telegram_alert(f"🛡️ [SAFE SHIELD] BTC SHORT Breakeven Active!\nSL locked at ${t['sl']:.1f} (+10 pts safe cost).")
 
             if live['low'] <= t['tp']:
                 pts = round(t['entry'] - t['tp'], 1)
@@ -180,7 +178,7 @@ class MasterCommanderEngine:
                 send_telegram_alert(f"🩸 [TARGET HIT] BTC SHORT\nGain: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
             elif live['high'] >= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
-                pts = 20.0 if t.get('be_hit', False) else -(t['sl'] - t['entry'])
+                pts = 10.0 if t.get('be_hit', False) else -(t['sl'] - t['entry'])
                 usd = round(pts * qty, 2)
                 sign = "+" if usd >= 0 else ""
                 self.record_trade(t, t['sl'], res, f"{sign}{pts:.0f}", f"{sign}${usd}")
@@ -214,7 +212,6 @@ class MasterCommanderEngine:
             return e
         ema9 = calc_ema(9)
         ema21 = calc_ema(21)
-        ema50 = calc_ema(50)
 
         body0 = c0['close'] - c0['open']
         range0 = max(c0['high'] - c0['low'], 1.0)
@@ -222,68 +219,58 @@ class MasterCommanderEngine:
         upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
 
         # -------------------------------------------------------------
-        # 1. SLOW CUMULATIVE TREND ENGINE (10-13 Candle Moves / 300-500 Pts)
+        # EARLY MOMENTUM DETECTION (Choti Step Candles ya Badi Blast)
         # -------------------------------------------------------------
-        net_move_10 = c0['close'] - closed[-10]['close']
-        green_candles_10 = sum(1 for c in closed[-10:] if c['close'] > c['open'])
-        red_candles_10 = sum(1 for c in closed[-10:] if c['close'] < c['open'])
+        # 1. Early Step Climb (Choti 2-3 green candles higher high banayein)
+        is_early_climb_long = (
+            (c0['close'] > c0['open']) and (c1['close'] > c1['open']) and
+            (c0['low'] > c1['low']) and (c0['close'] > ema9) and
+            (upper_wick0 / range0 < 0.35)
+        )
+        
+        # 2. Explosive Big Blast (1-2 badi expansion candles)
+        h_range = max(c['high'] for c in closed[-6:-1])
+        is_big_blast_long = (c0['close'] > h_range) and (body0 >= 28.0) and (c0['close'] > ema21)
 
-        is_slow_grind_long = (net_move_10 >= 180.0) and (green_candles_10 >= 6) and (c0['close'] > ema9) and (c0['close'] > c0['open'])
-        is_slow_grind_short = (net_move_10 <= -180.0) and (red_candles_10 >= 6) and (c0['close'] < ema9) and (c0['close'] < c0['open'])
-
-        # -------------------------------------------------------------
-        # 2. FAST EXPLOSIVE BREAKOUT & BREAKDOWN (2-3 Candle Blast)
-        # -------------------------------------------------------------
-        h_range = max(c['high'] for c in closed[-7:-1])
-        l_range = min(c['low'] for c in closed[-7:-1])
-        is_fast_blast_long = (c0['close'] > h_range) and (body0 >= 28.0) and (c0['close'] > ema50)
-        is_fast_blast_short = (c0['close'] < l_range) and (body0 <= -28.0) and (c0['close'] < ema50)
-
-        # -------------------------------------------------------------
-        # 3. STAIRCASE STEP PATTERNS (Micro-Swings)
-        # -------------------------------------------------------------
-        is_staircase_long = (
-            (ema9 >= ema21) and (c0['close'] > ema9) and
-            (c0['low'] >= c1['low'] >= c2['low']) and
-            (c0['close'] > c0['open']) and (c0['close'] > c1['high']) and
-            (upper_wick0 / range0 < 0.40)
+        # 1. Early Step Dump (Choti 2-3 red candles lower low banayein)
+        is_early_drop_short = (
+            (c0['close'] < c0['open']) and (c1['close'] < c1['open']) and
+            (c0['high'] < c1['high']) and (c0['close'] < ema9) and
+            (lower_wick0 / range0 < 0.35)
         )
 
-        is_staircase_short = (
-            (ema9 <= ema21) and (c0['close'] < ema9) and
-            (c0['high'] <= c1['high'] <= c2['high']) and
-            (c0['close'] < c0['open']) and (c0['close'] < c1['low']) and
-            (lower_wick0 / range0 < 0.40)
-        )
+        # 2. Explosive Big Breakdown (1-2 badi dump candles)
+        l_range = min(c['low'] for c in closed[-6:-1])
+        is_big_blast_short = (c0['close'] < l_range) and (body0 <= -28.0) and (c0['close'] < ema21)
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
         pos_usd = float(cfg['capital']) * int(cfg['leverage'])
         entry = round(c0['close'], 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
-        # TRIGGER LONG (UP MOVE)
-        if is_slow_grind_long or is_fast_blast_long or is_staircase_long:
-            setup_name = "SLOW STAIRCASE TREND 📈 (10-Candle Grind)" if is_slow_grind_long else ("FAST BREAKOUT BLAST 🔥" if is_fast_blast_long else "LOCAL STAIRCASE CLIMB")
-            recent_low = min(c['low'] for c in closed[-4:])
-            risk = max(entry - recent_low + 25.0, 95.0)
-            if risk > 220.0: risk = 180.0
+        # TRIGGER LONG
+        if is_early_climb_long or is_big_blast_long:
+            setup_name = "EARLY STAIR CLIMB 📈" if is_early_climb_long else "EXPLOSIVE BLAST 🔥"
+            recent_low = min(c['low'] for c in closed[-3:])
+            risk = max(entry - recent_low + 20.0, 85.0)
+            if risk > 180.0: risk = 140.0
             sl = round(entry - risk, 1)
-            tp = round(entry + (risk * 2.0), 1)
+            tp = round(entry + max(risk * 1.5, 220.0), 1)
 
             set_db_state("active_trade", {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
-            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC LONG (UP MOVE)\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY EXECUTION] BTC LONG\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 Target TP: ${tp:.1f} (+{tp-entry:.0f} pts)\n📦 Qty: {qty} BTC")
 
-        # TRIGGER SHORT (DOWN MOVE)
-        elif is_slow_grind_short or is_fast_blast_short or is_staircase_short:
-            setup_name = "SLOW STAIRCASE DUMP 📉 (10-Candle Drop)" if is_slow_grind_short else ("FAST BREAKDOWN BLAST 🩸" if is_fast_blast_short else "LOCAL STAIRCASE DROP")
-            recent_high = max(c['high'] for c in closed[-4:])
-            risk = max(recent_high - entry + 25.0, 95.0)
-            if risk > 220.0: risk = 180.0
+        # TRIGGER SHORT
+        elif is_early_drop_short or is_big_blast_short:
+            setup_name = "EARLY STAIR DUMP 📉" if is_early_drop_short else "EXPLOSIVE DUMP 🩸"
+            recent_high = max(c['high'] for c in closed[-3:])
+            risk = max(recent_high - entry + 20.0, 85.0)
+            if risk > 180.0: risk = 140.0
             sl = round(entry + risk, 1)
-            tp = round(entry - (risk * 2.0), 1)
+            tp = round(entry - max(risk * 1.5, 220.0), 1)
 
             set_db_state("active_trade", {'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False})
-            send_telegram_alert(f"⚡ [AI AUTO EXECUTION] BTC SHORT (DOWN MOVE)\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP: ${tp:.1f} (+{risk*2.0:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY EXECUTION] BTC SHORT\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 Target TP: ${tp:.1f} (+{entry-tp:.0f} pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -305,7 +292,7 @@ class HeadOverseerEngine:
         self.engine_id = engine_id
 
     def run(self):
-        send_telegram_alert("🛡️ [AI QUANT ENGINE LIVE] 10-Candle Cumulative + Symmetrical Short Engine Engaged!")
+        send_telegram_alert("🛡️ [AI QUANT ENGINE LIVE] Early Momentum + Safe Pullback BE Engine Engaged!")
         while True:
             try:
                 with open(LOCK_FILE, "r") as f:
@@ -329,10 +316,20 @@ def boot_system_process():
 boot_system_process()
 
 # -------------------------------------------------------------
-# RESTORED FULL 8-COMPONENT UI
+# STREAMLIT UI & NATIVE FAST CLEAR
 # -------------------------------------------------------------
 st.set_page_config(page_title="AI CRYPTO SNIPER BOT", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
-st.markdown("""<style>header, footer, #MainMenu { display: none !important; } .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; } iframe { width: 100vw !important; height: 100vh !important; border: none !important; }</style>""", unsafe_allow_html=True)
+st.markdown("""<style>header, footer, #MainMenu { display: none !important; } .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; } iframe { width: 100vw !important; height: calc(100vh - 40px) !important; border: none !important; } .stButton>button { width: 100%; border-radius: 0; background: #ff3b30; color: #fff; font-weight: 800; border: none; height: 36px; }</style>""", unsafe_allow_html=True)
+
+# NATIVE STREAMLIT TOP ACTION BAR
+col_clr, col_sync = st.columns([1, 1])
+with col_clr:
+    if st.button("🗑️ ONE-CLICK CLEAR SYSTEM VAULT"):
+        clear_vault_action()
+        st.rerun()
+with col_sync:
+    if st.button("🔄 REFRESH LIVE RADAR"):
+        st.rerun()
 
 conn = sqlite3.connect(DB_FILE, timeout=5)
 cur = conn.cursor()
@@ -340,11 +337,11 @@ cur.execute("SELECT timestamp, trade_type, entry, result, pts, pnl_usd FROM trad
 rows = cur.fetchall()
 history_list = [{"time": r[0], "type": r[1], "entry": r[2], "result": r[3], "pts": r[4], "pnl_usd": r[5]} for r in rows]
 
-cur.execute("SELECT COUNT(*), SUM(CASE WHEN result LIKE '%TP%' THEN 1 ELSE 0 END) FROM trades")
-t_count, tp_count = cur.fetchone()
+cur.execute("SELECT COUNT(*), SUM(CASE WHEN result LIKE '%TP%' OR result LIKE '%BE%' THEN 1 ELSE 0 END) FROM trades")
+t_count, win_count = cur.fetchone()
 conn.close()
 
-win_rate = round((tp_count / t_count) * 100, 1) if t_count > 0 else 0.0
+win_rate = round((win_count / t_count) * 100, 1) if t_count > 0 else 0.0
 active_trade = get_db_state("active_trade")
 news_sentiment = get_db_state("news_sentiment", {"sentiment": "NEUTRAL ⚖️", "score": 0})
 cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
@@ -365,7 +362,7 @@ terminal_html = """<!DOCTYPE html>
     <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100vh; overflow: hidden; }
+        html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100%; overflow: hidden; }
         .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 4px 8px; font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; }
         .brand { font-weight: 800; color: #fff; font-size: 10px; display: flex; align-items: center; gap: 4px; }
         .badge-scan { background: #00e676; color: #000; font-size: 8px; padding: 2px 5px; border-radius: 3px; font-weight: 900; }
@@ -378,7 +375,6 @@ terminal_html = """<!DOCTYPE html>
         .trade-dock { width: 100vw; height: 38px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 2px 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
         .dock-group { display: flex; align-items: center; gap: 6px; }
         .dock-input { background: #121824; border: 1px solid #23304a; color: #00e676; font-size: 11px; font-weight: 800; border-radius: 4px; padding: 2px 6px; width: 50px; text-align: center; }
-        .toggle-btn { background: #00e676; color: #000; font-size: 9px; font-weight: 900; padding: 4px 8px; border-radius: 4px; border: none; cursor: pointer; }
         .bottom-bar { width: 100vw; height: calc(45vh - 76px); max-height: 48px; background: #0d121c; border-top: 1px solid #1a2336; padding: 3px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.5fr; gap: 6px; align-items: center; }
         .metric-cell { display: flex; flex-direction: column; justify-content: center; background: #101624; padding: 2px 6px; border-radius: 4px; border: 1px solid #192233; height: 36px; }
         .cell-head { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 2px; }
@@ -391,7 +387,7 @@ terminal_html = """<!DOCTYPE html>
 </head>
 <body>
     <div class="top-nav">
-        <div class="brand">⚡ COMPLETE <span class="badge-scan">PRO BOT</span></div>
+        <div class="brand">⚡ EARLY <span class="badge-scan">RADAR</span></div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
         <div class="stat-card"><div class="stat-label">TARGET TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
@@ -405,7 +401,6 @@ terminal_html = """<!DOCTYPE html>
         <div id="chart-zone"></div>
         <div class="trade-dock">
             <div class="dock-group">
-                <button class="toggle-btn" onclick="triggerServerSync()">🔄 SYNC SYSTEM</button>
                 <span style="color:#62697a; font-weight:800;">AMT($):</span>
                 <input id="input-amount" class="dock-input" type="number" value="100" onchange="updateCalcQty()">
                 <span style="color:#62697a; font-weight:800;">LEV:</span>
@@ -419,12 +414,12 @@ terminal_html = """<!DOCTYPE html>
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">NEWS / DATA ENGINE</span>
+                <span class="cell-head">NEWS / MACRO DATA</span>
                 <div class="cell-body" id="val-news" style="color:#fff;">--</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">CIRCUIT BREAKER</span>
-                <div class="cell-body" id="val-guard" style="color:#00e676;">SHIELD ACTIVE</div>
+                <span class="cell-head">PULLBACK SHIELD</span>
+                <div class="cell-body" id="val-guard" style="color:#00e676;">+110 PTS ACTIVE</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">OVERSEER HEALTH</span>
@@ -432,7 +427,7 @@ terminal_html = """<!DOCTYPE html>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">EXECUTION RADAR</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">RADAR SCANNING (UP & DOWN)...</div>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING MOMENTUM START...</div>
             </div>
         </div>
     </div>
@@ -441,17 +436,14 @@ terminal_html = """<!DOCTYPE html>
         <div class="modal-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
                 <b style="color:#fff; font-size:12px;">SQLITE DATABASE VAULT</b>
-                <div style="display:flex; gap:6px; align-items:center;">
-                    <button onclick="clearSystemVault()" style="background:#ff3b30; border:none; color:#fff; font-size:9px; font-weight:800; padding:3px 8px; border-radius:3px; cursor:pointer;">CLEAR VAULT</button>
-                    <button onclick="toggleModal(false)" style="background:transparent; border:none; color:#888; font-size:16px; cursor:pointer; margin-left:4px;">✕</button>
-                </div>
+                <button onclick="toggleModal(false)" style="background:transparent; border:none; color:#888; font-size:16px; cursor:pointer;">✕</button>
             </div>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-bottom:10px;">
                 <div style="background:#131a26; padding:5px 8px; border-radius:4px; font-size:10px; display:flex; justify-content:space-between;">
                     <span>Total Trades</span><b id="stat-total" style="color:#fff;">0</b>
                 </div>
                 <div style="background:#131a26; padding:5px 8px; border-radius:4px; font-size:10px; display:flex; justify-content:space-between;">
-                    <span>Win Rate</span><b id="stat-rate" style="color:#00e676;">0.0%</b>
+                    <span>Protected Win Rate</span><b id="stat-rate" style="color:#00e676;">0.0%</b>
                 </div>
             </div>
             <div id="history-container" class="history-list"></div>
@@ -475,8 +467,6 @@ terminal_html = """<!DOCTYPE html>
 
         function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
         function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
-        function clearSystemVault() { window.parent.location.search = '?clear=1'; }
-        function triggerServerSync() { window.parent.location.reload(); }
 
         function updateCalcQty() {
             let amt = parseFloat(document.getElementById('input-amount').value) || 100;
@@ -511,14 +501,6 @@ terminal_html = """<!DOCTYPE html>
             document.getElementById('val-news').innerText = newsData.sentiment;
             document.getElementById('val-news').style.color = newsData.sentiment.includes("BULLISH") ? "#00e676" : (newsData.sentiment.includes("BEARISH") ? "#ff3b30" : "#fff");
 
-            if (riskGuard.is_circuit_broken) {
-                document.getElementById('val-guard').innerText = "🔴 TRADING PAUSED";
-                document.getElementById('val-guard').style.color = "#ff3b30";
-            } else {
-                document.getElementById('val-guard').innerText = "🟢 SHIELD ACTIVE";
-                document.getElementById('val-guard').style.color = "#00e676";
-            }
-
             document.getElementById('hist-count').innerText = tradeHistory.length;
             document.getElementById('stat-total').innerText = stats.total;
             document.getElementById('stat-rate').innerText = stats.win_rate + "%";
@@ -527,7 +509,7 @@ terminal_html = """<!DOCTYPE html>
             if (tradeHistory.length > 0) {
                 histCont.innerHTML = "";
                 tradeHistory.forEach(item => {
-                    let resCol = item.result.includes("TP") ? "#00e676" : "#ff3b30";
+                    let resCol = item.result.includes("TP") || item.result.includes("BE") ? "#00e676" : "#ff3b30";
                     let typeCol = item.type === "LONG" ? "#00e676" : "#ff3b30";
                     let pnlDisp = item.pnl_usd ? `<b style="color:${resCol}; margin-left:4px;">(${item.pnl_usd})</b>` : '';
                     histCont.innerHTML += `
@@ -537,20 +519,20 @@ terminal_html = """<!DOCTYPE html>
                         </div>`;
                 });
             } else {
-                histCont.innerHTML = '<div style="color:#555; text-align:center; padding:15px 0;">No trades recorded in vault...</div>';
+                histCont.innerHTML = '<div style="color:#555; text-align:center; padding:15px 0;">Vault Clean (0 trades)...</div>';
             }
 
             if (activeTrade) {
                 document.getElementById('disp-entry').innerText = "$" + activeTrade.entry.toFixed(1);
                 document.getElementById('disp-sl').innerText = "$" + activeTrade.sl.toFixed(1);
                 document.getElementById('disp-tp').innerText = "$" + activeTrade.tp.toFixed(1);
-                document.getElementById('val-setup').innerText = "EXECUTING " + activeTrade.type + " 🔥";
+                document.getElementById('val-setup').innerText = "RIDING " + activeTrade.type + " 🚀";
                 document.getElementById('val-setup').style.color = activeTrade.type === "LONG" ? "#00e676" : "#ff3b30";
             } else {
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = "RADAR SCANNING (UP & DOWN)...";
+                document.getElementById('val-setup').innerText = "SCANNING MOMENTUM START...";
                 document.getElementById('val-setup').style.color = "#38bdf8";
             }
         }
@@ -588,7 +570,6 @@ terminal_html = """<!DOCTYPE html>
                     const newBar = { time: barTime, open: price, high: price, low: price, close: price };
                     cdata.push(newBar);
                     series.update(newBar);
-                    setTimeout(() => window.parent.location.reload(), 8000); 
                 }
 
                 if (activeTrade) {
@@ -615,4 +596,4 @@ final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
                           .replace("__CFG__", js_cfg)\
                           .replace("__RISK_GUARD__", js_risk)
 
-components.html(final_html, height=720, scrolling=False)
+components.html(final_html, height=710, scrolling=False)
