@@ -9,10 +9,6 @@ import os
 import uuid
 from datetime import datetime
 
-# ==============================================================================
-# MASTER QUANT ENGINE: EARLY ENTRY + SAFE BE + IST TIME + COMPACT UI
-# ==============================================================================
-
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
 CHAT_ID = "7886716805"
 DB_FILE = "sniper_vault.db"
@@ -41,7 +37,6 @@ def init_db():
 
 init_db()
 
-# Direct Query Param Clear Vault Handler
 if st.query_params.get("clear") == "1":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -144,7 +139,6 @@ class MasterCommanderEngine:
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
 
-        # Pullback-Safe Breakeven (+110 pts Trigger, +10 pts Lock)
         if t['type'] == 'LONG':
             if not t.get('be_hit', False) and live['high'] >= (t['entry'] + 110.0):
                 t['be_hit'] = True
@@ -218,7 +212,6 @@ class MasterCommanderEngine:
         lower_wick0 = min(c0['open'], c0['close']) - c0['low']
         upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
 
-        # Early Staircase vs Big Blast Long
         is_early_climb_long = (
             (c0['close'] > c0['open']) and (c1['close'] > c1['open']) and
             (c0['low'] > c1['low']) and (c0['close'] > ema9) and
@@ -227,7 +220,6 @@ class MasterCommanderEngine:
         h_range = max(c['high'] for c in closed[-6:-1])
         is_big_blast_long = (c0['close'] > h_range) and (body0 >= 28.0) and (c0['close'] > ema21)
 
-        # Early Staircase vs Big Blast Short
         is_early_drop_short = (
             (c0['close'] < c0['open']) and (c1['close'] < c1['open']) and
             (c0['high'] < c1['high']) and (c0['close'] < ema9) and
@@ -285,22 +277,17 @@ def boot_system_process():
             f.write(eid)
     except: pass
 
-    # Turant Telegram Ping bhejna
-    send_telegram_alert("⚡ [SYSTEM REBOOT] Naya Early Momentum Engine Live Ho Gaya! Radar Scanning Active.")
-
+    send_telegram_alert("⚡ [SYSTEM REBOOT] Early Engine Live! Proportions Aligned.")
     threading.Thread(target=MasterCommanderEngine(eid).run, daemon=True).start()
     threading.Thread(target=GlobalNewsEngine(eid).run, daemon=True).start()
 
 boot_system_process()
 
-# -------------------------------------------------------------
-# ZERO MARGIN STREAMLIT EMBED
-# -------------------------------------------------------------
 st.set_page_config(page_title="AI SNIPER BOT", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
 header, footer, #MainMenu { display: none !important; }
 .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; }
-iframe { width: 100vw !important; height: 100vh !important; border: none !important; display: block !important; }
+iframe { width: 100vw !important; height: calc(100vh - 5px) !important; border: none !important; display: block !important; }
 </style>""", unsafe_allow_html=True)
 
 conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -346,7 +333,7 @@ terminal_html = """<!DOCTYPE html>
         .btn-clear { background: rgba(255, 59, 48, 0.15); color: #ff3b30; border: 1px solid rgba(255, 59, 48, 0.3); border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
         
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
-        #chart-zone { width: 100vw; height: calc(100vh - 120px); background: #080a0f; }
+        #chart-zone { width: 100vw; height: 55vh; background: #080a0f; }
         
         .trade-dock { width: 100vw; height: 36px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 0 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
         .dock-group { display: flex; align-items: center; gap: 5px; }
@@ -595,4 +582,4 @@ final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
                           .replace("__NEWS_DATA__", js_news)\
                           .replace("__CFG__", js_cfg)
 
-components.html(final_html, height=720, scrolling=False)
+components.html(final_html, height=710, scrolling=False)
