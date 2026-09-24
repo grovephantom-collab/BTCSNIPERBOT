@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: DUAL TP (TP1/TP2) + VOLUME FILTER + SAFE VAULT + LIVE SYNC
+# PRO QUANT ENGINE: DUAL TP VISUALIZER + GUARANTEED BOOT + TELEGRAM ALERTS
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -41,7 +41,7 @@ def init_db():
 
 init_db()
 
-# Direct Query Clear Handler (Triggered only from inside Vault modal)
+# Direct Query Clear Handler
 if st.query_params.get("clear_vault") == "confirmed":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -49,7 +49,13 @@ if st.query_params.get("clear_vault") == "confirmed":
         cur.execute("DELETE FROM trades")
         conn.commit()
         conn.close()
-        set_db_state("active_trade", None)
+        try:
+            conn2 = sqlite3.connect(DB_FILE, timeout=5)
+            c2 = conn2.cursor()
+            c2.execute("INSERT OR REPLACE INTO state (key, value) VALUES ('active_trade', 'null')")
+            conn2.commit()
+            conn2.close()
+        except: pass
     except: pass
     st.query_params.clear()
     st.rerun()
@@ -113,19 +119,17 @@ class MasterCommanderEngine:
         qty = t.get("qty", 0.01)
         curr_price = live['close']
 
-        # ==================== LONG POSITION ====================
+        # ---------------- LONG POSITION MONITOR ----------------
         if t['type'] == 'LONG':
-            # 1. TP1 Trigger (+110 pts) -> 50% Profit Book + BE Lock
             if not t.get('tp1_hit', False) and curr_price >= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
-                t['sl'] = round(t['entry'] + 10.0, 1) # Shift SL to +10 cost
+                t['sl'] = round(t['entry'] + 10.0, 1)
                 half_usd = round(110.0 * (qty * 0.5), 2)
                 t['realized_pnl'] = t.get('realized_pnl', 0.0) + half_usd
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # 2. TP2 Trigger (+220 pts) -> Full Final Exit
             elif curr_price >= t['tp2']:
                 rem_usd = round((t['tp2'] - t['entry']) * (qty * 0.5), 2)
                 total_usd = round(t.get('realized_pnl', 0.0) + rem_usd, 2)
@@ -133,11 +137,9 @@ class MasterCommanderEngine:
                 self.record_trade(t, t['tp2'], "TP2 HIT 🎯🔥", f"+{pts:.0f}", f"+${total_usd:.2f}")
                 send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal PnL: +${total_usd:.2f} (+{pts:.0f} pts)\nExit: ${t['tp2']:.1f}")
 
-            # 3. Stop Loss / Breakeven Hit
             elif curr_price <= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 if t.get('tp1_hit', False):
-                    # TP1 already booked, remaining hit at +10 pts
                     final_usd = round(t.get('realized_pnl', 0.0) + (10.0 * (qty * 0.5)), 2)
                     pts_str = "+60 pts net"
                     res = "TP1 + BE SECURE"
@@ -149,19 +151,17 @@ class MasterCommanderEngine:
                 self.record_trade(t, t['sl'], res, pts_str, f"{sign}${final_usd:.2f}")
                 send_telegram_alert(f"🛡️ [EXIT] BTC LONG {res}\nNet PnL: {sign}${final_usd:.2f} ({pts_str})\nExit: ${curr_price:.1f}")
 
-        # ==================== SHORT POSITION ====================
+        # ---------------- SHORT POSITION MONITOR ----------------
         elif t['type'] == 'SHORT':
-            # 1. TP1 Trigger (+110 pts Drop) -> 50% Profit Book + BE Lock
             if not t.get('tp1_hit', False) and curr_price <= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
-                t['sl'] = round(t['entry'] - 10.0, 1) # Shift SL to -10 cost
+                t['sl'] = round(t['entry'] - 10.0, 1)
                 half_usd = round(110.0 * (qty * 0.5), 2)
                 t['realized_pnl'] = t.get('realized_pnl', 0.0) + half_usd
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # 2. TP2 Trigger (+220 pts Drop) -> Full Final Exit
             elif curr_price <= t['tp2']:
                 rem_usd = round((t['entry'] - t['tp2']) * (qty * 0.5), 2)
                 total_usd = round(t.get('realized_pnl', 0.0) + rem_usd, 2)
@@ -169,7 +169,6 @@ class MasterCommanderEngine:
                 self.record_trade(t, t['tp2'], "TP2 HIT 🎯🩸", f"+{pts:.0f}", f"+${total_usd:.2f}")
                 send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal PnL: +${total_usd:.2f} (+{pts:.0f} pts)\nExit: ${t['tp2']:.1f}")
 
-            # 3. Stop Loss / Breakeven Hit
             elif curr_price >= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 if t.get('tp1_hit', False):
@@ -198,9 +197,6 @@ class MasterCommanderEngine:
 
     def evaluate_market_moves(self, closed, live):
         c0 = closed[-1]
-        c1 = closed[-2]
-
-        # Candle Close Check (Har 5m candle close par sirf 1 baar scan hoga)
         if c0['time'] <= self.last_candle_checked:
             return
         self.last_candle_checked = c0['time']
@@ -214,29 +210,26 @@ class MasterCommanderEngine:
         ema9 = calc_ema(9)
         ema21 = calc_ema(21)
 
-        # Volume Average Filter (Avoid fakeouts without volume)
         avg_vol = sum(c['vol'] for c in closed[-15:]) / 15.0
-        has_volume = c0['vol'] >= (avg_vol * 0.85)
+        has_volume = c0['vol'] >= (avg_vol * 0.80)
 
         body0 = c0['close'] - c0['open']
         range0 = max(c0['high'] - c0['low'], 1.0)
         lower_wick0 = min(c0['open'], c0['close']) - c0['low']
         upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
 
-        # Long Confirmation: EMA alignment + No upper wick trap + Solid volume
         is_solid_long = (
             (c0['close'] > c0['open']) and 
             (c0['close'] > ema9) and (ema9 > ema21) and
-            (upper_wick0 / range0 < 0.28) and
-            has_volume and (body0 >= 22.0)
+            (upper_wick0 / range0 < 0.32) and
+            has_volume and (body0 >= 20.0)
         )
 
-        # Short Confirmation: EMA alignment + No lower wick trap (bounce-back shield) + Solid volume
         is_solid_short = (
             (c0['close'] < c0['open']) and 
             (c0['close'] < ema9) and (ema9 < ema21) and
-            (lower_wick0 / range0 < 0.28) and # Rejection wick filter
-            has_volume and (body0 <= -22.0)
+            (lower_wick0 / range0 < 0.32) and
+            has_volume and (body0 <= -20.0)
         )
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
@@ -291,14 +284,21 @@ class MasterCommanderEngine:
 
             time.sleep(1.5)
 
-# Thread Bootstrapper
-if "engine_started" not in st.session_state:
-    st.session_state.engine_started = True
-    eid = str(uuid.uuid4())
+# GUARANTEED ENGINE BOOTLOADER
+def launch_master_engine():
+    current_lock = None
     try:
-        with open(LOCK_FILE, "w") as f: f.write(eid)
+        with open(LOCK_FILE, "r") as f: current_lock = f.read().strip()
     except: pass
-    threading.Thread(target=MasterCommanderEngine(eid).run, daemon=True).start()
+
+    # Agar lock nahi hai ya reboot hua hai, force-boot karo
+    if not current_lock:
+        eid = str(uuid.uuid4())
+        with open(LOCK_FILE, "w") as f: f.write(eid)
+        send_telegram_alert("⚡ [ENGINE ONLINE] Dual-TP Engine Active & Scanning BTC 5M Candles!")
+        threading.Thread(target=MasterCommanderEngine(eid).run, daemon=True).start()
+
+launch_master_engine()
 
 # -------------------------------------------------------------
 # STREAMLIT ZERO-MARGIN FRAME
@@ -374,11 +374,11 @@ terminal_html = """<!DOCTYPE html>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
         <div class="stat-card"><div class="stat-label">TP1 (50%)</div><div id="disp-tp1" class="stat-val" style="color:#00e676;">--</div></div>
-        <div class="stat-card"><div class="stat-label">TP2 (50%)</div><div id="disp-tp2" class="stat-val" style="color:#00e676;">--</div></div>
+        <div class="stat-card"><div class="stat-label">TP2 (50%)</div><div id="disp-tp2" class="stat-val" style="color:#00b0ff;">--</div></div>
         <button class="btn-compact" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
         <button class="btn-compact" onclick="window.parent.location.reload()">🔄</button>
         <div style="margin-left: auto; display: flex; align-items: center;">
-            <b id="live-price" style="color: #f0b90b; font-size: 11px;">$84,000.0</b>
+            <b id="live-price" style="color: #f0b90b; font-size: 11px;">$84,132.0</b>
         </div>
     </div>
 
@@ -417,7 +417,6 @@ terminal_html = """<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- VAULT POPUP MODAL -->
     <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
         <div class="modal-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
@@ -448,7 +447,7 @@ terminal_html = """<!DOCTYPE html>
         document.getElementById('input-lev').value = cfg.leverage;
 
         let lineEntry = null, lineSL = null, lineTP1 = null, lineTP2 = null;
-        let currentPrice = 84000.0;
+        let currentPrice = 84132.0;
 
         function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
         function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
@@ -495,22 +494,57 @@ terminal_html = """<!DOCTYPE html>
             wickUpColor: '#00E676', wickDownColor: '#FF3B30' 
         });
 
-        function renderMasterInterface() {
+        function clearAllLines() {
             if (lineEntry) { try { series.removePriceLine(lineEntry); } catch(e){} lineEntry = null; }
             if (lineSL) { try { series.removePriceLine(lineSL); } catch(e){} lineSL = null; }
             if (lineTP1) { try { series.removePriceLine(lineTP1); } catch(e){} lineTP1 = null; }
             if (lineTP2) { try { series.removePriceLine(lineTP2); } catch(e){} lineTP2 = null; }
+        }
 
-            if (activeTrade) {
-                lineEntry = series.createPriceLine({ price: activeTrade.entry, color: '#38bdf8', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'ENTRY $' + activeTrade.entry.toFixed(1) });
-                lineSL = series.createPriceLine({ price: activeTrade.sl, color: '#ff3b30', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'SAFE SL $' + activeTrade.sl.toFixed(1) });
-                lineTP1 = series.createPriceLine({ price: activeTrade.tp1, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'TP1 (50%) $' + activeTrade.tp1.toFixed(1) });
-                lineTP2 = series.createPriceLine({ price: activeTrade.tp2, color: '#00b0ff', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'TP2 (50%) $' + activeTrade.tp2.toFixed(1) });
+        function renderMasterInterface() {
+            clearAllLines();
 
-                document.getElementById('disp-entry').innerText = "$" + activeTrade.entry.toFixed(1);
-                document.getElementById('disp-sl').innerText = "$" + activeTrade.sl.toFixed(1);
-                document.getElementById('disp-tp1').innerText = "$" + activeTrade.tp1.toFixed(1);
-                document.getElementById('disp-tp2').innerText = "$" + activeTrade.tp2.toFixed(1);
+            if (activeTrade && activeTrade.entry) {
+                lineEntry = series.createPriceLine({ 
+                    price: parseFloat(activeTrade.entry), 
+                    color: '#38bdf8', lineWidth: 2, 
+                    lineStyle: LightweightCharts.LineStyle.Dashed, 
+                    axisLabelVisible: true, 
+                    title: 'ENTRY $' + parseFloat(activeTrade.entry).toFixed(1) 
+                });
+                
+                lineSL = series.createPriceLine({ 
+                    price: parseFloat(activeTrade.sl), 
+                    color: '#ff3b30', lineWidth: 2, 
+                    lineStyle: LightweightCharts.LineStyle.Solid, 
+                    axisLabelVisible: true, 
+                    title: 'SAFE SL $' + parseFloat(activeTrade.sl).toFixed(1) 
+                });
+
+                if (activeTrade.tp1) {
+                    lineTP1 = series.createPriceLine({ 
+                        price: parseFloat(activeTrade.tp1), 
+                        color: '#00e676', lineWidth: 2, 
+                        lineStyle: LightweightCharts.LineStyle.Solid, 
+                        axisLabelVisible: true, 
+                        title: 'TP1 (50%) $' + parseFloat(activeTrade.tp1).toFixed(1) 
+                    });
+                }
+
+                if (activeTrade.tp2) {
+                    lineTP2 = series.createPriceLine({ 
+                        price: parseFloat(activeTrade.tp2), 
+                        color: '#00b0ff', lineWidth: 2, 
+                        lineStyle: LightweightCharts.LineStyle.Solid, 
+                        axisLabelVisible: true, 
+                        title: 'TP2 (50%) $' + parseFloat(activeTrade.tp2).toFixed(1) 
+                    });
+                }
+
+                document.getElementById('disp-entry').innerText = "$" + parseFloat(activeTrade.entry).toFixed(1);
+                document.getElementById('disp-sl').innerText = "$" + parseFloat(activeTrade.sl).toFixed(1);
+                document.getElementById('disp-tp1').innerText = activeTrade.tp1 ? "$" + parseFloat(activeTrade.tp1).toFixed(1) : "--";
+                document.getElementById('disp-tp2').innerText = activeTrade.tp2 ? "$" + parseFloat(activeTrade.tp2).toFixed(1) : "--";
                 document.getElementById('val-setup').innerText = "RIDING " + activeTrade.type + " 🚀";
                 document.getElementById('val-setup').style.color = activeTrade.type === "LONG" ? "#00e676" : "#ff3b30";
             } else {
@@ -535,7 +569,7 @@ terminal_html = """<!DOCTYPE html>
                     let pnlDisp = item.pnl_usd ? `<b style="color:${resCol}; margin-left:4px;">(${item.pnl_usd})</b>` : '';
                     histCont.innerHTML += `
                         <div class="history-item">
-                            <span>${item.time} <b style="color:${typeCol};">${item.type}</b> @ $${item.entry.toFixed(1)}</span>
+                            <span>${item.time} <b style="color:${typeCol};">${item.type}</b> @ $${parseFloat(item.entry).toFixed(1)}</span>
                             <span><b style="color:${resCol};">${item.result}</b> ${pnlDisp}</span>
                         </div>`;
                 });
@@ -548,7 +582,13 @@ terminal_html = """<!DOCTYPE html>
             fetch('https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100')
                 .then(r => r.json())
                 .then(data => {
-                    let cdata = data.map(d => ({ time: (d[0] - (d[0] % 300000)) / 1000, open: parseFloat(d[1]), high: parseFloat(d[2]), low: parseFloat(d[3]), close: parseFloat(d[4]) }));
+                    let cdata = data.map(d => ({ 
+                        time: (d[0] - (d[0] % 300000)) / 1000, 
+                        open: parseFloat(d[1]), 
+                        high: parseFloat(d[2]), 
+                        low: parseFloat(d[3]), 
+                        close: parseFloat(d[4]) 
+                    }));
                     series.setData(cdata);
                     chart.timeScale().fitContent();
                     renderMasterInterface();
