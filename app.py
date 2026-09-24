@@ -10,13 +10,13 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# MASTER QUANT ENGINE: TICK-BY-TICK EXECUTION + COOLDOWN + REALTIME SYNC
+# PRO QUANT ENGINE: DUAL TP (TP1/TP2) + VOLUME FILTER + SAFE VAULT + LIVE SYNC
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
 CHAT_ID = "7886716805"
 DB_FILE = "sniper_vault.db"
-LOCK_FILE = "master_engine_lock.txt"
+LOCK_FILE = "engine_process.pid"
 
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -41,8 +41,8 @@ def init_db():
 
 init_db()
 
-# Direct Query Param Clear Vault Handler
-if st.query_params.get("clear") == "1":
+# Direct Query Clear Handler (Triggered only from inside Vault modal)
+if st.query_params.get("clear_vault") == "confirmed":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
         cur = conn.cursor()
@@ -61,7 +61,7 @@ def get_db_state(key, default=None):
         cur.execute("SELECT value FROM state WHERE key=?", (key,))
         row = cur.fetchone()
         conn.close()
-        if row: return json.loads(row[0])
+        if row and row[0]: return json.loads(row[0])
     except: pass
     return default
 
@@ -104,95 +104,85 @@ def fetch_binance_klines():
         except: continue
     return None, None
 
-class GlobalNewsEngine:
-    def __init__(self, engine_id):
-        self.engine_id = engine_id
-
-    def run(self):
-        while True:
-            try:
-                with open(LOCK_FILE, "r") as f:
-                    if f.read().strip() != self.engine_id: break
-            except: pass
-
-            score = 0
-            sentiment = "NEUTRAL ⚖️"
-            try:
-                fg = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3).json()
-                fng_val = int(fg['data'][0]['value'])
-                if fng_val > 60: score += 5
-                elif fng_val < 40: score -= 5
-            except: pass
-
-            try:
-                tk = requests.get("https://data-api.binance.vision/api/v3/ticker/24hr?symbol=BTCUSDT", timeout=3).json()
-                chg = float(tk['priceChangePercent'])
-                if chg > 2.0: score += 5
-                elif chg < -2.0: score -= 5
-            except: pass
-
-            if score >= 5: sentiment = "BULLISH 🚀"
-            elif score <= -5: sentiment = "BEARISH 🩸"
-
-            set_db_state("news_sentiment", {"sentiment": sentiment, "score": score})
-            time.sleep(15)
-
 class MasterCommanderEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
-        self.last_trade_bar_time = 0
+        self.last_candle_checked = 0
 
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
-        curr_price = live['close'] # REAL LIVE TICK PRICE (No candle wick trap)
+        curr_price = live['close']
 
-        # ---------------- LONG POSITION MONITOR ----------------
+        # ==================== LONG POSITION ====================
         if t['type'] == 'LONG':
-            # Check Breakeven Trigger
-            if not t.get('be_hit', False) and curr_price >= (t['entry'] + 110.0):
+            # 1. TP1 Trigger (+110 pts) -> 50% Profit Book + BE Lock
+            if not t.get('tp1_hit', False) and curr_price >= t['tp1']:
+                t['tp1_hit'] = True
                 t['be_hit'] = True
-                t['sl'] = round(t['entry'] + 10.0, 1)
+                t['sl'] = round(t['entry'] + 10.0, 1) # Shift SL to +10 cost
+                half_usd = round(110.0 * (qty * 0.5), 2)
+                t['realized_pnl'] = t.get('realized_pnl', 0.0) + half_usd
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🛡️ [SAFE SHIELD] BTC LONG Breakeven Active!\nPrice: ${curr_price:.1f}\nSL locked at ${t['sl']:.1f} (+10 pts safe cost).")
+                send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # Check TP Hit
-            if curr_price >= t['tp']:
-                pts = round(t['tp'] - t['entry'], 1)
-                usd = round(pts * qty, 2)
-                self.record_trade(t, t['tp'], "TP HIT 🎯", f"+{pts:.0f}", f"+${usd}")
-                send_telegram_alert(f"🚀 [TARGET HIT] BTC LONG\nGain: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
-            # Check SL / BE Hit
+            # 2. TP2 Trigger (+220 pts) -> Full Final Exit
+            elif curr_price >= t['tp2']:
+                rem_usd = round((t['tp2'] - t['entry']) * (qty * 0.5), 2)
+                total_usd = round(t.get('realized_pnl', 0.0) + rem_usd, 2)
+                pts = round(t['tp2'] - t['entry'], 1)
+                self.record_trade(t, t['tp2'], "TP2 HIT 🎯🔥", f"+{pts:.0f}", f"+${total_usd:.2f}")
+                send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal PnL: +${total_usd:.2f} (+{pts:.0f} pts)\nExit: ${t['tp2']:.1f}")
+
+            # 3. Stop Loss / Breakeven Hit
             elif curr_price <= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
-                pts = 10.0 if t.get('be_hit', False) else -(t['entry'] - t['sl'])
-                usd = round(pts * qty, 2)
-                sign = "+" if usd >= 0 else ""
-                self.record_trade(t, t['sl'], res, f"{sign}{pts:.0f}", f"{sign}${usd}")
-                send_telegram_alert(f"🛡️ [EXIT] BTC LONG {res}\nPnL: {sign}${usd} ({sign}{pts:.0f} pts)\nExit Price: ${curr_price:.1f}")
+                if t.get('tp1_hit', False):
+                    # TP1 already booked, remaining hit at +10 pts
+                    final_usd = round(t.get('realized_pnl', 0.0) + (10.0 * (qty * 0.5)), 2)
+                    pts_str = "+60 pts net"
+                    res = "TP1 + BE SECURE"
+                else:
+                    final_usd = round(-(t['entry'] - t['sl']) * qty, 2)
+                    pts_str = f"-{t['entry'] - t['sl']:.0f}"
 
-        # ---------------- SHORT POSITION MONITOR ----------------
+                sign = "+" if final_usd >= 0 else ""
+                self.record_trade(t, t['sl'], res, pts_str, f"{sign}${final_usd:.2f}")
+                send_telegram_alert(f"🛡️ [EXIT] BTC LONG {res}\nNet PnL: {sign}${final_usd:.2f} ({pts_str})\nExit: ${curr_price:.1f}")
+
+        # ==================== SHORT POSITION ====================
         elif t['type'] == 'SHORT':
-            # Check Breakeven Trigger
-            if not t.get('be_hit', False) and curr_price <= (t['entry'] - 110.0):
+            # 1. TP1 Trigger (+110 pts Drop) -> 50% Profit Book + BE Lock
+            if not t.get('tp1_hit', False) and curr_price <= t['tp1']:
+                t['tp1_hit'] = True
                 t['be_hit'] = True
-                t['sl'] = round(t['entry'] - 10.0, 1)
+                t['sl'] = round(t['entry'] - 10.0, 1) # Shift SL to -10 cost
+                half_usd = round(110.0 * (qty * 0.5), 2)
+                t['realized_pnl'] = t.get('realized_pnl', 0.0) + half_usd
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🛡️ [SAFE SHIELD] BTC SHORT Breakeven Active!\nPrice: ${curr_price:.1f}\nSL locked at ${t['sl']:.1f} (+10 pts safe cost).")
+                send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # Check TP Hit
-            if curr_price <= t['tp']:
-                pts = round(t['entry'] - t['tp'], 1)
-                usd = round(pts * qty, 2)
-                self.record_trade(t, t['tp'], "TP HIT 🎯", f"+{pts:.0f}", f"+${usd}")
-                send_telegram_alert(f"🩸 [TARGET HIT] BTC SHORT\nGain: +${usd} (+{pts:.0f} pts)\nExit: ${t['tp']:.1f}")
-            # Check SL / BE Hit
+            # 2. TP2 Trigger (+220 pts Drop) -> Full Final Exit
+            elif curr_price <= t['tp2']:
+                rem_usd = round((t['entry'] - t['tp2']) * (qty * 0.5), 2)
+                total_usd = round(t.get('realized_pnl', 0.0) + rem_usd, 2)
+                pts = round(t['entry'] - t['tp2'], 1)
+                self.record_trade(t, t['tp2'], "TP2 HIT 🎯🩸", f"+{pts:.0f}", f"+${total_usd:.2f}")
+                send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal PnL: +${total_usd:.2f} (+{pts:.0f} pts)\nExit: ${t['tp2']:.1f}")
+
+            # 3. Stop Loss / Breakeven Hit
             elif curr_price >= t['sl']:
                 res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
-                pts = 10.0 if t.get('be_hit', False) else -(t['sl'] - t['entry'])
-                usd = round(pts * qty, 2)
-                sign = "+" if usd >= 0 else ""
-                self.record_trade(t, t['sl'], res, f"{sign}{pts:.0f}", f"{sign}${usd}")
-                send_telegram_alert(f"🛡️ [EXIT] BTC SHORT {res}\nPnL: {sign}${usd} ({sign}{pts:.0f} pts)\nExit Price: ${curr_price:.1f}")
+                if t.get('tp1_hit', False):
+                    final_usd = round(t.get('realized_pnl', 0.0) + (10.0 * (qty * 0.5)), 2)
+                    pts_str = "+60 pts net"
+                    res = "TP1 + BE SECURE"
+                else:
+                    final_usd = round(-(t['sl'] - t['entry']) * qty, 2)
+                    pts_str = f"-{t['sl'] - t['entry']:.0f}"
+
+                sign = "+" if final_usd >= 0 else ""
+                self.record_trade(t, t['sl'], res, pts_str, f"{sign}${final_usd:.2f}")
+                send_telegram_alert(f"🛡️ [EXIT] BTC SHORT {res}\nNet PnL: {sign}${final_usd:.2f} ({pts_str})\nExit: ${curr_price:.1f}")
 
     def record_trade(self, t, exit_price, result, pts, pnl_usd):
         now_str = datetime.now().strftime("%H:%M")
@@ -207,12 +197,13 @@ class MasterCommanderEngine:
         set_db_state("active_trade", None)
 
     def evaluate_market_moves(self, closed, live):
-        # Prevent multiple executions within the same 5-minute candle
-        if live['time'] <= self.last_trade_bar_time:
-            return
-
         c0 = closed[-1]
         c1 = closed[-2]
+
+        # Candle Close Check (Har 5m candle close par sirf 1 baar scan hoga)
+        if c0['time'] <= self.last_candle_checked:
+            return
+        self.last_candle_checked = c0['time']
 
         closes = [c['close'] for c in closed]
         def calc_ema(period):
@@ -223,57 +214,67 @@ class MasterCommanderEngine:
         ema9 = calc_ema(9)
         ema21 = calc_ema(21)
 
+        # Volume Average Filter (Avoid fakeouts without volume)
+        avg_vol = sum(c['vol'] for c in closed[-15:]) / 15.0
+        has_volume = c0['vol'] >= (avg_vol * 0.85)
+
         body0 = c0['close'] - c0['open']
         range0 = max(c0['high'] - c0['low'], 1.0)
         lower_wick0 = min(c0['open'], c0['close']) - c0['low']
         upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
 
-        is_early_climb_long = (
-            (c0['close'] > c0['open']) and (c1['close'] > c1['open']) and
-            (c0['low'] > c1['low']) and (c0['close'] > ema9) and
-            (upper_wick0 / range0 < 0.35)
+        # Long Confirmation: EMA alignment + No upper wick trap + Solid volume
+        is_solid_long = (
+            (c0['close'] > c0['open']) and 
+            (c0['close'] > ema9) and (ema9 > ema21) and
+            (upper_wick0 / range0 < 0.28) and
+            has_volume and (body0 >= 22.0)
         )
-        h_range = max(c['high'] for c in closed[-6:-1])
-        is_big_blast_long = (c0['close'] > h_range) and (body0 >= 28.0) and (c0['close'] > ema21)
 
-        is_early_drop_short = (
-            (c0['close'] < c0['open']) and (c1['close'] < c1['open']) and
-            (c0['high'] < c1['high']) and (c0['close'] < ema9) and
-            (lower_wick0 / range0 < 0.35)
+        # Short Confirmation: EMA alignment + No lower wick trap (bounce-back shield) + Solid volume
+        is_solid_short = (
+            (c0['close'] < c0['open']) and 
+            (c0['close'] < ema9) and (ema9 < ema21) and
+            (lower_wick0 / range0 < 0.28) and # Rejection wick filter
+            has_volume and (body0 <= -22.0)
         )
-        l_range = min(c['low'] for c in closed[-6:-1])
-        is_big_blast_short = (c0['close'] < l_range) and (body0 <= -28.0) and (c0['close'] < ema21)
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
         pos_usd = float(cfg['capital']) * int(cfg['leverage'])
         entry = round(live['close'], 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
-        if is_early_climb_long or is_big_blast_long:
-            self.last_trade_bar_time = live['time']
-            setup_name = "EARLY STAIR CLIMB 📈" if is_early_climb_long else "EXPLOSIVE BLAST 🔥"
+        if is_solid_long:
             recent_low = min(c['low'] for c in closed[-3:])
-            risk = max(entry - recent_low + 20.0, 85.0)
-            if risk > 180.0: risk = 140.0
+            risk = max(entry - recent_low + 20.0, 95.0)
+            if risk > 160.0: risk = 130.0
             sl = round(entry - risk, 1)
-            tp = round(entry + max(risk * 1.5, 220.0), 1)
+            tp1 = round(entry + 110.0, 1)
+            tp2 = round(entry + 220.0, 1)
 
-            trade_obj = {'type': 'LONG', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False}
+            trade_obj = {
+                'type': 'LONG', 'entry': entry, 'sl': sl, 
+                'tp1': tp1, 'tp2': tp2, 'risk': risk, 
+                'qty': qty, 'be_hit': False, 'tp1_hit': False, 'realized_pnl': 0.0
+            }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY EXECUTION] BTC LONG\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 Target TP: ${tp:.1f} (+{tp-entry:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [SMART EXECUTION] BTC LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
-        elif is_early_drop_short or is_big_blast_short:
-            self.last_trade_bar_time = live['time']
-            setup_name = "EARLY STAIR DUMP 📉" if is_early_drop_short else "EXPLOSIVE DUMP 🩸"
+        elif is_solid_short:
             recent_high = max(c['high'] for c in closed[-3:])
-            risk = max(recent_high - entry + 20.0, 85.0)
-            if risk > 180.0: risk = 140.0
+            risk = max(recent_high - entry + 20.0, 95.0)
+            if risk > 160.0: risk = 130.0
             sl = round(entry + risk, 1)
-            tp = round(entry - max(risk * 1.5, 220.0), 1)
+            tp1 = round(entry - 110.0, 1)
+            tp2 = round(entry - 220.0, 1)
 
-            trade_obj = {'type': 'SHORT', 'entry': entry, 'sl': sl, 'tp': tp, 'risk': risk, 'qty': qty, 'be_hit': False}
+            trade_obj = {
+                'type': 'SHORT', 'entry': entry, 'sl': sl, 
+                'tp1': tp1, 'tp2': tp2, 'risk': risk, 
+                'qty': qty, 'be_hit': False, 'tp1_hit': False, 'realized_pnl': 0.0
+            }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY EXECUTION] BTC SHORT\n\n🎯 Type: {setup_name}\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 Target TP: ${tp:.1f} (+{entry-tp:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [SMART EXECUTION] BTC SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -290,7 +291,7 @@ class MasterCommanderEngine:
 
             time.sleep(1.5)
 
-# Thread lifecycle safe init
+# Thread Bootstrapper
 if "engine_started" not in st.session_state:
     st.session_state.engine_started = True
     eid = str(uuid.uuid4())
@@ -298,10 +299,9 @@ if "engine_started" not in st.session_state:
         with open(LOCK_FILE, "w") as f: f.write(eid)
     except: pass
     threading.Thread(target=MasterCommanderEngine(eid).run, daemon=True).start()
-    threading.Thread(target=GlobalNewsEngine(eid).run, daemon=True).start()
 
 # -------------------------------------------------------------
-# ZERO MARGIN STREAMLIT EMBED
+# STREAMLIT ZERO-MARGIN FRAME
 # -------------------------------------------------------------
 st.set_page_config(page_title="AI SNIPER BOT", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -322,13 +322,11 @@ conn.close()
 
 win_rate = round((win_count / t_count) * 100, 1) if t_count > 0 else 0.0
 active_trade = get_db_state("active_trade")
-news_sentiment = get_db_state("news_sentiment", {"sentiment": "NEUTRAL ⚖️", "score": 0})
 cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
 
 js_active_trade = json.dumps(active_trade)
 js_history = json.dumps(history_list)
 js_stats = json.dumps({"total": t_count, "win_rate": win_rate})
-js_news = json.dumps(news_sentiment)
 js_cfg = json.dumps(cfg)
 
 terminal_html = """<!DOCTYPE html>
@@ -349,8 +347,7 @@ terminal_html = """<!DOCTYPE html>
         .stat-label { font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 800; }
         .stat-val { font-size: 10px; font-weight: 800; color: #fff; }
         
-        .btn-compact { background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
-        .btn-clear { background: rgba(255, 59, 48, 0.15); color: #ff3b30; border: 1px solid rgba(255, 59, 48, 0.3); border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
+        .btn-compact { background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 8px; font-size: 9px; font-weight: 800; cursor: pointer; }
         
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
         #chart-zone { width: 100vw; height: 55vh; background: #080a0f; }
@@ -364,10 +361,11 @@ terminal_html = """<!DOCTYPE html>
         .cell-head { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 2px; }
         .cell-body { font-size: 9px; font-weight: 800; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-        .modal-bg { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.8); backdrop-filter: blur(4px); z-index: 999; align-items: center; justify-content: center; }
-        .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 90vw; max-width: 400px; max-height: 75vh; display: flex; flex-direction: column; padding: 12px; }
+        .modal-bg { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); backdrop-filter: blur(5px); z-index: 999; align-items: center; justify-content: center; }
+        .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 90vw; max-width: 400px; max-height: 80vh; display: flex; flex-direction: column; padding: 12px; }
         .history-list { overflow-y: auto; max-height: 250px; font-size: 10px; }
         .history-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #151d2b; }
+        .btn-modal-clear { margin-top: 10px; background: rgba(255, 59, 48, 0.15); color: #ff3b30; border: 1px solid rgba(255, 59, 48, 0.4); border-radius: 4px; padding: 6px; font-size: 10px; font-weight: 800; cursor: pointer; text-align: center; }
     </style>
 </head>
 <body>
@@ -375,12 +373,12 @@ terminal_html = """<!DOCTYPE html>
         <div class="brand">⚡ EARLY <span class="badge-scan">RADAR</span></div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
-        <div class="stat-card"><div class="stat-label">TARGET TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
+        <div class="stat-card"><div class="stat-label">TP1 (50%)</div><div id="disp-tp1" class="stat-val" style="color:#00e676;">--</div></div>
+        <div class="stat-card"><div class="stat-label">TP2 (50%)</div><div id="disp-tp2" class="stat-val" style="color:#00e676;">--</div></div>
         <button class="btn-compact" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
-        <button class="btn-clear" onclick="triggerVaultClear()">🗑️ CLEAR</button>
         <button class="btn-compact" onclick="window.parent.location.reload()">🔄</button>
         <div style="margin-left: auto; display: flex; align-items: center;">
-            <b id="live-price" style="color: #f0b90b; font-size: 11px;">$85,600.0</b>
+            <b id="live-price" style="color: #f0b90b; font-size: 11px;">$84,000.0</b>
         </div>
     </div>
 
@@ -395,30 +393,31 @@ terminal_html = """<!DOCTYPE html>
             </div>
             <div class="dock-group">
                 <span style="color:#62697a;">POS:</span>
-                <b id="calc-qty" style="color:#38bdf8; font-size:10px;">0.0117 BTC</b>
+                <b id="calc-qty" style="color:#38bdf8; font-size:10px;">0.0119 BTC</b>
             </div>
         </div>
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">NEWS / DATA</span>
-                <div class="cell-body" id="val-news" style="color:#00e676;">BULLISH 🚀</div>
+                <span class="cell-head">STATUS</span>
+                <div class="cell-body" style="color:#00e676;">DUAL-TP ON 🎯</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">PULLBACK SHIELD</span>
-                <div class="cell-body" style="color:#00e676;">+110 PTS ACTIVE</div>
+                <span class="cell-head">TP1 SHIELD</span>
+                <div class="cell-body" style="color:#00e676;">+110 PTS (50%)</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">HEALTH</span>
-                <div class="cell-body" style="color:#00e676;">🟢 100% OK</div>
+                <span class="cell-head">TP2 TARGET</span>
+                <div class="cell-body" style="color:#38bdf8;">+220 PTS RUN</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">RADAR STATUS</span>
+                <span class="cell-head">RADAR SCANNER</span>
                 <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING MOMENTUM...</div>
             </div>
         </div>
     </div>
 
+    <!-- VAULT POPUP MODAL -->
     <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
         <div class="modal-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
@@ -434,6 +433,7 @@ terminal_html = """<!DOCTYPE html>
                 </div>
             </div>
             <div id="history-container" class="history-list"></div>
+            <div class="btn-modal-clear" onclick="triggerVaultClear()">🗑️ CLEAR VAULT DATABASE</div>
         </div>
     </div>
 
@@ -442,21 +442,20 @@ terminal_html = """<!DOCTYPE html>
         let activeTrade = __ACTIVE_TRADE__;
         let tradeHistory = __TRADE_HISTORY__;
         let stats = __STATS__;
-        let newsData = __NEWS_DATA__;
         let cfg = __CFG__;
 
         document.getElementById('input-amount').value = cfg.capital;
         document.getElementById('input-lev').value = cfg.leverage;
 
-        let lineEntry = null, lineSL = null, lineTP = null;
-        let currentPrice = 85600.0;
+        let lineEntry = null, lineSL = null, lineTP1 = null, lineTP2 = null;
+        let currentPrice = 84000.0;
 
         function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
         function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
         
         function triggerVaultClear() {
-            if (confirm("Clear SQLite Vault?")) {
-                window.parent.location.href = window.parent.location.pathname + "?clear=1";
+            if (confirm("Are you sure you want to permanently clear all vault trades?")) {
+                window.parent.location.href = window.parent.location.pathname + "?clear_vault=confirmed";
             }
         }
 
@@ -499,27 +498,30 @@ terminal_html = """<!DOCTYPE html>
         function renderMasterInterface() {
             if (lineEntry) { try { series.removePriceLine(lineEntry); } catch(e){} lineEntry = null; }
             if (lineSL) { try { series.removePriceLine(lineSL); } catch(e){} lineSL = null; }
-            if (lineTP) { try { series.removePriceLine(lineTP); } catch(e){} lineTP = null; }
+            if (lineTP1) { try { series.removePriceLine(lineTP1); } catch(e){} lineTP1 = null; }
+            if (lineTP2) { try { series.removePriceLine(lineTP2); } catch(e){} lineTP2 = null; }
 
             if (activeTrade) {
                 lineEntry = series.createPriceLine({ price: activeTrade.entry, color: '#38bdf8', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'ENTRY $' + activeTrade.entry.toFixed(1) });
                 lineSL = series.createPriceLine({ price: activeTrade.sl, color: '#ff3b30', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'SAFE SL $' + activeTrade.sl.toFixed(1) });
-                lineTP = series.createPriceLine({ price: activeTrade.tp, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'TARGET TP $' + activeTrade.tp.toFixed(1) });
+                lineTP1 = series.createPriceLine({ price: activeTrade.tp1, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'TP1 (50%) $' + activeTrade.tp1.toFixed(1) });
+                lineTP2 = series.createPriceLine({ price: activeTrade.tp2, color: '#00b0ff', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'TP2 (50%) $' + activeTrade.tp2.toFixed(1) });
 
                 document.getElementById('disp-entry').innerText = "$" + activeTrade.entry.toFixed(1);
                 document.getElementById('disp-sl').innerText = "$" + activeTrade.sl.toFixed(1);
-                document.getElementById('disp-tp').innerText = "$" + activeTrade.tp.toFixed(1);
+                document.getElementById('disp-tp1').innerText = "$" + activeTrade.tp1.toFixed(1);
+                document.getElementById('disp-tp2').innerText = "$" + activeTrade.tp2.toFixed(1);
                 document.getElementById('val-setup').innerText = "RIDING " + activeTrade.type + " 🚀";
                 document.getElementById('val-setup').style.color = activeTrade.type === "LONG" ? "#00e676" : "#ff3b30";
             } else {
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
-                document.getElementById('disp-tp').innerText = "--";
+                document.getElementById('disp-tp1').innerText = "--";
+                document.getElementById('disp-tp2').innerText = "--";
                 document.getElementById('val-setup').innerText = "SCANNING MOMENTUM...";
                 document.getElementById('val-setup').style.color = "#38bdf8";
             }
 
-            document.getElementById('val-news').innerText = newsData.sentiment;
             document.getElementById('hist-count').innerText = tradeHistory.length;
             document.getElementById('stat-total').innerText = stats.total;
             document.getElementById('stat-rate').innerText = stats.win_rate + "%";
@@ -576,15 +578,6 @@ terminal_html = """<!DOCTYPE html>
                     cdata.push(newBar);
                     series.update(newBar);
                 }
-
-                // If active trade hits in frontend, sync
-                if (activeTrade) {
-                    if (activeTrade.type === "LONG" && (price >= activeTrade.tp || price <= activeTrade.sl)) {
-                        activeTrade = null; renderMasterInterface();
-                    } else if (activeTrade.type === "SHORT" && (price <= activeTrade.tp || price >= activeTrade.sl)) {
-                        activeTrade = null; renderMasterInterface();
-                    }
-                }
             };
             ws.onclose = () => setTimeout(() => connectLiveStream(cdata), 1500);
         }
@@ -598,7 +591,6 @@ terminal_html = """<!DOCTYPE html>
 final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
                           .replace("__TRADE_HISTORY__", js_history)\
                           .replace("__STATS__", js_stats)\
-                          .replace("__NEWS_DATA__", js_news)\
                           .replace("__CFG__", js_cfg)
 
 components.html(final_html, height=710, scrolling=False)
