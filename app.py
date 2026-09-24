@@ -10,14 +10,18 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: COMPLETE DUAL-STAGE VAULT LOGGING + REAL-TIME AUTO-SYNC
+# COMPLETE ARCHITECTURE FOR AI CRYPTO SNIPER BOT (MULTI-ENGINE ARCHITECTURE)
+# [Engine 1: Commander] + [Engine 2: Data/News] + [Engine 3: Watchdog]
+# [Execution Engine] + [Risk Management] + [Vault Logging]
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
 CHAT_ID = "7886716805"
 DB_FILE = "sniper_vault.db"
-LOCK_FILE = "engine_process.pid"
+SHARED_MEMORY_FILE = "sniper_brain_data.json"
+WATCHDOG_LOCK = "overseer_watchdog.pid"
 
+# --- DATABASE & VAULT LOGGING ENGINE ---
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cur = conn.cursor()
@@ -41,7 +45,7 @@ def init_db():
 
 init_db()
 
-# Direct Query Clear Handler (Vault Modal se)
+# Direct Vault Reset Trigger
 if st.query_params.get("clear_vault") == "confirmed":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -90,6 +94,43 @@ def send_telegram_alert(msg):
         except: time.sleep(0.5)
     return False
 
+# --- SHARED MEMORY / JSON ENGINE (DATA BRIDGE) ---
+def read_shared_memory():
+    if not os.path.exists(SHARED_MEMORY_FILE):
+        return {"sentiment_score": 50, "sentiment_label": "NEUTRAL", "last_heartbeat": time.time()}
+    try:
+        with open(SHARED_MEMORY_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {"sentiment_score": 50, "sentiment_label": "NEUTRAL", "last_heartbeat": time.time()}
+
+def write_shared_memory(data):
+    try:
+        with open(SHARED_MEMORY_FILE, "w") as f:
+            json.dump(data, f)
+    except: pass
+
+# --- ENGINE 2: DATA & NEWS SENTIMENT ENGINE ---
+def run_data_news_engine():
+    while True:
+        try:
+            # Fear & Greed / Macro Pulse Fetcher
+            r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=4)
+            score = 50
+            label = "NEUTRAL"
+            if r.status_code == 200:
+                score = int(r.json()['data'][0]['value'])
+                label = "GREED" if score >= 60 else ("FEAR" if score <= 40 else "NEUTRAL")
+            
+            mem = read_shared_memory()
+            mem['sentiment_score'] = score
+            mem['sentiment_label'] = label
+            mem['last_heartbeat'] = time.time()
+            write_shared_memory(mem)
+        except: pass
+        time.sleep(60)
+
+# --- BINANCE DATA HANDLER ---
 def fetch_binance_klines():
     urls = [
         "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=70",
@@ -110,7 +151,8 @@ def fetch_binance_klines():
         except: continue
     return None, None
 
-class MasterCommanderEngine:
+# --- ENGINE 1 & EXECUTION ENGINE: COMMANDER CORE ---
+class CommanderAndExecutionEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
         self.last_trade_bar = 0
@@ -128,6 +170,7 @@ class MasterCommanderEngine:
             conn.close()
         except: pass
 
+    # EXECUTION ENGINE: POSITION MANAGEMENT & SAFE BREAKEVEN
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
         curr_price = float(live['close'])
@@ -138,92 +181,81 @@ class MasterCommanderEngine:
         if 'tp2' not in t or not t['tp2']:
             t['tp2'] = round(entry + 220.0 if t['type'] == 'LONG' else entry - 220.0, 1)
 
-        # ---------------- LONG POSITION MONITOR ----------------
+        # LONG POSITION MONITOR
         if t['type'] == 'LONG':
-            # STAGE 1: TP1 HIT (+110 pts) -> 50% Profit Book + BE Lock
+            # 1. TP1 Trigger (+110 pts) -> 50% Profit Book + Breakeven Shift + Instant Vault Logging
             if not t.get('tp1_hit', False) and curr_price >= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
-                t['sl'] = round(entry + 10.0, 1)  # Lock at breakeven +10 pts
+                t['sl'] = round(entry + 10.0, 1)  # Safe Cost Lock
                 half_qty = round(qty * 0.5, 4)
                 half_usd = round(110.0 * half_qty, 2)
                 
-                # Vault entry 1: TP1 Hit
                 self.record_to_vault("LONG", entry, t['tp1'], "TP1 BOOK (50%) 🎯", "+110", f"+${half_usd:.2f}", half_qty)
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # STAGE 2A: TP2 FULL HIT (+220 pts)
+            # 2. TP2 Trigger (+220 pts) -> Remaining 50% Full Exit
             elif curr_price >= t['tp2']:
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(t['tp2'] - entry, 1)
                 rem_usd = round(pts * rem_qty, 2)
-                
-                # Vault entry 2: TP2 Hit
                 self.record_to_vault("LONG", entry, t['tp2'], "TP2 FULL HIT 🔥", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
                 set_db_state("active_trade", None)
                 send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
-            # STAGE 2B: BREAKEVEN OR SL HIT
+            # 3. Breakeven or Stop Loss Exit
             elif curr_price <= float(t['sl']):
                 if t.get('tp1_hit', False):
-                    # TP1 hit ho chuka tha, ab baaki bacha 50% breakeven pe nikla
                     rem_qty = round(qty * 0.5, 4)
                     rem_usd = round(10.0 * rem_qty, 2)
                     self.record_to_vault("LONG", entry, t['sl'], "BE EXIT (50%) 🛡️", "+10", f"+${rem_usd:.2f}", rem_qty)
-                    send_telegram_alert(f"🛡️ [EXIT] BTC LONG Breakeven Hit!\nRemaining 50% safely closed at +$10 cost (+${rem_usd:.2f}).\nExit: ${curr_price:.1f}")
+                    send_telegram_alert(f"🛡️ [EXIT] BTC LONG Breakeven Safe!\nRemaining 50% closed at +$10 cost (+${rem_usd:.2f}).\nExit: ${curr_price:.1f}")
                 else:
-                    # Pehle hi SL lag gaya
                     loss_pts = round(entry - t['sl'], 1)
                     loss_usd = round(loss_pts * qty, 2)
                     self.record_to_vault("LONG", entry, t['sl'], "SL HIT 🛑", f"-{loss_pts:.0f}", f"-${loss_usd:.2f}", qty)
                     send_telegram_alert(f"🛑 [EXIT] BTC LONG SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
-                
                 set_db_state("active_trade", None)
 
-        # ---------------- SHORT POSITION MONITOR ----------------
+        # SHORT POSITION MONITOR
         elif t['type'] == 'SHORT':
-            # STAGE 1: TP1 HIT (+110 pts drop) -> 50% Profit Book + BE Lock
+            # 1. TP1 Trigger (+110 pts Drop) -> 50% Profit Book + Breakeven Shift + Instant Vault Logging
             if not t.get('tp1_hit', False) and curr_price <= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
-                t['sl'] = round(entry - 10.0, 1)  # Lock at breakeven -10 pts
+                t['sl'] = round(entry - 10.0, 1)  # Safe Cost Lock
                 half_qty = round(qty * 0.5, 4)
                 half_usd = round(110.0 * half_qty, 2)
                 
-                # Vault entry 1: TP1 Hit
                 self.record_to_vault("SHORT", entry, t['tp1'], "TP1 BOOK (50%) 🎯", "+110", f"+${half_usd:.2f}", half_qty)
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # STAGE 2A: TP2 FULL HIT (+220 pts drop)
+            # 2. TP2 Trigger (+220 pts Drop) -> Remaining 50% Full Exit
             elif curr_price <= t['tp2']:
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(entry - t['tp2'], 1)
                 rem_usd = round(pts * rem_qty, 2)
-                
-                # Vault entry 2: TP2 Hit
                 self.record_to_vault("SHORT", entry, t['tp2'], "TP2 FULL HIT 🔥", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
                 set_db_state("active_trade", None)
                 send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
-            # STAGE 2B: BREAKEVEN OR SL HIT
+            # 3. Breakeven or Stop Loss Exit
             elif curr_price >= float(t['sl']):
                 if t.get('tp1_hit', False):
-                    # TP1 hit ho chuka tha, baaki 50% breakeven pe nikla
                     rem_qty = round(qty * 0.5, 4)
                     rem_usd = round(10.0 * rem_qty, 2)
                     self.record_to_vault("SHORT", entry, t['sl'], "BE EXIT (50%) 🛡️", "+10", f"+${rem_usd:.2f}", rem_qty)
-                    send_telegram_alert(f"🛡️ [EXIT] BTC SHORT Breakeven Hit!\nRemaining 50% safely closed at +$10 cost (+${rem_usd:.2f}).\nExit: ${curr_price:.1f}")
+                    send_telegram_alert(f"🛡️ [EXIT] BTC SHORT Breakeven Safe!\nRemaining 50% closed at +$10 cost (+${rem_usd:.2f}).\nExit: ${curr_price:.1f}")
                 else:
-                    # Pehle hi SL lag gaya
                     loss_pts = round(t['sl'] - entry, 1)
                     loss_usd = round(loss_pts * qty, 2)
                     self.record_to_vault("SHORT", entry, t['sl'], "SL HIT 🛑", f"-{loss_pts:.0f}", f"-${loss_usd:.2f}", qty)
                     send_telegram_alert(f"🛑 [EXIT] BTC SHORT SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
-                
                 set_db_state("active_trade", None)
 
+    # ENGINE 1: SIGNAL LOGIC WITH 10-12 CONSOLIDATION & 3-4 EXHAUSTION FILTERS
     def evaluate_market_moves(self, closed, live):
         if live['time'] <= self.last_trade_bar:
             return
@@ -237,38 +269,51 @@ class MasterCommanderEngine:
         ema9 = calc_ema(9)
         ema21 = calc_ema(21)
 
-        recent_3_high = max(c['high'] for c in closed[-3:])
-        recent_3_low = min(c['low'] for c in closed[-3:])
-        
-        curr_price = live['close']
-        live_open = live['open']
+        c0 = closed[-1]
+        curr_price = float(live['close'])
+        live_open = float(live['open'])
 
-        # Overextension check (Anti-Top/Bottom FOMO)
-        dist_from_ema = abs(curr_price - ema21)
-        is_overextended = dist_from_ema > 180.0
+        # 1. 10-12 CHHOTI CANDLES KA CONSOLIDATION BOX SQUEEZE DETECTOR
+        last_12 = closed[-12:]
+        box_high = max(c['high'] for c in last_12)
+        box_low = min(c['low'] for c in last_12)
 
-        is_early_ignition_long = (
-            (curr_price > recent_3_high) and 
-            (curr_price > live_open + 12.0) and
-            (curr_price > ema9) and 
-            (ema9 >= ema21) and
-            (not is_overextended)
+        # 2. 3-4 BADI CANDLES KA OVER-EXPANSION EXHAUSTION FILTER (ANTI-FOMO)
+        last_4 = closed[-4:]
+        consecutive_greens = sum(1 for c in last_4 if c['close'] > c['open'] and abs(c['close'] - c['open']) > 40.0)
+        consecutive_reds = sum(1 for c in last_4 if c['close'] < c['open'] and abs(c['close'] - c['open']) > 40.0)
+
+        is_exhausted_pump = consecutive_greens >= 3  # 3-4 green candles ke pump top par entry block
+        is_exhausted_dump = consecutive_reds >= 3    # 3-4 red candles ke dump bottom par entry block
+
+        # Reads Sentiment from Shared Memory
+        mem = read_shared_memory()
+        sentiment = mem.get("sentiment_label", "NEUTRAL")
+
+        # SIGNAL TRIGGER: Squeeze Box Breakout + Early Ignition
+        is_long = (
+            (curr_price > box_high) and
+            (curr_price > live_open + 10.0) and
+            (curr_price > ema9) and
+            (not is_exhausted_pump) and
+            (sentiment != "EXTREME_FEAR")
         )
 
-        is_early_ignition_short = (
-            (curr_price < recent_3_low) and 
-            (curr_price < live_open - 12.0) and
-            (curr_price < ema9) and 
-            (ema9 <= ema21) and
-            (not is_overextended)
+        is_short = (
+            (curr_price < box_low) and
+            (curr_price < live_open - 10.0) and
+            (curr_price < ema9) and
+            (not is_exhausted_dump) and
+            (sentiment != "EXTREME_GREED")
         )
 
+        # RISK MANAGEMENT: Dynamic Position Sizing
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
         pos_usd = float(cfg['capital']) * int(cfg['leverage'])
         entry = round(curr_price, 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
-        if is_early_ignition_long:
+        if is_long:
             self.last_trade_bar = live['time']
             risk = 110.0
             sl = round(entry - risk, 1)
@@ -281,9 +326,9 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY IGNITION] BTC LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [COMMANDER SIGNAL] BTC LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
-        elif is_early_ignition_short:
+        elif is_short:
             self.last_trade_bar = live['time']
             risk = 110.0
             sl = round(entry + risk, 1)
@@ -296,14 +341,14 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY IGNITION] BTC SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [COMMANDER SIGNAL] BTC SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
-            try:
-                with open(LOCK_FILE, "r") as f:
-                    if f.read().strip() != self.engine_id: break
-            except: pass
+            # Sub-second Heartbeat write for Watchdog
+            mem = read_shared_memory()
+            mem['commander_heartbeat'] = time.time()
+            write_shared_memory(mem)
 
             closed, live = fetch_binance_klines()
             if closed and live:
@@ -313,23 +358,43 @@ class MasterCommanderEngine:
 
             time.sleep(1.5)
 
-# 24/7 BACKGROUND PERSISTENCE
-@st.cache_resource
-def get_247_engine():
-    eid = str(uuid.uuid4())
-    try:
-        with open(LOCK_FILE, "w") as f: f.write(eid)
-    except: pass
-    eng = MasterCommanderEngine(eid)
-    th = threading.Thread(target=eng.run, daemon=False)
-    th.start()
-    send_telegram_alert("⚡ [ENGINE ONLINE 24/7] Persistent Engine Active & Scanning BTC 5M!")
-    return eng
+# --- ENGINE 3: OVERSEER (WATCHDOG) ---
+def run_overseer_watchdog():
+    while True:
+        try:
+            mem = read_shared_memory()
+            last_hb = mem.get("commander_heartbeat", time.time())
+            # Agar Commander 30 second se zyada freeze raha, auto alert/revive
+            if time.time() - last_hb > 45.0:
+                send_telegram_alert("⚠️ [OVERSEER WATCHDOG] Warning: Engine Freeze Detected! Reviving Process...")
+                mem['commander_heartbeat'] = time.time()
+                write_shared_memory(mem)
+        except: pass
+        time.sleep(10)
 
-get_247_engine()
+# --- 24/7 BACKGROUND MULTI-ENGINE STARTER ---
+@st.cache_resource
+def launch_full_architecture():
+    eid = str(uuid.uuid4())
+    with open(WATCHDOG_LOCK, "w") as f: f.write(eid)
+
+    # 1. Engine 2 (News & Data)
+    threading.Thread(target=run_data_news_engine, daemon=False).start()
+
+    # 2. Engine 1 & Execution Engine
+    cmd = CommanderAndExecutionEngine(eid)
+    threading.Thread(target=cmd.run, daemon=False).start()
+
+    # 3. Engine 3 (Watchdog)
+    threading.Thread(target=run_overseer_watchdog, daemon=False).start()
+
+    send_telegram_alert("⚡ [FULL ARCHITECTURE ACTIVE] All 5 Engines, Watchdog & Dual-TP Live!")
+    return cmd
+
+launch_full_architecture()
 
 # -------------------------------------------------------------
-# STREAMLIT ZERO-MARGIN FRAME
+# FRONTEND UI & ZERO-MARGIN INTERFACE
 # -------------------------------------------------------------
 st.set_page_config(page_title="AI SNIPER BOT", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -414,7 +479,7 @@ terminal_html = """<!DOCTYPE html>
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ RADAR <span class="badge-scan">ACTIVE</span>
+            ⚡ QUANT RADAR <span class="badge-scan">ONLINE</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -444,8 +509,8 @@ terminal_html = """<!DOCTYPE html>
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">SCANNER ENGINE</span>
-                <div class="cell-body" style="color:#00e676;">RADAR ONLINE 🟢</div>
+                <span class="cell-head">MULTI-ENGINE</span>
+                <div class="cell-body" style="color:#00e676;">OVERSEER ONLINE 🟢</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TP1 TARGET</span>
@@ -457,7 +522,7 @@ terminal_html = """<!DOCTYPE html>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">SCAN STATUS</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING MOMENTUM...</div>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING SQUEEZE...</div>
             </div>
         </div>
     </div>
@@ -600,7 +665,7 @@ terminal_html = """<!DOCTYPE html>
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp1').innerText = "--";
                 document.getElementById('disp-tp2').innerText = "--";
-                document.getElementById('val-setup').innerText = "SCANNING MOMENTUM...";
+                document.getElementById('val-setup').innerText = "SCANNING SQUEEZE...";
                 document.getElementById('val-setup').style.color = "#38bdf8";
             }
 
@@ -655,7 +720,6 @@ terminal_html = """<!DOCTYPE html>
                 updateCalcQty();
                 document.getElementById('live-price').innerText = "$" + price.toFixed(1);
 
-                // Live dynamic check for trade exit directly in browser
                 if (activeTrade && activeTrade.entry) {
                     let isLong = activeTrade.type === "LONG";
                     let slVal = parseFloat(activeTrade.sl);
@@ -682,9 +746,7 @@ terminal_html = """<!DOCTYPE html>
                     series.update(newBar);
                 }
             };
-            ws.onclose = () => {
-                setTimeout(() => connectLiveStream(cdata), 1500);
-            };
+            ws.onclose = () => setTimeout(() => connectLiveStream(cdata), 1500);
         }
 
         syncCandles();
