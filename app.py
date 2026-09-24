@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: IMMEDIATE TOP REVERSAL + ONE-CLICK VAULT + CHOP GUARD
+# PRO QUANT ENGINE: FULL MULTI-ENGINE ANALYSIS + NO-AGGRESSION POST-EXIT GUARD
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -151,6 +151,7 @@ class MasterCommanderEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
         self.last_trade_bar = 0
+        self.last_exit_time = 0  # Mandatory in-memory cool down
 
     def record_to_vault(self, t_type, entry, exit_price, result, pts, pnl_usd, qty):
         now_str = datetime.now().strftime("%H:%M")
@@ -180,7 +181,6 @@ class MasterCommanderEngine:
 
         # LONG POSITION MONITOR
         if t['type'] == 'LONG':
-            # 1. TP1 Trigger (+110 pts) -> 50% Profit Book + Breakeven Shift
             if not t.get('tp1_hit', False) and curr_price >= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
@@ -193,7 +193,6 @@ class MasterCommanderEngine:
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # 2. MID-WAY CHOP / STALL GUARD
             elif t.get('tp1_hit', False) and (curr_price < t['tp2']) and (curr_price > float(t['sl'])):
                 bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
                 is_stalled = (bars_passed >= 2) and (curr_price < c0['low']) and (c0['close'] < c0['open'])
@@ -204,24 +203,26 @@ class MasterCommanderEngine:
                     rem_usd = round(pts * rem_qty, 2)
                     self.record_to_vault("LONG", entry, curr_price, "CHOP EXIT ⚡", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
                     set_db_state("active_trade", None)
+                    self.last_exit_time = time.time()
+                    self.last_trade_bar = live['time']
                     mem['last_trade_time'] = time.time()
                     write_shared_memory(mem)
                     send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC LONG\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
                     return
 
-            # 3. TP2 Full Hit (+220 pts)
             elif curr_price >= t['tp2']:
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(t['tp2'] - entry, 1)
                 rem_usd = round(pts * rem_qty, 2)
                 self.record_to_vault("LONG", entry, t['tp2'], "TP2 FULL HIT 🔥", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
                 set_db_state("active_trade", None)
+                self.last_exit_time = time.time()
+                self.last_trade_bar = live['time']
                 mem['consecutive_losses'] = 0
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
                 send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
-            # 4. Breakeven or Stop Loss Exit
             elif curr_price <= float(t['sl']):
                 if t.get('tp1_hit', False):
                     rem_qty = round(qty * 0.5, 4)
@@ -236,12 +237,13 @@ class MasterCommanderEngine:
                     send_telegram_alert(f"🛑 [EXIT] BTC LONG SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
                 
                 set_db_state("active_trade", None)
+                self.last_exit_time = time.time()
+                self.last_trade_bar = live['time']
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
 
         # SHORT POSITION MONITOR
         elif t['type'] == 'SHORT':
-            # 1. TP1 Trigger (+110 pts Drop) -> 50% Profit Book + Breakeven Shift
             if not t.get('tp1_hit', False) and curr_price <= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
@@ -254,7 +256,6 @@ class MasterCommanderEngine:
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # 2. MID-WAY CHOP / STALL GUARD
             elif t.get('tp1_hit', False) and (curr_price > t['tp2']) and (curr_price < float(t['sl'])):
                 bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
                 is_stalled = (bars_passed >= 2) and (curr_price > c0['high']) and (c0['close'] > c0['open'])
@@ -265,24 +266,26 @@ class MasterCommanderEngine:
                     rem_usd = round(pts * rem_qty, 2)
                     self.record_to_vault("SHORT", entry, curr_price, "CHOP EXIT ⚡", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
                     set_db_state("active_trade", None)
+                    self.last_exit_time = time.time()
+                    self.last_trade_bar = live['time']
                     mem['last_trade_time'] = time.time()
                     write_shared_memory(mem)
                     send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC SHORT\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
                     return
 
-            # 3. TP2 Full Hit (+220 pts Drop)
             elif curr_price <= t['tp2']:
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(entry - t['tp2'], 1)
                 rem_usd = round(pts * rem_qty, 2)
                 self.record_to_vault("SHORT", entry, t['tp2'], "TP2 FULL HIT 🔥", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
                 set_db_state("active_trade", None)
+                self.last_exit_time = time.time()
+                self.last_trade_bar = live['time']
                 mem['consecutive_losses'] = 0
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
                 send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
-            # 4. Breakeven or Stop Loss Exit
             elif curr_price >= float(t['sl']):
                 if t.get('tp1_hit', False):
                     rem_qty = round(qty * 0.5, 4)
@@ -297,45 +300,69 @@ class MasterCommanderEngine:
                     send_telegram_alert(f"🛑 [EXIT] BTC SHORT SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
                 
                 set_db_state("active_trade", None)
+                self.last_exit_time = time.time()
+                self.last_trade_bar = live['time']
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
 
-    # --- TOP REVERSAL & EARLY IGNITION SIGNAL LOGIC ---
+    # --- MULTI-ENGINE DEEP ANALYSIS & SAFE ENTRY EVALUATION ---
     def evaluate_market_moves(self, closed, live):
+        # 1. Same Candle Re-entry Guard: Ek candle par ek hi baar trade
         if live['time'] <= self.last_trade_bar:
+            return
+
+        # 2. Strict Post-Exit Analysis Window: Trade exit hone ke agle 15 min (900 sec) tak NO aggressive trade
+        if time.time() - self.last_exit_time < 900:
             return
 
         mem = read_shared_memory()
 
+        # Risk Guard: Max 3 Consecutive Losses Lock
         if mem.get('consecutive_losses', 0) >= 3:
             return
 
-        if time.time() - mem.get('last_trade_time', 0) < 600:
+        # Engine 1: Structure & Squeeze Analysis
+        last_10 = closed[-10:]
+        box_high = max(c['high'] for c in last_10)
+        box_low = min(c['low'] for c in last_10)
+        box_range = box_high - box_low
+
+        # Agar market chop me hai (< 60 pts range) ya over-extended (> 350 pts pump ho chuki hai) toh trade ignore
+        if box_range < 50.0 or box_range > 400.0:
             return
 
         c0 = closed[-1]
         c1 = closed[-2]
-
         curr_price = float(live['close'])
         live_open = float(live['open'])
 
+        # EMA Trend & Momentum Alignment
         closes = [c['close'] for c in closed]
         k9 = 2 / 10
         ema9 = closes[0]
         for cl in closes[1:]: ema9 = (cl * k9) + (ema9 * (1 - k9))
 
-        is_top_dump = (
-            (curr_price < c0['low']) and
-            (curr_price < live_open - 12.0) and
-            (curr_price < ema9) and
-            (c0['close'] < c0['open'] or curr_price < c1['low'])
+        # Engine 2: Volume & Clean Breakout Confirmation
+        avg_vol = sum(c['vol'] for c in last_10) / len(last_10)
+        has_volume = c0['vol'] >= (avg_vol * 0.9)
+
+        # Reversal / Ignition conditions with strict multi-candle support
+        is_bottom_pump = (
+            (curr_price > box_high) and
+            (curr_price > c0['high']) and
+            (curr_price > live_open + 15.0) and
+            (curr_price > ema9) and
+            (c0['close'] > c0['open']) and
+            has_volume
         )
 
-        is_bottom_pump = (
-            (curr_price > c0['high']) and
-            (curr_price > live_open + 12.0) and
-            (curr_price > ema9) and
-            (c0['close'] > c0['open'] or curr_price > c1['high'])
+        is_top_dump = (
+            (curr_price < box_low) and
+            (curr_price < c0['low']) and
+            (curr_price < live_open - 15.0) and
+            (curr_price < ema9) and
+            (c0['close'] < c0['open']) and
+            has_volume
         )
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
@@ -356,7 +383,7 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY PUMP IGNITION] BTC LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [CONFIRMED BREAKOUT] BTC LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
         elif is_top_dump:
             self.last_trade_bar = live['time']
@@ -371,7 +398,7 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY TOP DUMP] BTC SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [CONFIRMED BREAKDOWN] BTC SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -411,7 +438,7 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_telegram_alert("⚡ [SYSTEM READY] Reversal Ignition & Instant Telegram Active!")
+    send_telegram_alert("⚡ [SYSTEM READY] Multi-Engine Analysis & Strict Risk Guard Active!")
     return cmd
 
 launch_full_architecture()
@@ -552,7 +579,7 @@ terminal_html = """<!DOCTYPE html>
         <div class="bottom-bar">
             <div class="metric-cell">
                 <span class="cell-head">MULTI-ENGINE</span>
-                <div class="cell-body" style="color:#00e676;">OVERSEER ONLINE 🟢</div>
+                <div class="cell-body" style="color:#00e676;">CONSENSUS ACTIVE 🟢</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TP1 TARGET</span>
@@ -564,7 +591,7 @@ terminal_html = """<!DOCTYPE html>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">SCAN STATUS</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING MOMENTUM...</div>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING CONSOLIDATION...</div>
             </div>
         </div>
     </div>
@@ -717,7 +744,7 @@ terminal_html = """<!DOCTYPE html>
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp1').innerText = "--";
                 document.getElementById('disp-tp2').innerText = "--";
-                document.getElementById('val-setup').innerText = "SCANNING MOMENTUM...";
+                document.getElementById('val-setup').innerText = "SCANNING CONSOLIDATION...";
                 document.getElementById('val-setup').style.color = "#38bdf8";
             }
 
