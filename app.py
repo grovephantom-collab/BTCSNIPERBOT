@@ -567,7 +567,7 @@ terminal_html = """<!DOCTYPE html>
                 </div>
             </div>
             <div id="history-container" class="history-list"></div>
-            <div class="btn-modal-clear" onclick="triggerVaultClear()">🗑️ ONE-CLICK CLEAR VAULT</div>
+           <button type="button" class="btn-modal-clear" onclick="triggerVaultClear()">🗑️ ONE-CLICK CLEAR VAULT</button>
         </div>
     </div>
 
