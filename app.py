@@ -193,7 +193,7 @@ class MasterCommanderEngine:
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # 2. MID-WAY CHOP / STALL GUARD (Agar TP1 ke baad beech me fas jaye aur reversal wick banaye)
+            # 2. MID-WAY CHOP / STALL GUARD
             elif t.get('tp1_hit', False) and (curr_price < t['tp2']) and (curr_price > float(t['sl'])):
                 bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
                 is_stalled = (bars_passed >= 2) and (curr_price < c0['low']) and (c0['close'] < c0['open'])
@@ -254,7 +254,7 @@ class MasterCommanderEngine:
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # 2. MID-WAY CHOP / STALL GUARD (Agar TP1 ke baad beech me ruk kar bounce karne lage)
+            # 2. MID-WAY CHOP / STALL GUARD
             elif t.get('tp1_hit', False) and (curr_price > t['tp2']) and (curr_price < float(t['sl'])):
                 bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
                 is_stalled = (bars_passed >= 2) and (curr_price > c0['high']) and (c0['close'] > c0['open'])
@@ -495,7 +495,25 @@ terminal_html = """<!DOCTYPE html>
         .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 90vw; max-width: 400px; max-height: 80vh; display: flex; flex-direction: column; padding: 12px; }
         .history-list { overflow-y: auto; max-height: 250px; font-size: 10px; }
         .history-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #151d2b; }
-        .btn-modal-clear { margin-top: 10px; background: rgba(255, 59, 48, 0.2); color: #ff3b30; border: 1px solid rgba(255, 59, 48, 0.5); border-radius: 4px; padding: 7px; font-size: 10px; font-weight: 800; cursor: pointer; text-align: center; }
+        
+        .btn-modal-clear { 
+            margin-top: 10px; 
+            background: rgba(255, 59, 48, 0.25); 
+            color: #ff3b30; 
+            border: 1px solid rgba(255, 59, 48, 0.6); 
+            border-radius: 6px; 
+            padding: 10px; 
+            font-size: 11px; 
+            font-weight: 800; 
+            cursor: pointer; 
+            text-align: center; 
+            width: 100%;
+            display: block;
+            outline: none;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-touch-callout: none;
+        }
         .btn-modal-clear:active { background: #ff3b30; color: #fff; }
     </style>
 </head>
@@ -567,7 +585,7 @@ terminal_html = """<!DOCTYPE html>
                 </div>
             </div>
             <div id="history-container" class="history-list"></div>
-           <button type="button" class="btn-modal-clear" onclick="triggerVaultClear()">🗑️ ONE-CLICK CLEAR VAULT</button>
+            <button type="button" class="btn-modal-clear" onclick="triggerVaultClear()">🗑️ ONE-CLICK CLEAR VAULT</button>
         </div>
     </div>
 
@@ -587,9 +605,20 @@ terminal_html = """<!DOCTYPE html>
         function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
         function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
         
-        // INSTANT 1-CLICK CLEAR (Direct URL push to parent Streamlit without confirmation hang)
         function triggerVaultClear() {
-            window.parent.location.replace(window.parent.location.pathname + "?clear_vault=confirmed");
+            tradeHistory = [];
+            stats.total = 0;
+            stats.win_rate = 0.0;
+            document.getElementById('stat-total').innerText = "0";
+            document.getElementById('stat-rate').innerText = "0.0%";
+            document.getElementById('hist-count').innerText = "0";
+            document.getElementById('history-container').innerHTML = '<div style="color:#555; text-align:center; padding:15px 0;">Vault Clean (0 trades)...</div>';
+            
+            try {
+                window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?clear_vault=confirmed";
+            } catch(e) {
+                window.location.href = window.location.pathname + "?clear_vault=confirmed";
+            }
         }
 
         function updateCalcQty() {
