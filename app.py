@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: LIVE SCANNER TELEMETRY + DUAL TP VISUALS + SAFE VAULT
+# PRO QUANT ENGINE: INSTANT TP1 VAULT LOGGING + DUAL TP (TP1/TP2) + CLEAN RADAR
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -41,7 +41,7 @@ def init_db():
 
 init_db()
 
-# Direct Query Clear Handler (Inside Vault modal)
+# Direct Query Clear Handler (Vault Modal se)
 if st.query_params.get("clear_vault") == "confirmed":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -113,101 +113,110 @@ def fetch_binance_klines():
 class MasterCommanderEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
-        self.last_candle_checked = 0
-        self.scan_counter = 0
+        self.last_trade_bar = 0
+
+    def record_to_vault(self, t_type, entry, exit_price, result, pts, pnl_usd, qty):
+        now_str = datetime.now().strftime("%H:%M")
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=5)
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (now_str, "BTCUSDT", t_type, entry, exit_price, result, pts, pnl_usd, qty))
+            conn.commit()
+            conn.close()
+        except: pass
 
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
         curr_price = live['close']
         entry = float(t['entry'])
 
-        # Auto-Repair keys agar purane trade state me tp1/tp2 na ho
         if 'tp1' not in t or not t['tp1']:
             t['tp1'] = round(entry + 110.0 if t['type'] == 'LONG' else entry - 110.0, 1)
         if 'tp2' not in t or not t['tp2']:
             t['tp2'] = round(entry + 220.0 if t['type'] == 'LONG' else entry - 220.0, 1)
 
-        # ---------------- LONG MONITOR ----------------
+        # ---------------- LONG POSITION MONITOR ----------------
         if t['type'] == 'LONG':
+            # 1. TP1 Trigger (+110 pts) -> 50% Profit Book + BE Lock + INSTANT VAULT ENTRY
             if not t.get('tp1_hit', False) and curr_price >= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
                 t['sl'] = round(entry + 10.0, 1)
-                half_usd = round(110.0 * (qty * 0.5), 2)
-                t['realized_pnl'] = t.get('realized_pnl', 0.0) + half_usd
+                half_qty = round(qty * 0.5, 4)
+                half_usd = round(110.0 * half_qty, 2)
+                
+                # Turant Vault me record karein
+                self.record_to_vault("LONG", entry, t['tp1'], "TP1 BOOK (50%) 🎯", "+110", f"+${half_usd:.2f}", half_qty)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
+                send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG (Vault Added)\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
+            # 2. TP2 Trigger (+220 pts) -> Remaining 50% Exit & Close Trade
             elif curr_price >= t['tp2']:
-                rem_usd = round((t['tp2'] - entry) * (qty * 0.5), 2)
-                total_usd = round(t.get('realized_pnl', 0.0) + rem_usd, 2)
+                rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(t['tp2'] - entry, 1)
-                self.record_trade(t, t['tp2'], "TP2 HIT 🎯🔥", f"+{pts:.0f}", f"+${total_usd:.2f}")
-                send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal PnL: +${total_usd:.2f} (+{pts:.0f} pts)\nExit: ${t['tp2']:.1f}")
+                rem_usd = round(pts * rem_qty, 2)
+                self.record_to_vault("LONG", entry, t['tp2'], "TP2 FULL HIT 🔥", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
+                set_db_state("active_trade", None)
+                send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
+            # 3. Stop Loss / Breakeven Exit -> Close Trade
             elif curr_price <= t['sl']:
-                res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 if t.get('tp1_hit', False):
-                    final_usd = round(t.get('realized_pnl', 0.0) + (10.0 * (qty * 0.5)), 2)
-                    pts_str = "+60 pts net"
-                    res = "TP1 + BE SECURE"
+                    rem_qty = round(qty * 0.5, 4)
+                    rem_usd = round(10.0 * rem_qty, 2)
+                    self.record_to_vault("LONG", entry, t['sl'], "BE EXIT (50%) 🛡️", "+10", f"+${rem_usd:.2f}", rem_qty)
+                    send_telegram_alert(f"🛡️ [EXIT] BTC LONG Breakeven Safe!\nRemaining 50% closed at +$10 cost.\nExit: ${curr_price:.1f}")
                 else:
-                    final_usd = round(-(entry - t['sl']) * qty, 2)
-                    pts_str = f"-{entry - t['sl']:.0f}"
+                    loss_pts = round(entry - t['sl'], 1)
+                    loss_usd = round(loss_pts * qty, 2)
+                    self.record_to_vault("LONG", entry, t['sl'], "SL HIT 🛑", f"-{loss_pts:.0f}", f"-${loss_usd:.2f}", qty)
+                    send_telegram_alert(f"🛑 [EXIT] BTC LONG SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
+                set_db_state("active_trade", None)
 
-                sign = "+" if final_usd >= 0 else ""
-                self.record_trade(t, t['sl'], res, pts_str, f"{sign}${final_usd:.2f}")
-                send_telegram_alert(f"🛡️ [EXIT] BTC LONG {res}\nNet PnL: {sign}${final_usd:.2f} ({pts_str})\nExit: ${curr_price:.1f}")
-
-        # ---------------- SHORT MONITOR ----------------
+        # ---------------- SHORT POSITION MONITOR ----------------
         elif t['type'] == 'SHORT':
+            # 1. TP1 Trigger (+110 pts Drop) -> 50% Profit Book + BE Lock + INSTANT VAULT ENTRY
             if not t.get('tp1_hit', False) and curr_price <= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
                 t['sl'] = round(entry - 10.0, 1)
-                half_usd = round(110.0 * (qty * 0.5), 2)
-                t['realized_pnl'] = t.get('realized_pnl', 0.0) + half_usd
+                half_qty = round(qty * 0.5, 4)
+                half_usd = round(110.0 * half_qty, 2)
+                
+                # Turant Vault me record karein
+                self.record_to_vault("SHORT", entry, t['tp1'], "TP1 BOOK (50%) 🎯", "+110", f"+${half_usd:.2f}", half_qty)
                 set_db_state("active_trade", t)
-                send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
+                send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT (Vault Added)\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
+            # 2. TP2 Trigger (+220 pts Drop) -> Remaining 50% Exit & Close Trade
             elif curr_price <= t['tp2']:
-                rem_usd = round((entry - t['tp2']) * (qty * 0.5), 2)
-                total_usd = round(t.get('realized_pnl', 0.0) + rem_usd, 2)
+                rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(entry - t['tp2'], 1)
-                self.record_trade(t, t['tp2'], "TP2 HIT 🎯🩸", f"+{pts:.0f}", f"+${total_usd:.2f}")
-                send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal PnL: +${total_usd:.2f} (+{pts:.0f} pts)\nExit: ${t['tp2']:.1f}")
+                rem_usd = round(pts * rem_qty, 2)
+                self.record_to_vault("SHORT", entry, t['tp2'], "TP2 FULL HIT 🔥", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
+                set_db_state("active_trade", None)
+                send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
+            # 3. Stop Loss / Breakeven Exit -> Close Trade
             elif curr_price >= t['sl']:
-                res = "BE LOCKED" if t.get('be_hit', False) else "SL HIT"
                 if t.get('tp1_hit', False):
-                    final_usd = round(t.get('realized_pnl', 0.0) + (10.0 * (qty * 0.5)), 2)
-                    pts_str = "+60 pts net"
-                    res = "TP1 + BE SECURE"
+                    rem_qty = round(qty * 0.5, 4)
+                    rem_usd = round(10.0 * rem_qty, 2)
+                    self.record_to_vault("SHORT", entry, t['sl'], "BE EXIT (50%) 🛡️", "+10", f"+${rem_usd:.2f}", rem_qty)
+                    send_telegram_alert(f"🛡️ [EXIT] BTC SHORT Breakeven Safe!\nRemaining 50% closed at +$10 cost.\nExit: ${curr_price:.1f}")
                 else:
-                    final_usd = round(-(t['sl'] - entry) * qty, 2)
-                    pts_str = f"-{t['sl'] - entry:.0f}"
-
-                sign = "+" if final_usd >= 0 else ""
-                self.record_trade(t, t['sl'], res, pts_str, f"{sign}${final_usd:.2f}")
-                send_telegram_alert(f"🛡️ [EXIT] BTC SHORT {res}\nNet PnL: {sign}${final_usd:.2f} ({pts_str})\nExit: ${curr_price:.1f}")
-
-    def record_trade(self, t, exit_price, result, pts, pnl_usd):
-        now_str = datetime.now().strftime("%H:%M")
-        try:
-            conn = sqlite3.connect(DB_FILE, timeout=5)
-            cur = conn.cursor()
-            cur.execute("INSERT INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (now_str, "BTCUSDT", t['type'], t['entry'], exit_price, result, pts, pnl_usd, t.get("qty", 0.01)))
-            conn.commit()
-            conn.close()
-        except: pass
-        set_db_state("active_trade", None)
+                    loss_pts = round(t['sl'] - entry, 1)
+                    loss_usd = round(loss_pts * qty, 2)
+                    self.record_to_vault("SHORT", entry, t['sl'], "SL HIT 🛑", f"-{loss_pts:.0f}", f"-${loss_usd:.2f}", qty)
+                    send_telegram_alert(f"🛑 [EXIT] BTC SHORT SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
+                set_db_state("active_trade", None)
 
     def evaluate_market_moves(self, closed, live):
-        c0 = closed[-1]
-        if c0['time'] <= self.last_candle_checked:
+        if live['time'] <= self.last_trade_bar:
             return
-        self.last_candle_checked = c0['time']
 
         closes = [c['close'] for c in closed]
         def calc_ema(period):
@@ -218,37 +227,34 @@ class MasterCommanderEngine:
         ema9 = calc_ema(9)
         ema21 = calc_ema(21)
 
-        avg_vol = sum(c['vol'] for c in closed[-15:]) / 15.0
-        has_volume = c0['vol'] >= (avg_vol * 0.80)
+        recent_3_high = max(c['high'] for c in closed[-3:])
+        recent_3_low = min(c['low'] for c in closed[-3:])
+        
+        curr_price = live['close']
+        live_open = live['open']
 
-        body0 = c0['close'] - c0['open']
-        range0 = max(c0['high'] - c0['low'], 1.0)
-        lower_wick0 = min(c0['open'], c0['close']) - c0['low']
-        upper_wick0 = c0['high'] - max(c0['open'], c0['close'])
-
-        is_solid_long = (
-            (c0['close'] > c0['open']) and 
-            (c0['close'] > ema9) and (ema9 > ema21) and
-            (upper_wick0 / range0 < 0.32) and
-            has_volume and (body0 >= 20.0)
+        is_early_ignition_long = (
+            (curr_price > recent_3_high) and 
+            (curr_price > live_open + 15.0) and
+            (curr_price > ema9) and 
+            (ema9 >= ema21)
         )
 
-        is_solid_short = (
-            (c0['close'] < c0['open']) and 
-            (c0['close'] < ema9) and (ema9 < ema21) and
-            (lower_wick0 / range0 < 0.32) and
-            has_volume and (body0 <= -20.0)
+        is_early_ignition_short = (
+            (curr_price < recent_3_low) and 
+            (curr_price < live_open - 15.0) and
+            (curr_price < ema9) and 
+            (ema9 <= ema21)
         )
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
         pos_usd = float(cfg['capital']) * int(cfg['leverage'])
-        entry = round(live['close'], 1)
+        entry = round(curr_price, 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
-        if is_solid_long:
-            recent_low = min(c['low'] for c in closed[-3:])
-            risk = max(entry - recent_low + 20.0, 95.0)
-            if risk > 160.0: risk = 130.0
+        if is_early_ignition_long:
+            self.last_trade_bar = live['time']
+            risk = 110.0
             sl = round(entry - risk, 1)
             tp1 = round(entry + 110.0, 1)
             tp2 = round(entry + 220.0, 1)
@@ -256,15 +262,14 @@ class MasterCommanderEngine:
             trade_obj = {
                 'type': 'LONG', 'entry': entry, 'sl': sl, 
                 'tp1': tp1, 'tp2': tp2, 'risk': risk, 
-                'qty': qty, 'be_hit': False, 'tp1_hit': False, 'realized_pnl': 0.0
+                'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [SMART EXECUTION] BTC LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY IGNITION] BTC LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
-        elif is_solid_short:
-            recent_high = max(c['high'] for c in closed[-3:])
-            risk = max(recent_high - entry + 20.0, 95.0)
-            if risk > 160.0: risk = 130.0
+        elif is_early_ignition_short:
+            self.last_trade_bar = live['time']
+            risk = 110.0
             sl = round(entry + risk, 1)
             tp1 = round(entry - 110.0, 1)
             tp2 = round(entry - 220.0, 1)
@@ -272,10 +277,10 @@ class MasterCommanderEngine:
             trade_obj = {
                 'type': 'SHORT', 'entry': entry, 'sl': sl, 
                 'tp1': tp1, 'tp2': tp2, 'risk': risk, 
-                'qty': qty, 'be_hit': False, 'tp1_hit': False, 'realized_pnl': 0.0
+                'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [SMART EXECUTION] BTC SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY IGNITION] BTC SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -286,20 +291,12 @@ class MasterCommanderEngine:
 
             closed, live = fetch_binance_klines()
             if closed and live:
-                self.scan_counter += 1
-                set_db_state("engine_telemetry", {
-                    "scan_count": self.scan_counter,
-                    "last_tick": datetime.now().strftime("%H:%M:%S"),
-                    "status": "SCANNING TICK"
-                })
-
                 active = get_db_state("active_trade")
                 if active: self.manage_position(active, live)
                 else: self.evaluate_market_moves(closed, live)
 
             time.sleep(1.5)
 
-# GUARANTEED ENGINE LAUNCHER
 def launch_master_engine():
     current_lock = None
     try:
@@ -337,7 +334,6 @@ conn.close()
 win_rate = round((win_count / t_count) * 100, 1) if t_count > 0 else 0.0
 active_trade = get_db_state("active_trade")
 
-# Schema repair for active trade in runtime
 if active_trade and isinstance(active_trade, dict) and 'entry' in active_trade:
     e = float(active_trade['entry'])
     is_long = active_trade.get('type') == 'LONG'
@@ -348,13 +344,11 @@ if active_trade and isinstance(active_trade, dict) and 'entry' in active_trade:
     set_db_state("active_trade", active_trade)
 
 cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
-telemetry = get_db_state("engine_telemetry", {"scan_count": 100, "last_tick": "--", "status": "ONLINE"})
 
 js_active_trade = json.dumps(active_trade)
 js_history = json.dumps(history_list)
 js_stats = json.dumps({"total": t_count, "win_rate": win_rate})
 js_cfg = json.dumps(cfg)
-js_telemetry = json.dumps(telemetry)
 
 terminal_html = """<!DOCTYPE html>
 <html>
@@ -369,7 +363,6 @@ terminal_html = """<!DOCTYPE html>
         .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 0 8px; font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; }
         .brand { font-weight: 800; color: #fff; font-size: 11px; display: flex; align-items: center; gap: 5px; }
         
-        /* PULSE HEARTBEAT */
         .pulse-dot { width: 7px; height: 7px; background: #00e676; border-radius: 50%; box-shadow: 0 0 8px #00e676; animation: blinker 1.2s cubic-bezier(0.5, 0, 1, 1) infinite alternate; }
         @keyframes blinker { from { opacity: 1; transform: scale(1); } to { opacity: 0.25; transform: scale(0.7); } }
 
@@ -403,8 +396,8 @@ terminal_html = """<!DOCTYPE html>
 <body>
     <div class="top-nav">
         <div class="brand">
-            <span class="pulse-dot" id="live-pulse"></span>
-            ⚡ RADAR <span class="badge-scan" id="live-scan-badge">LIVE</span>
+            <span class="pulse-dot"></span>
+            ⚡ RADAR <span class="badge-scan">ACTIVE</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -435,7 +428,7 @@ terminal_html = """<!DOCTYPE html>
         <div class="bottom-bar">
             <div class="metric-cell">
                 <span class="cell-head">SCANNER ENGINE</span>
-                <div class="cell-body" id="val-telemetry-engine" style="color:#00e676;">ACTIVE 🟢</div>
+                <div class="cell-body" style="color:#00e676;">RADAR ONLINE 🟢</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TP1 TARGET</span>
@@ -447,7 +440,7 @@ terminal_html = """<!DOCTYPE html>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">SCAN STATUS</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">POLLING MARKET...</div>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING MOMENTUM...</div>
             </div>
         </div>
     </div>
@@ -478,14 +471,12 @@ terminal_html = """<!DOCTYPE html>
         let tradeHistory = __TRADE_HISTORY__;
         let stats = __STATS__;
         let cfg = __CFG__;
-        let telemetry = __TELEMETRY__;
 
         document.getElementById('input-amount').value = cfg.capital;
         document.getElementById('input-lev').value = cfg.leverage;
 
         let lineEntry = null, lineSL = null, lineTP1 = null, lineTP2 = null;
         let currentPrice = 84000.0;
-        let localTickCount = 0;
 
         function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
         function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
@@ -561,15 +552,17 @@ terminal_html = """<!DOCTYPE html>
                     price: slVal, color: '#ff3b30', lineWidth: 2, 
                     lineStyle: LightweightCharts.LineStyle.Solid, 
                     axisLabelVisible: true, 
-                    title: 'SAFE SL $' + slVal.toFixed(1) 
+                    title: (activeTrade.be_hit ? 'BE SL $' : 'SAFE SL$') + slVal.toFixed(1) 
                 });
 
-                lineTP1 = series.createPriceLine({ 
-                    price: tp1Val, color: '#00e676', lineWidth: 2, 
-                    lineStyle: LightweightCharts.LineStyle.Solid, 
-                    axisLabelVisible: true, 
-                    title: 'TP1 (50%) $' + tp1Val.toFixed(1) 
-                });
+                if (!activeTrade.tp1_hit) {
+                    lineTP1 = series.createPriceLine({ 
+                        price: tp1Val, color: '#00e676', lineWidth: 2, 
+                        lineStyle: LightweightCharts.LineStyle.Solid, 
+                        axisLabelVisible: true, 
+                        title: 'TP1 (50%) $' + tp1Val.toFixed(1) 
+                    });
+                }
 
                 lineTP2 = series.createPriceLine({ 
                     price: tp2Val, color: '#00b0ff', lineWidth: 2, 
@@ -580,10 +573,10 @@ terminal_html = """<!DOCTYPE html>
 
                 document.getElementById('disp-entry').innerText = "$" + entryVal.toFixed(1);
                 document.getElementById('disp-sl').innerText = "$" + slVal.toFixed(1);
-                document.getElementById('disp-tp1').innerText = "$" + tp1Val.toFixed(1);
+                document.getElementById('disp-tp1').innerText = activeTrade.tp1_hit ? "BOOKED ✅" : ("$" + tp1Val.toFixed(1));
                 document.getElementById('disp-tp2').innerText = "$" + tp2Val.toFixed(1);
 
-                document.getElementById('val-setup').innerText = "RIDING " + activeTrade.type + " 🚀";
+                document.getElementById('val-setup').innerText = "RIDING " + activeTrade.type + (activeTrade.tp1_hit ? " (TP1 SECURED)" : "") + " 🚀";
                 document.getElementById('val-setup').style.color = isLong ? "#00e676" : "#ff3b30";
             } else {
                 document.getElementById('disp-entry').innerText = "--";
@@ -641,14 +634,9 @@ terminal_html = """<!DOCTYPE html>
                 const price = parseFloat(k.c);
                 const barTime = (k.t - (k.t % 300000)) / 1000;
                 
-                localTickCount++;
                 currentPrice = price;
                 updateCalcQty();
                 document.getElementById('live-price').innerText = "$" + price.toFixed(1);
-
-                // LIVE ENGINE TELEMETRY ON SCREEN
-                document.getElementById('val-telemetry-engine').innerText = `TICK #${localTickCount} ⚡`;
-                document.getElementById('live-scan-badge').innerText = `TICK #${localTickCount}`;
 
                 let last = cdata[cdata.length - 1];
                 if (barTime === last.time) {
@@ -662,11 +650,7 @@ terminal_html = """<!DOCTYPE html>
                     series.update(newBar);
                 }
             };
-            ws.onclose = () => {
-                document.getElementById('val-telemetry-engine').innerText = "RECONNECTING 🔴";
-                document.getElementById('live-scan-badge').innerText = "OFFLINE";
-                setTimeout(() => connectLiveStream(cdata), 1500);
-            };
+            ws.onclose = () => setTimeout(() => connectLiveStream(cdata), 1500);
         }
 
         syncCandles();
@@ -678,7 +662,6 @@ terminal_html = """<!DOCTYPE html>
 final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
                           .replace("__TRADE_HISTORY__", js_history)\
                           .replace("__STATS__", js_stats)\
-                          .replace("__CFG__", js_cfg)\
-                          .replace("__TELEMETRY__", js_telemetry)
+                          .replace("__CFG__", js_cfg)
 
 components.html(final_html, height=710, scrolling=False)
