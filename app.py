@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: DUAL TP VISUALIZER + GUARANTEED BOOT + TELEGRAM ALERTS
+# PRO QUANT ENGINE: LIVE SCANNER TELEMETRY + DUAL TP VISUALS + SAFE VAULT
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -41,7 +41,7 @@ def init_db():
 
 init_db()
 
-# Direct Query Clear Handler
+# Direct Query Clear Handler (Inside Vault modal)
 if st.query_params.get("clear_vault") == "confirmed":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -114,26 +114,34 @@ class MasterCommanderEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
         self.last_candle_checked = 0
+        self.scan_counter = 0
 
     def manage_position(self, t, live):
         qty = t.get("qty", 0.01)
         curr_price = live['close']
+        entry = float(t['entry'])
 
-        # ---------------- LONG POSITION MONITOR ----------------
+        # Auto-Repair keys agar purane trade state me tp1/tp2 na ho
+        if 'tp1' not in t or not t['tp1']:
+            t['tp1'] = round(entry + 110.0 if t['type'] == 'LONG' else entry - 110.0, 1)
+        if 'tp2' not in t or not t['tp2']:
+            t['tp2'] = round(entry + 220.0 if t['type'] == 'LONG' else entry - 220.0, 1)
+
+        # ---------------- LONG MONITOR ----------------
         if t['type'] == 'LONG':
             if not t.get('tp1_hit', False) and curr_price >= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
-                t['sl'] = round(t['entry'] + 10.0, 1)
+                t['sl'] = round(entry + 10.0, 1)
                 half_usd = round(110.0 * (qty * 0.5), 2)
                 t['realized_pnl'] = t.get('realized_pnl', 0.0) + half_usd
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
             elif curr_price >= t['tp2']:
-                rem_usd = round((t['tp2'] - t['entry']) * (qty * 0.5), 2)
+                rem_usd = round((t['tp2'] - entry) * (qty * 0.5), 2)
                 total_usd = round(t.get('realized_pnl', 0.0) + rem_usd, 2)
-                pts = round(t['tp2'] - t['entry'], 1)
+                pts = round(t['tp2'] - entry, 1)
                 self.record_trade(t, t['tp2'], "TP2 HIT 🎯🔥", f"+{pts:.0f}", f"+${total_usd:.2f}")
                 send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal PnL: +${total_usd:.2f} (+{pts:.0f} pts)\nExit: ${t['tp2']:.1f}")
 
@@ -144,28 +152,28 @@ class MasterCommanderEngine:
                     pts_str = "+60 pts net"
                     res = "TP1 + BE SECURE"
                 else:
-                    final_usd = round(-(t['entry'] - t['sl']) * qty, 2)
-                    pts_str = f"-{t['entry'] - t['sl']:.0f}"
+                    final_usd = round(-(entry - t['sl']) * qty, 2)
+                    pts_str = f"-{entry - t['sl']:.0f}"
 
                 sign = "+" if final_usd >= 0 else ""
                 self.record_trade(t, t['sl'], res, pts_str, f"{sign}${final_usd:.2f}")
                 send_telegram_alert(f"🛡️ [EXIT] BTC LONG {res}\nNet PnL: {sign}${final_usd:.2f} ({pts_str})\nExit: ${curr_price:.1f}")
 
-        # ---------------- SHORT POSITION MONITOR ----------------
+        # ---------------- SHORT MONITOR ----------------
         elif t['type'] == 'SHORT':
             if not t.get('tp1_hit', False) and curr_price <= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
-                t['sl'] = round(t['entry'] - 10.0, 1)
+                t['sl'] = round(entry - 10.0, 1)
                 half_usd = round(110.0 * (qty * 0.5), 2)
                 t['realized_pnl'] = t.get('realized_pnl', 0.0) + half_usd
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
             elif curr_price <= t['tp2']:
-                rem_usd = round((t['entry'] - t['tp2']) * (qty * 0.5), 2)
+                rem_usd = round((entry - t['tp2']) * (qty * 0.5), 2)
                 total_usd = round(t.get('realized_pnl', 0.0) + rem_usd, 2)
-                pts = round(t['entry'] - t['tp2'], 1)
+                pts = round(entry - t['tp2'], 1)
                 self.record_trade(t, t['tp2'], "TP2 HIT 🎯🩸", f"+{pts:.0f}", f"+${total_usd:.2f}")
                 send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal PnL: +${total_usd:.2f} (+{pts:.0f} pts)\nExit: ${t['tp2']:.1f}")
 
@@ -176,8 +184,8 @@ class MasterCommanderEngine:
                     pts_str = "+60 pts net"
                     res = "TP1 + BE SECURE"
                 else:
-                    final_usd = round(-(t['sl'] - t['entry']) * qty, 2)
-                    pts_str = f"-{t['sl'] - t['entry']:.0f}"
+                    final_usd = round(-(t['sl'] - entry) * qty, 2)
+                    pts_str = f"-{t['sl'] - entry:.0f}"
 
                 sign = "+" if final_usd >= 0 else ""
                 self.record_trade(t, t['sl'], res, pts_str, f"{sign}${final_usd:.2f}")
@@ -278,20 +286,26 @@ class MasterCommanderEngine:
 
             closed, live = fetch_binance_klines()
             if closed and live:
+                self.scan_counter += 1
+                set_db_state("engine_telemetry", {
+                    "scan_count": self.scan_counter,
+                    "last_tick": datetime.now().strftime("%H:%M:%S"),
+                    "status": "SCANNING TICK"
+                })
+
                 active = get_db_state("active_trade")
                 if active: self.manage_position(active, live)
                 else: self.evaluate_market_moves(closed, live)
 
             time.sleep(1.5)
 
-# GUARANTEED ENGINE BOOTLOADER
+# GUARANTEED ENGINE LAUNCHER
 def launch_master_engine():
     current_lock = None
     try:
         with open(LOCK_FILE, "r") as f: current_lock = f.read().strip()
     except: pass
 
-    # Agar lock nahi hai ya reboot hua hai, force-boot karo
     if not current_lock:
         eid = str(uuid.uuid4())
         with open(LOCK_FILE, "w") as f: f.write(eid)
@@ -322,12 +336,25 @@ conn.close()
 
 win_rate = round((win_count / t_count) * 100, 1) if t_count > 0 else 0.0
 active_trade = get_db_state("active_trade")
+
+# Schema repair for active trade in runtime
+if active_trade and isinstance(active_trade, dict) and 'entry' in active_trade:
+    e = float(active_trade['entry'])
+    is_long = active_trade.get('type') == 'LONG'
+    if 'tp1' not in active_trade or not active_trade['tp1']:
+        active_trade['tp1'] = round(e + 110.0 if is_long else e - 110.0, 1)
+    if 'tp2' not in active_trade or not active_trade['tp2']:
+        active_trade['tp2'] = round(e + 220.0 if is_long else e - 220.0, 1)
+    set_db_state("active_trade", active_trade)
+
 cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
+telemetry = get_db_state("engine_telemetry", {"scan_count": 100, "last_tick": "--", "status": "ONLINE"})
 
 js_active_trade = json.dumps(active_trade)
 js_history = json.dumps(history_list)
 js_stats = json.dumps({"total": t_count, "win_rate": win_rate})
 js_cfg = json.dumps(cfg)
+js_telemetry = json.dumps(telemetry)
 
 terminal_html = """<!DOCTYPE html>
 <html>
@@ -340,7 +367,12 @@ terminal_html = """<!DOCTYPE html>
         html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100vh; overflow: hidden; }
         
         .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 0 8px; font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; }
-        .brand { font-weight: 800; color: #fff; font-size: 11px; display: flex; align-items: center; gap: 4px; }
+        .brand { font-weight: 800; color: #fff; font-size: 11px; display: flex; align-items: center; gap: 5px; }
+        
+        /* PULSE HEARTBEAT */
+        .pulse-dot { width: 7px; height: 7px; background: #00e676; border-radius: 50%; box-shadow: 0 0 8px #00e676; animation: blinker 1.2s cubic-bezier(0.5, 0, 1, 1) infinite alternate; }
+        @keyframes blinker { from { opacity: 1; transform: scale(1); } to { opacity: 0.25; transform: scale(0.7); } }
+
         .badge-scan { background: #00e676; color: #000; font-size: 8px; padding: 2px 4px; border-radius: 3px; font-weight: 900; }
         
         .stat-card { display: flex; flex-direction: column; min-width: 52px; }
@@ -370,7 +402,10 @@ terminal_html = """<!DOCTYPE html>
 </head>
 <body>
     <div class="top-nav">
-        <div class="brand">⚡ EARLY <span class="badge-scan">RADAR</span></div>
+        <div class="brand">
+            <span class="pulse-dot" id="live-pulse"></span>
+            ⚡ RADAR <span class="badge-scan" id="live-scan-badge">LIVE</span>
+        </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
         <div class="stat-card"><div class="stat-label">TP1 (50%)</div><div id="disp-tp1" class="stat-val" style="color:#00e676;">--</div></div>
@@ -378,7 +413,7 @@ terminal_html = """<!DOCTYPE html>
         <button class="btn-compact" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
         <button class="btn-compact" onclick="window.parent.location.reload()">🔄</button>
         <div style="margin-left: auto; display: flex; align-items: center;">
-            <b id="live-price" style="color: #f0b90b; font-size: 11px;">$84,132.0</b>
+            <b id="live-price" style="color: #f0b90b; font-size: 11px;">$84,000.0</b>
         </div>
     </div>
 
@@ -399,11 +434,11 @@ terminal_html = """<!DOCTYPE html>
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">STATUS</span>
-                <div class="cell-body" style="color:#00e676;">DUAL-TP ON 🎯</div>
+                <span class="cell-head">SCANNER ENGINE</span>
+                <div class="cell-body" id="val-telemetry-engine" style="color:#00e676;">ACTIVE 🟢</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">TP1 SHIELD</span>
+                <span class="cell-head">TP1 TARGET</span>
                 <div class="cell-body" style="color:#00e676;">+110 PTS (50%)</div>
             </div>
             <div class="metric-cell">
@@ -411,12 +446,13 @@ terminal_html = """<!DOCTYPE html>
                 <div class="cell-body" style="color:#38bdf8;">+220 PTS RUN</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">RADAR SCANNER</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING MOMENTUM...</div>
+                <span class="cell-head">SCAN STATUS</span>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">POLLING MARKET...</div>
             </div>
         </div>
     </div>
 
+    <!-- VAULT POPUP MODAL -->
     <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
         <div class="modal-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
@@ -442,12 +478,14 @@ terminal_html = """<!DOCTYPE html>
         let tradeHistory = __TRADE_HISTORY__;
         let stats = __STATS__;
         let cfg = __CFG__;
+        let telemetry = __TELEMETRY__;
 
         document.getElementById('input-amount').value = cfg.capital;
         document.getElementById('input-lev').value = cfg.leverage;
 
         let lineEntry = null, lineSL = null, lineTP1 = null, lineTP2 = null;
-        let currentPrice = 84132.0;
+        let currentPrice = 84000.0;
+        let localTickCount = 0;
 
         function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
         function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
@@ -505,48 +543,48 @@ terminal_html = """<!DOCTYPE html>
             clearAllLines();
 
             if (activeTrade && activeTrade.entry) {
+                let entryVal = parseFloat(activeTrade.entry);
+                let slVal = parseFloat(activeTrade.sl);
+                let isLong = activeTrade.type === "LONG";
+
+                let tp1Val = activeTrade.tp1 ? parseFloat(activeTrade.tp1) : (isLong ? (entryVal + 110.0) : (entryVal - 110.0));
+                let tp2Val = activeTrade.tp2 ? parseFloat(activeTrade.tp2) : (isLong ? (entryVal + 220.0) : (entryVal - 220.0));
+
                 lineEntry = series.createPriceLine({ 
-                    price: parseFloat(activeTrade.entry), 
-                    color: '#38bdf8', lineWidth: 2, 
+                    price: entryVal, color: '#38bdf8', lineWidth: 2, 
                     lineStyle: LightweightCharts.LineStyle.Dashed, 
                     axisLabelVisible: true, 
-                    title: 'ENTRY $' + parseFloat(activeTrade.entry).toFixed(1) 
+                    title: 'ENTRY $' + entryVal.toFixed(1) 
                 });
                 
                 lineSL = series.createPriceLine({ 
-                    price: parseFloat(activeTrade.sl), 
-                    color: '#ff3b30', lineWidth: 2, 
+                    price: slVal, color: '#ff3b30', lineWidth: 2, 
                     lineStyle: LightweightCharts.LineStyle.Solid, 
                     axisLabelVisible: true, 
-                    title: 'SAFE SL $' + parseFloat(activeTrade.sl).toFixed(1) 
+                    title: 'SAFE SL $' + slVal.toFixed(1) 
                 });
 
-                if (activeTrade.tp1) {
-                    lineTP1 = series.createPriceLine({ 
-                        price: parseFloat(activeTrade.tp1), 
-                        color: '#00e676', lineWidth: 2, 
-                        lineStyle: LightweightCharts.LineStyle.Solid, 
-                        axisLabelVisible: true, 
-                        title: 'TP1 (50%) $' + parseFloat(activeTrade.tp1).toFixed(1) 
-                    });
-                }
+                lineTP1 = series.createPriceLine({ 
+                    price: tp1Val, color: '#00e676', lineWidth: 2, 
+                    lineStyle: LightweightCharts.LineStyle.Solid, 
+                    axisLabelVisible: true, 
+                    title: 'TP1 (50%) $' + tp1Val.toFixed(1) 
+                });
 
-                if (activeTrade.tp2) {
-                    lineTP2 = series.createPriceLine({ 
-                        price: parseFloat(activeTrade.tp2), 
-                        color: '#00b0ff', lineWidth: 2, 
-                        lineStyle: LightweightCharts.LineStyle.Solid, 
-                        axisLabelVisible: true, 
-                        title: 'TP2 (50%) $' + parseFloat(activeTrade.tp2).toFixed(1) 
-                    });
-                }
+                lineTP2 = series.createPriceLine({ 
+                    price: tp2Val, color: '#00b0ff', lineWidth: 2, 
+                    lineStyle: LightweightCharts.LineStyle.Solid, 
+                    axisLabelVisible: true, 
+                    title: 'TP2 (50%) $' + tp2Val.toFixed(1) 
+                });
 
-                document.getElementById('disp-entry').innerText = "$" + parseFloat(activeTrade.entry).toFixed(1);
-                document.getElementById('disp-sl').innerText = "$" + parseFloat(activeTrade.sl).toFixed(1);
-                document.getElementById('disp-tp1').innerText = activeTrade.tp1 ? "$" + parseFloat(activeTrade.tp1).toFixed(1) : "--";
-                document.getElementById('disp-tp2').innerText = activeTrade.tp2 ? "$" + parseFloat(activeTrade.tp2).toFixed(1) : "--";
+                document.getElementById('disp-entry').innerText = "$" + entryVal.toFixed(1);
+                document.getElementById('disp-sl').innerText = "$" + slVal.toFixed(1);
+                document.getElementById('disp-tp1').innerText = "$" + tp1Val.toFixed(1);
+                document.getElementById('disp-tp2').innerText = "$" + tp2Val.toFixed(1);
+
                 document.getElementById('val-setup').innerText = "RIDING " + activeTrade.type + " 🚀";
-                document.getElementById('val-setup').style.color = activeTrade.type === "LONG" ? "#00e676" : "#ff3b30";
+                document.getElementById('val-setup').style.color = isLong ? "#00e676" : "#ff3b30";
             } else {
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
@@ -603,9 +641,14 @@ terminal_html = """<!DOCTYPE html>
                 const price = parseFloat(k.c);
                 const barTime = (k.t - (k.t % 300000)) / 1000;
                 
+                localTickCount++;
                 currentPrice = price;
                 updateCalcQty();
                 document.getElementById('live-price').innerText = "$" + price.toFixed(1);
+
+                // LIVE ENGINE TELEMETRY ON SCREEN
+                document.getElementById('val-telemetry-engine').innerText = `TICK #${localTickCount} ⚡`;
+                document.getElementById('live-scan-badge').innerText = `TICK #${localTickCount}`;
 
                 let last = cdata[cdata.length - 1];
                 if (barTime === last.time) {
@@ -619,7 +662,11 @@ terminal_html = """<!DOCTYPE html>
                     series.update(newBar);
                 }
             };
-            ws.onclose = () => setTimeout(() => connectLiveStream(cdata), 1500);
+            ws.onclose = () => {
+                document.getElementById('val-telemetry-engine').innerText = "RECONNECTING 🔴";
+                document.getElementById('live-scan-badge').innerText = "OFFLINE";
+                setTimeout(() => connectLiveStream(cdata), 1500);
+            };
         }
 
         syncCandles();
@@ -631,6 +678,7 @@ terminal_html = """<!DOCTYPE html>
 final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
                           .replace("__TRADE_HISTORY__", js_history)\
                           .replace("__STATS__", js_stats)\
-                          .replace("__CFG__", js_cfg)
+                          .replace("__CFG__", js_cfg)\
+                          .replace("__TELEMETRY__", js_telemetry)
 
 components.html(final_html, height=710, scrolling=False)
