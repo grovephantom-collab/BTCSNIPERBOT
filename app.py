@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: IMMEDIATE TOP REVERSAL + NON-BLOCKING TELEGRAM + VAULT
+# PRO QUANT ENGINE: IMMEDIATE TOP REVERSAL + ONE-CLICK VAULT + CHOP GUARD
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -43,7 +43,7 @@ def init_db():
 
 init_db()
 
-# Direct Vault Reset Trigger
+# Direct One-Click Vault Clear Handler
 if st.query_params.get("clear_vault") == "confirmed":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -165,7 +165,7 @@ class MasterCommanderEngine:
             conn.close()
         except: pass
 
-    def manage_position(self, t, live):
+    def manage_position(self, t, live, closed):
         qty = t.get("qty", 0.01)
         curr_price = float(live['close'])
         entry = float(t['entry'])
@@ -176,12 +176,15 @@ class MasterCommanderEngine:
             t['tp2'] = round(entry + 220.0 if t['type'] == 'LONG' else entry - 220.0, 1)
 
         mem = read_shared_memory()
+        c0 = closed[-1]
 
         # LONG POSITION MONITOR
         if t['type'] == 'LONG':
+            # 1. TP1 Trigger (+110 pts) -> 50% Profit Book + Breakeven Shift
             if not t.get('tp1_hit', False) and curr_price >= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
+                t['tp1_bar_time'] = live['time']
                 t['sl'] = round(entry + 10.0, 1)
                 half_qty = round(qty * 0.5, 4)
                 half_usd = round(110.0 * half_qty, 2)
@@ -190,6 +193,23 @@ class MasterCommanderEngine:
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
+            # 2. MID-WAY CHOP / STALL GUARD (Agar TP1 ke baad beech me fas jaye aur reversal wick banaye)
+            elif t.get('tp1_hit', False) and (curr_price < t['tp2']) and (curr_price > float(t['sl'])):
+                bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
+                is_stalled = (bars_passed >= 2) and (curr_price < c0['low']) and (c0['close'] < c0['open'])
+                
+                if is_stalled:
+                    rem_qty = round(qty * 0.5, 4)
+                    pts = round(curr_price - entry, 1)
+                    rem_usd = round(pts * rem_qty, 2)
+                    self.record_to_vault("LONG", entry, curr_price, "CHOP EXIT ⚡", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
+                    set_db_state("active_trade", None)
+                    mem['last_trade_time'] = time.time()
+                    write_shared_memory(mem)
+                    send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC LONG\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
+                    return
+
+            # 3. TP2 Full Hit (+220 pts)
             elif curr_price >= t['tp2']:
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(t['tp2'] - entry, 1)
@@ -201,6 +221,7 @@ class MasterCommanderEngine:
                 write_shared_memory(mem)
                 send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
+            # 4. Breakeven or Stop Loss Exit
             elif curr_price <= float(t['sl']):
                 if t.get('tp1_hit', False):
                     rem_qty = round(qty * 0.5, 4)
@@ -220,9 +241,11 @@ class MasterCommanderEngine:
 
         # SHORT POSITION MONITOR
         elif t['type'] == 'SHORT':
+            # 1. TP1 Trigger (+110 pts Drop) -> 50% Profit Book + Breakeven Shift
             if not t.get('tp1_hit', False) and curr_price <= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
+                t['tp1_bar_time'] = live['time']
                 t['sl'] = round(entry - 10.0, 1)
                 half_qty = round(qty * 0.5, 4)
                 half_usd = round(110.0 * half_qty, 2)
@@ -231,6 +254,23 @@ class MasterCommanderEngine:
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
+            # 2. MID-WAY CHOP / STALL GUARD (Agar TP1 ke baad beech me ruk kar bounce karne lage)
+            elif t.get('tp1_hit', False) and (curr_price > t['tp2']) and (curr_price < float(t['sl'])):
+                bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
+                is_stalled = (bars_passed >= 2) and (curr_price > c0['high']) and (c0['close'] > c0['open'])
+                
+                if is_stalled:
+                    rem_qty = round(qty * 0.5, 4)
+                    pts = round(entry - curr_price, 1)
+                    rem_usd = round(pts * rem_qty, 2)
+                    self.record_to_vault("SHORT", entry, curr_price, "CHOP EXIT ⚡", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
+                    set_db_state("active_trade", None)
+                    mem['last_trade_time'] = time.time()
+                    write_shared_memory(mem)
+                    send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC SHORT\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
+                    return
+
+            # 3. TP2 Full Hit (+220 pts Drop)
             elif curr_price <= t['tp2']:
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(entry - t['tp2'], 1)
@@ -242,6 +282,7 @@ class MasterCommanderEngine:
                 write_shared_memory(mem)
                 send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
+            # 4. Breakeven or Stop Loss Exit
             elif curr_price >= float(t['sl']):
                 if t.get('tp1_hit', False):
                     rem_qty = round(qty * 0.5, 4)
@@ -266,28 +307,23 @@ class MasterCommanderEngine:
 
         mem = read_shared_memory()
 
-        # Risk Guard 1: Max 3 Consecutive Losses Pause
         if mem.get('consecutive_losses', 0) >= 3:
             return
 
-        # Risk Guard 2: 10-Minute Cool Down Between Trades
         if time.time() - mem.get('last_trade_time', 0) < 600:
             return
 
-        c0 = closed[-1]  # Pichli closed candle
-        c1 = closed[-2]  # Usse pichli closed candle
+        c0 = closed[-1]
+        c1 = closed[-2]
 
         curr_price = float(live['close'])
         live_open = float(live['open'])
 
-        # EMA Calculation
         closes = [c['close'] for c in closed]
         k9 = 2 / 10
         ema9 = closes[0]
         for cl in closes[1:]: ema9 = (cl * k9) + (ema9 * (1 - k9))
 
-        # 1. IMMEDIATE TOP REVERSAL DUMP (Top se 1000 point girne se pehle pakadna)
-        # Condition: Top par candle rejection dekar c0 ke low ko tode aur -12 pts momentum shuru ho
         is_top_dump = (
             (curr_price < c0['low']) and
             (curr_price < live_open - 12.0) and
@@ -295,7 +331,6 @@ class MasterCommanderEngine:
             (c0['close'] < c0['open'] or curr_price < c1['low'])
         )
 
-        # 2. IMMEDIATE BOTTOM REVERSAL PUMP (Bottom se uthte hi pehli candle par pakadna)
         is_bottom_pump = (
             (curr_price > c0['high']) and
             (curr_price > live_open + 12.0) and
@@ -347,7 +382,7 @@ class MasterCommanderEngine:
             closed, live = fetch_binance_klines()
             if closed and live:
                 active = get_db_state("active_trade")
-                if active: self.manage_position(active, live)
+                if active: self.manage_position(active, live, closed)
                 else: self.evaluate_market_moves(closed, live)
 
             time.sleep(1.2)
@@ -397,7 +432,7 @@ cur.execute("SELECT timestamp, trade_type, entry, result, pts, pnl_usd FROM trad
 rows = cur.fetchall()
 history_list = [{"time": r[0], "type": r[1], "entry": r[2], "result": r[3], "pts": r[4], "pnl_usd": r[5]} for r in rows]
 
-cur.execute("SELECT COUNT(*), SUM(CASE WHEN result LIKE '%TP%' OR result LIKE '%BE%' THEN 1 ELSE 0 END) FROM trades")
+cur.execute("SELECT COUNT(*), SUM(CASE WHEN result LIKE '%TP%' OR result LIKE '%BE%' OR result LIKE '%CHOP%' THEN 1 ELSE 0 END) FROM trades")
 t_count, win_count = cur.fetchone()
 conn.close()
 
@@ -460,7 +495,8 @@ terminal_html = """<!DOCTYPE html>
         .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 90vw; max-width: 400px; max-height: 80vh; display: flex; flex-direction: column; padding: 12px; }
         .history-list { overflow-y: auto; max-height: 250px; font-size: 10px; }
         .history-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #151d2b; }
-        .btn-modal-clear { margin-top: 10px; background: rgba(255, 59, 48, 0.15); color: #ff3b30; border: 1px solid rgba(255, 59, 48, 0.4); border-radius: 4px; padding: 6px; font-size: 10px; font-weight: 800; cursor: pointer; text-align: center; }
+        .btn-modal-clear { margin-top: 10px; background: rgba(255, 59, 48, 0.2); color: #ff3b30; border: 1px solid rgba(255, 59, 48, 0.5); border-radius: 4px; padding: 7px; font-size: 10px; font-weight: 800; cursor: pointer; text-align: center; }
+        .btn-modal-clear:active { background: #ff3b30; color: #fff; }
     </style>
 </head>
 <body>
@@ -531,7 +567,7 @@ terminal_html = """<!DOCTYPE html>
                 </div>
             </div>
             <div id="history-container" class="history-list"></div>
-            <div class="btn-modal-clear" onclick="triggerVaultClear()">🗑️ CLEAR VAULT DATABASE</div>
+            <div class="btn-modal-clear" onclick="triggerVaultClear()">🗑️ ONE-CLICK CLEAR VAULT</div>
         </div>
     </div>
 
@@ -551,10 +587,9 @@ terminal_html = """<!DOCTYPE html>
         function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
         function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
         
+        // INSTANT 1-CLICK CLEAR (Direct URL push to parent Streamlit without confirmation hang)
         function triggerVaultClear() {
-            if (confirm("Are you sure you want to permanently clear all vault trades?")) {
-                window.parent.location.href = window.parent.location.pathname + "?clear_vault=confirmed";
-            }
+            window.parent.location.replace(window.parent.location.pathname + "?clear_vault=confirmed");
         }
 
         function updateCalcQty() {
@@ -665,7 +700,7 @@ terminal_html = """<!DOCTYPE html>
             if (tradeHistory.length > 0) {
                 histCont.innerHTML = "";
                 tradeHistory.forEach(item => {
-                    let resCol = item.result.includes("TP") || item.result.includes("BE") ? "#00e676" : "#ff3b30";
+                    let resCol = item.result.includes("TP") || item.result.includes("BE") || item.result.includes("CHOP") ? "#00e676" : "#ff3b30";
                     let typeCol = item.type === "LONG" ? "#00e676" : "#ff3b30";
                     let pnlDisp = item.pnl_usd ? `<b style="color:${resCol}; margin-left:4px;">(${item.pnl_usd})</b>` : '';
                     histCont.innerHTML += `
