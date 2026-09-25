@@ -11,7 +11,7 @@ import math
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: FULL ARCHITECTURE (PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4)
+# PRO QUANT ENGINE: FULL ARCHITECTURE (PHASE 1 + 2 + 3 + 4 + HARD BAR LOCK)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -183,7 +183,6 @@ def calculate_atr(klines, period=14):
 def run_data_news_engine():
     while True:
         try:
-            # 1. Alternative.me Fear & Greed API
             r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3)
             score = 50
             label = "NEUTRAL"
@@ -191,7 +190,6 @@ def run_data_news_engine():
                 score = int(r.json()['data'][0]['value'])
                 label = "GREED" if score >= 60 else ("FEAR" if score <= 40 else "NEUTRAL")
             
-            # 2. Phase 2: HTF (1H) Trend Direction Fetcher
             htf_trend = "NEUTRAL"
             try:
                 r_htf = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=30", timeout=3)
@@ -209,7 +207,6 @@ def run_data_news_engine():
                         htf_trend = "BEARISH"
             except: pass
 
-            # 3. Phase 3: Funding Rate Fetcher
             funding_rate = 0.0
             try:
                 r_fund = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT", timeout=3)
@@ -217,7 +214,6 @@ def run_data_news_engine():
                     funding_rate = float(r_fund.json().get('lastFundingRate', 0.0))
             except: pass
 
-            # 4. Phase 3: L2 Order Book Depth Imbalance
             book_imbalance = 1.0
             try:
                 r_depth = requests.get("https://data-api.binance.vision/api/v3/depth?symbol=BTCUSDT&limit=20", timeout=3)
@@ -229,7 +225,6 @@ def run_data_news_engine():
                         book_imbalance = round(total_bids / total_asks, 2)
             except: pass
 
-            # 5. PHASE 4: AI/ML Predictive Analytics & Volatility Metric
             ai_score = 75
             atr_val = 45.0
             try:
@@ -241,7 +236,6 @@ def run_data_news_engine():
                     rsi = calculate_rsi(closes_5m, 14)
                     atr_val = calculate_atr(k_list, 14)
                     
-                    # Machine-Scored Probability Calculation
                     base_prob = 70
                     if 45 <= rsi <= 65: base_prob += 10
                     elif rsi > 75 or rsi < 25: base_prob -= 15
@@ -287,6 +281,7 @@ class MasterCommanderEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
         self.last_trade_bar = 0
+        self.last_exit_bar = 0
         self.locked_closing_id = None
 
     def record_to_vault(self, t_type, entry, exit_price, result, pts, pnl_usd, qty):
@@ -341,6 +336,7 @@ class MasterCommanderEngine:
                     self.locked_closing_id = curr_trade_ref
                     set_db_state("active_trade", None)
                     set_db_state("last_exit_epoch", time.time())
+                    self.last_exit_bar = live['time']
                     
                     rem_qty = round(qty * 0.5, 4)
                     pts = round(curr_price - entry, 1)
@@ -350,7 +346,6 @@ class MasterCommanderEngine:
                     self.last_trade_bar = live['time']
                     mem['last_trade_time'] = time.time()
                     write_shared_memory(mem)
-                    self.locked_closing_id = None
                     send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC LONG\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
                     return
 
@@ -358,6 +353,7 @@ class MasterCommanderEngine:
                 self.locked_closing_id = curr_trade_ref
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
+                self.last_exit_bar = live['time']
 
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(t['tp2'] - entry, 1)
@@ -368,13 +364,13 @@ class MasterCommanderEngine:
                 mem['consecutive_losses'] = 0
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
-                self.locked_closing_id = None
                 send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
             elif curr_price <= float(t['sl']):
                 self.locked_closing_id = curr_trade_ref
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
+                self.last_exit_bar = live['time']
 
                 if t.get('tp1_hit', False):
                     rem_qty = round(qty * 0.5, 4)
@@ -392,7 +388,6 @@ class MasterCommanderEngine:
                 self.last_trade_bar = live['time']
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
-                self.locked_closing_id = None
 
         # SHORT POSITION MONITOR
         elif t['type'] == 'SHORT':
@@ -416,6 +411,7 @@ class MasterCommanderEngine:
                     self.locked_closing_id = curr_trade_ref
                     set_db_state("active_trade", None)
                     set_db_state("last_exit_epoch", time.time())
+                    self.last_exit_bar = live['time']
 
                     rem_qty = round(qty * 0.5, 4)
                     pts = round(entry - curr_price, 1)
@@ -425,7 +421,6 @@ class MasterCommanderEngine:
                     self.last_trade_bar = live['time']
                     mem['last_trade_time'] = time.time()
                     write_shared_memory(mem)
-                    self.locked_closing_id = None
                     send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC SHORT\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
                     return
 
@@ -433,6 +428,7 @@ class MasterCommanderEngine:
                 self.locked_closing_id = curr_trade_ref
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
+                self.last_exit_bar = live['time']
 
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(entry - t['tp2'], 1)
@@ -443,13 +439,13 @@ class MasterCommanderEngine:
                 mem['consecutive_losses'] = 0
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
-                self.locked_closing_id = None
                 send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
             elif curr_price >= float(t['sl']):
                 self.locked_closing_id = curr_trade_ref
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
+                self.last_exit_bar = live['time']
 
                 if t.get('tp1_hit', False):
                     rem_qty = round(qty * 0.5, 4)
@@ -467,15 +463,19 @@ class MasterCommanderEngine:
                 self.last_trade_bar = live['time']
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
-                self.locked_closing_id = None
 
-    # --- ADVANCED SIGNAL LOGIC (PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4) ---
+    # --- ADVANCED SIGNAL LOGIC ---
     def evaluate_market_moves(self, closed, live):
         if get_db_state("kill_switch_active", False):
             return
 
+        if self.last_exit_bar > 0:
+            bars_since_exit = (live['time'] - self.last_exit_bar) // 300000
+            if bars_since_exit < 2:
+                return
+
         last_exit_epoch = get_db_state("last_exit_epoch", 0)
-        if time.time() - last_exit_epoch < 900:
+        if time.time() - last_exit_epoch < 600:
             return
 
         mem = read_shared_memory()
@@ -507,15 +507,12 @@ class MasterCommanderEngine:
         ai_score = mem.get('ai_score', 75)
         atr_val = mem.get('atr_val', 45.0)
 
-        # PHASE 4 GATE: AI Confidence Filter (High Probability Move Only)
         if ai_score < 65:
             return
 
-        # Dynamic Squeeze Boundaries based on Live ATR
         min_squeeze = max(35.0, atr_val * 0.7)
         max_squeeze = min(160.0, atr_val * 3.2)
 
-        # PRE-MOVE COMPRESSION ANALYSIS (3-4 Candles)
         recent_bars = closed[-4:]
         comp_high = max(c['high'] for c in recent_bars)
         comp_low = min(c['low'] for c in recent_bars)
@@ -530,13 +527,11 @@ class MasterCommanderEngine:
         curr_price = float(live['close'])
         live_open = float(live['open'])
 
-        # EMA9 Alignment
         closes = [c['close'] for c in closed]
         k9 = 2 / 10
         ema9 = closes[0]
         for cl in closes[1:]: ema9 = (cl * k9) + (ema9 * (1 - k9))
 
-        # VOLUME EXPANSION FILTER
         avg_vol = sum(c['vol'] for c in closed[-8:]) / 8.0
         has_volume = (c0['vol'] >= avg_vol * 1.15) or (live['vol'] >= avg_vol * 0.6)
 
@@ -544,7 +539,6 @@ class MasterCommanderEngine:
         if candle_run > 110.0:
             return
 
-        # PHASE 3 GUARDS: Funding Rate & Order Book Depth Confirmations
         is_funding_safe_long = funding_rate <= 0.0006
         is_funding_safe_short = funding_rate >= -0.0006
         has_bid_support = book_imbalance >= 0.75
@@ -581,6 +575,7 @@ class MasterCommanderEngine:
 
         if is_bottom_pump:
             self.last_trade_bar = live['time']
+            self.locked_closing_id = None
             risk = 110.0
             sl = round(entry - risk, 1)
             tp1 = round(entry + 110.0, 1)
@@ -596,6 +591,7 @@ class MasterCommanderEngine:
 
         elif is_top_dump:
             self.last_trade_bar = live['time']
+            self.locked_closing_id = None
             risk = 110.0
             sl = round(entry + risk, 1)
             tp1 = round(entry - 110.0, 1)
@@ -647,7 +643,7 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_telegram_alert("⚡ [SYSTEM READY] Phase 1 + 2 + 3 + 4 (AI/ML Predictive Core) Online!")
+    send_telegram_alert("⚡ [SYSTEM READY] Hard Bar Lock Active! Over-trading Shield Online.")
     return cmd
 
 launch_full_architecture()
@@ -759,7 +755,7 @@ terminal_html = """<!DOCTYPE html>
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">PHASE 4 AI</span>
+            ⚡ QUANT RADAR <span class="badge-scan">SYNC ON</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -792,8 +788,8 @@ terminal_html = """<!DOCTYPE html>
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">AI CONFIDENCE</span>
-                <div class="cell-body" id="htf-status" style="color:#00e676;">PHASE 4 AI ML ⚡</div>
+                <span class="cell-head">LOCK SYSTEM</span>
+                <div class="cell-body" id="htf-status" style="color:#00e676;">2-BAR SHIELD 🛡️</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TP1 TARGET</span>
@@ -1075,6 +1071,15 @@ terminal_html = """<!DOCTYPE html>
 
         syncCandles();
         window.onresize = () => chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
+
+        // SILENT AUTO-REFRESH INTERVAL (Har 10s me Vault aur UI update bina screen flick ke)
+        setInterval(() => {
+            try {
+                if (document.getElementById('modal-bg').style.display !== 'flex') {
+                    window.parent.location.reload();
+                }
+            } catch(e) {}
+        }, 10000);
     </script>
 </body>
 </html>"""
