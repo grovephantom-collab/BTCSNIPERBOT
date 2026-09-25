@@ -11,7 +11,7 @@ import math
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: FULL ARCHITECTURE (PHASE 1 + 2 + 3 + 4 + HARD BAR LOCK)
+# PRO QUANT ENGINE: FULL ARCHITECTURE (PHASE 1-4 + HARD BAR LOCK + DYNAMIC ATR)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -20,7 +20,7 @@ DB_FILE = "sniper_vault.db"
 SHARED_MEMORY_FILE = "sniper_brain_data.json"
 WATCHDOG_LOCK = "overseer_watchdog.pid"
 
-# --- 1. LOGGING & DATABASE (VAULT) ---
+# --- 1. LOGGING & DATABASE (VAULT WITH DATABASE-LEVEL UNIQUE LOCK) ---
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cur = conn.cursor()
@@ -35,7 +35,8 @@ def init_db():
             result TEXT,
             pts TEXT,
             pnl_usd TEXT,
-            qty REAL
+            qty REAL,
+            UNIQUE(timestamp, symbol, trade_type, entry, result)
         )
     """)
     cur.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
@@ -64,6 +65,39 @@ def set_db_state(key, value):
         conn.close()
     except: pass
 
+def check_db_risk_guard():
+    """Checks 3-consecutive losses and daily loss limit directly from SQLite to guarantee 100% enforcement."""
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=5)
+        cur = conn.cursor()
+        
+        # 1. Check Consecutive SL Hits from last records
+        cur.execute("SELECT result FROM trades ORDER BY id DESC LIMIT 5")
+        rows = cur.fetchall()
+        consecutive_losses = 0
+        for r in rows:
+            res = r[0].upper()
+            if "SL HIT" in res:
+                consecutive_losses += 1
+            else:
+                break
+        
+        # 2. Check Today's Total Loss Sum
+        today_date = datetime.now().strftime("%Y-%m-%d")
+        cur.execute("SELECT pnl_usd FROM trades WHERE timestamp LIKE ? AND result LIKE '%SL HIT%'", (f"{today_date}%",))
+        sl_rows = cur.fetchall()
+        daily_loss_sum = 0.0
+        for r in sl_rows:
+            try:
+                val = float(str(r[0]).replace("$", "").replace("(", "").replace(")", "").replace("-", "").strip())
+                daily_loss_sum += val
+            except: pass
+            
+        conn.close()
+        return consecutive_losses, daily_loss_sum
+    except:
+        return 0, 0.0
+
 # --- UI ACTION DISPATCHERS ---
 if st.query_params.get("clear_vault") == "confirmed":
     try:
@@ -80,14 +114,14 @@ if st.query_params.get("clear_vault") == "confirmed":
 if st.query_params.get("force_close") == "confirmed":
     act = get_db_state("active_trade")
     if act and isinstance(act, dict) and 'entry' in act:
-        now_str = datetime.now().strftime("%H:%M")
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         e = float(act['entry'])
         q = float(act.get('qty', 0.01))
         try:
             conn = sqlite3.connect(DB_FILE, timeout=5)
             cur = conn.cursor()
             cur.execute("""
-                INSERT INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
+                INSERT OR IGNORE INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
                 VALUES (?,?,?,?,?,?,?,?,?)
             """, (now_str, "BTCUSDT", act['type'], e, e, "MANUAL FORCE CLOSE ⚠️", "0", "$0.00", q))
             conn.commit()
@@ -283,14 +317,16 @@ class MasterCommanderEngine:
         self.last_trade_bar = 0
         self.last_exit_bar = 0
         self.locked_closing_id = None
+        self.tp1_locked = False
+        self.sl_locked = False
 
     def record_to_vault(self, t_type, entry, exit_price, result, pts, pnl_usd, qty):
-        now_str = datetime.now().strftime("%H:%M")
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         try:
             conn = sqlite3.connect(DB_FILE, timeout=5)
             cur = conn.cursor()
             cur.execute("""
-                INSERT INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
+                INSERT OR IGNORE INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
                 VALUES (?,?,?,?,?,?,?,?,?)
             """, (now_str, "BTCUSDT", t_type, float(entry), float(exit_price), result, str(pts), str(pnl_usd), float(qty)))
             conn.commit()
@@ -306,27 +342,25 @@ class MasterCommanderEngine:
         curr_price = float(live['close'])
         entry = float(t['entry'])
 
-        if 'tp1' not in t or not t['tp1']:
-            t['tp1'] = round(entry + 110.0 if t['type'] == 'LONG' else entry - 110.0, 1)
-        if 'tp2' not in t or not t['tp2']:
-            t['tp2'] = round(entry + 220.0 if t['type'] == 'LONG' else entry - 220.0, 1)
-
         mem = read_shared_memory()
         c0 = closed[-1]
 
         # LONG POSITION MONITOR
         if t['type'] == 'LONG':
-            if not t.get('tp1_hit', False) and curr_price >= t['tp1']:
+            # Dynamic TP1 Hit Check with Strict RAM + DB Lock
+            if not t.get('tp1_hit', False) and not self.tp1_locked and curr_price >= t['tp1']:
+                self.tp1_locked = True
                 t['tp1_hit'] = True
                 t['be_hit'] = True
                 t['tp1_bar_time'] = live['time']
                 t['sl'] = round(entry + 10.0, 1)
                 half_qty = round(qty * 0.5, 4)
-                half_usd = round(110.0 * half_qty, 2)
+                booked_pts = round(t['tp1'] - entry, 1)
+                half_usd = round(booked_pts * half_qty, 2)
                 
                 set_db_state("active_trade", t)
-                self.record_to_vault("LONG", entry, t['tp1'], "TP1 BOOK (50%) 🎯", "+110", f"+${half_usd:.2f}", half_qty)
-                send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
+                self.record_to_vault("LONG", entry, t['tp1'], "TP1 BOOK (50%) 🎯", f"+{booked_pts:.0f}", f"+${half_usd:.2f}", half_qty)
+                send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+{booked_pts:.0f} pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
             elif t.get('tp1_hit', False) and (curr_price < t['tp2']) and (curr_price > float(t['sl'])):
                 bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
@@ -334,6 +368,8 @@ class MasterCommanderEngine:
                 
                 if is_stalled:
                     self.locked_closing_id = curr_trade_ref
+                    self.tp1_locked = False
+                    self.sl_locked = False
                     set_db_state("active_trade", None)
                     set_db_state("last_exit_epoch", time.time())
                     self.last_exit_bar = live['time']
@@ -344,13 +380,13 @@ class MasterCommanderEngine:
                     self.record_to_vault("LONG", entry, curr_price, "CHOP EXIT ⚡", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
                     
                     self.last_trade_bar = live['time']
-                    mem['last_trade_time'] = time.time()
-                    write_shared_memory(mem)
                     send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC LONG\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
                     return
 
             elif curr_price >= t['tp2']:
                 self.locked_closing_id = curr_trade_ref
+                self.tp1_locked = False
+                self.sl_locked = False
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
                 self.last_exit_bar = live['time']
@@ -361,13 +397,13 @@ class MasterCommanderEngine:
                 self.record_to_vault("LONG", entry, t['tp2'], "TP2 FULL HIT 🔥", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
                 
                 self.last_trade_bar = live['time']
-                mem['consecutive_losses'] = 0
-                mem['last_trade_time'] = time.time()
-                write_shared_memory(mem)
                 send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
             elif curr_price <= float(t['sl']):
+                if self.sl_locked: return
+                self.sl_locked = True
                 self.locked_closing_id = curr_trade_ref
+                self.tp1_locked = False
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
                 self.last_exit_bar = live['time']
@@ -381,27 +417,26 @@ class MasterCommanderEngine:
                     loss_pts = round(entry - t['sl'], 1)
                     loss_usd = round(loss_pts * qty, 2)
                     self.record_to_vault("LONG", entry, t['sl'], "SL HIT 🛑", f"-{loss_pts:.0f}", f"-${loss_usd:.2f}", qty)
-                    mem['consecutive_losses'] = mem.get('consecutive_losses', 0) + 1
-                    mem['daily_loss_sum'] = mem.get('daily_loss_sum', 0.0) + loss_usd
                     send_telegram_alert(f"🛑 [EXIT] BTC LONG SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
                 
                 self.last_trade_bar = live['time']
-                mem['last_trade_time'] = time.time()
-                write_shared_memory(mem)
 
         # SHORT POSITION MONITOR
         elif t['type'] == 'SHORT':
-            if not t.get('tp1_hit', False) and curr_price <= t['tp1']:
+            # Dynamic TP1 Hit Check with Strict RAM + DB Lock
+            if not t.get('tp1_hit', False) and not self.tp1_locked and curr_price <= t['tp1']:
+                self.tp1_locked = True
                 t['tp1_hit'] = True
                 t['be_hit'] = True
                 t['tp1_bar_time'] = live['time']
                 t['sl'] = round(entry - 10.0, 1)
                 half_qty = round(qty * 0.5, 4)
-                half_usd = round(110.0 * half_qty, 2)
+                booked_pts = round(entry - t['tp1'], 1)
+                half_usd = round(booked_pts * half_qty, 2)
                 
                 set_db_state("active_trade", t)
-                self.record_to_vault("SHORT", entry, t['tp1'], "TP1 BOOK (50%) 🎯", "+110", f"+${half_usd:.2f}", half_qty)
-                send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
+                self.record_to_vault("SHORT", entry, t['tp1'], "TP1 BOOK (50%) 🎯", f"+{booked_pts:.0f}", f"+${half_usd:.2f}", half_qty)
+                send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+{booked_pts:.0f} pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
             elif t.get('tp1_hit', False) and (curr_price > t['tp2']) and (curr_price < float(t['sl'])):
                 bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
@@ -409,6 +444,8 @@ class MasterCommanderEngine:
                 
                 if is_stalled:
                     self.locked_closing_id = curr_trade_ref
+                    self.tp1_locked = False
+                    self.sl_locked = False
                     set_db_state("active_trade", None)
                     set_db_state("last_exit_epoch", time.time())
                     self.last_exit_bar = live['time']
@@ -419,13 +456,13 @@ class MasterCommanderEngine:
                     self.record_to_vault("SHORT", entry, curr_price, "CHOP EXIT ⚡", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
                     
                     self.last_trade_bar = live['time']
-                    mem['last_trade_time'] = time.time()
-                    write_shared_memory(mem)
                     send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC SHORT\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
                     return
 
             elif curr_price <= t['tp2']:
                 self.locked_closing_id = curr_trade_ref
+                self.tp1_locked = False
+                self.sl_locked = False
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
                 self.last_exit_bar = live['time']
@@ -436,13 +473,13 @@ class MasterCommanderEngine:
                 self.record_to_vault("SHORT", entry, t['tp2'], "TP2 FULL HIT 🔥", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
                 
                 self.last_trade_bar = live['time']
-                mem['consecutive_losses'] = 0
-                mem['last_trade_time'] = time.time()
-                write_shared_memory(mem)
                 send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
             elif curr_price >= float(t['sl']):
+                if self.sl_locked: return
+                self.sl_locked = True
                 self.locked_closing_id = curr_trade_ref
+                self.tp1_locked = False
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
                 self.last_exit_bar = live['time']
@@ -456,41 +493,33 @@ class MasterCommanderEngine:
                     loss_pts = round(t['sl'] - entry, 1)
                     loss_usd = round(loss_pts * qty, 2)
                     self.record_to_vault("SHORT", entry, t['sl'], "SL HIT 🛑", f"-{loss_pts:.0f}", f"-${loss_usd:.2f}", qty)
-                    mem['consecutive_losses'] = mem.get('consecutive_losses', 0) + 1
-                    mem['daily_loss_sum'] = mem.get('daily_loss_sum', 0.0) + loss_usd
                     send_telegram_alert(f"🛑 [EXIT] BTC SHORT SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
                 
                 self.last_trade_bar = live['time']
-                mem['last_trade_time'] = time.time()
-                write_shared_memory(mem)
 
-    # --- ADVANCED SIGNAL LOGIC ---
+    # --- ADVANCED SIGNAL LOGIC WITH STRICT DATABASE RISK SHIELDS ---
     def evaluate_market_moves(self, closed, live):
         if get_db_state("kill_switch_active", False):
             return
 
+        # 1. HARD 15-MINUTE (900 SEC) POST-EXIT COOLDOWN TO KILL OVER-TRADING
+        last_exit_epoch = get_db_state("last_exit_epoch", 0)
+        if time.time() - last_exit_epoch < 900:
+            return
+
         if self.last_exit_bar > 0:
             bars_since_exit = (live['time'] - self.last_exit_bar) // 300000
-            if bars_since_exit < 2:
+            if bars_since_exit < 3:
                 return
 
-        last_exit_epoch = get_db_state("last_exit_epoch", 0)
-        if time.time() - last_exit_epoch < 600:
+        # 2. REAL-TIME SQLITE RISK GATE: 3 CONSECUTIVE LOSSES & -$10 LIMIT
+        consec_losses, daily_loss = check_db_risk_guard()
+        if daily_loss >= 10.0:
             return
 
-        mem = read_shared_memory()
-        today = datetime.now().strftime("%Y-%m-%d")
-        if mem.get("current_day") != today:
-            mem["current_day"] = today
-            mem["daily_loss_sum"] = 0.0
-            mem["consecutive_losses"] = 0
-            write_shared_memory(mem)
-
-        if mem.get("daily_loss_sum", 0.0) >= 10.0:
-            return
-
-        if mem.get('consecutive_losses', 0) >= 3:
-            if time.time() - mem.get('last_trade_time', 0) < 7200:
+        if consec_losses >= 3:
+            # 2 Hours Hard Pause after 3 consecutive SL hits
+            if time.time() - last_exit_epoch < 7200:
                 return
 
         if live['time'] <= self.last_trade_bar:
@@ -500,6 +529,7 @@ class MasterCommanderEngine:
         if candle_elapsed < 45.0:
             return
 
+        mem = read_shared_memory()
         sent_label = mem.get('sentiment_label', 'NEUTRAL')
         htf_trend = mem.get('htf_trend', 'NEUTRAL')
         funding_rate = mem.get('funding_rate', 0.0)
@@ -509,6 +539,29 @@ class MasterCommanderEngine:
 
         if ai_score < 65:
             return
+
+        # ACCUMULATED MOVE RANGE FILTER
+        recent_12 = closed[-12:]
+        h12 = max(c['high'] for c in recent_12)
+        l12 = min(c['low'] for c in recent_12)
+        total_hour_run = h12 - l12
+        max_run_limit = max(450.0, atr_val * 7.5)
+
+        curr_price = float(live['close'])
+        is_dump_exhausted = (curr_price <= l12 + 60.0) and (total_hour_run > max_run_limit)
+        is_pump_exhausted = (curr_price >= h12 - 60.0) and (total_hour_run > max_run_limit)
+
+        if is_dump_exhausted or is_pump_exhausted:
+            return
+
+        # CANDLE BODY CLOSE VS WICK FILTER
+        c0 = closed[-1]
+        c0_range = max(1.0, c0['high'] - c0['low'])
+        c0_upper_wick = c0['high'] - max(c0['open'], c0['close'])
+        c0_lower_wick = min(c0['open'], c0['close']) - c0['low']
+
+        has_bearish_rejection_wick = (c0_lower_wick / c0_range) >= 0.40
+        has_bullish_rejection_wick = (c0_upper_wick / c0_range) >= 0.40
 
         min_squeeze = max(35.0, atr_val * 0.7)
         max_squeeze = min(160.0, atr_val * 3.2)
@@ -523,8 +576,6 @@ class MasterCommanderEngine:
         if squeeze_range < min_squeeze or squeeze_range > max_squeeze:
             return
 
-        c0 = closed[-1]
-        curr_price = float(live['close'])
         live_open = float(live['open'])
 
         closes = [c['close'] for c in closed]
@@ -553,7 +604,9 @@ class MasterCommanderEngine:
             (sent_label != 'FEAR') and
             (htf_trend != 'BEARISH') and
             is_funding_safe_long and
-            has_bid_support
+            has_bid_support and
+            not is_pump_exhausted and
+            not has_bullish_rejection_wick
         )
 
         is_top_dump = (
@@ -565,7 +618,9 @@ class MasterCommanderEngine:
             (sent_label != 'GREED') and
             (htf_trend != 'BULLISH') and
             is_funding_safe_short and
-            has_ask_pressure
+            has_ask_pressure and
+            not is_dump_exhausted and
+            not has_bearish_rejection_wick
         )
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
@@ -573,37 +628,44 @@ class MasterCommanderEngine:
         entry = round(curr_price, 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
+        # DYNAMIC ATR TARGETS & STOP LOSS
+        dyn_sl_pts = round(max(45.0, min(160.0, atr_val * 1.5)), 1)
+        dyn_tp1_pts = round(max(40.0, min(140.0, atr_val * 1.2)), 1)
+        dyn_tp2_pts = round(max(80.0, min(280.0, atr_val * 2.4)), 1)
+
         if is_bottom_pump:
             self.last_trade_bar = live['time']
             self.locked_closing_id = None
-            risk = 110.0
-            sl = round(entry - risk, 1)
-            tp1 = round(entry + 110.0, 1)
-            tp2 = round(entry + 220.0, 1)
+            self.tp1_locked = False
+            self.sl_locked = False
+            sl = round(entry - dyn_sl_pts, 1)
+            tp1 = round(entry + dyn_tp1_pts, 1)
+            tp2 = round(entry + dyn_tp2_pts, 1)
 
             trade_obj = {
                 'type': 'LONG', 'entry': entry, 'sl': sl, 
-                'tp1': tp1, 'tp2': tp2, 'risk': risk, 
+                'tp1': tp1, 'tp2': tp2, 'risk': dyn_sl_pts, 
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY BREAKOUT CONFIRMED] BTC LONG\n1H Bias: {htf_trend} 🟢 | AI Confidence: {ai_score}%\nDepth: {book_imbalance}x | ATR: {atr_val} pts\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [DYNAMIC ATR BREAKOUT] BTC LONG\n1H Bias: {htf_trend} 🟢 | AI Confidence: {ai_score}%\nDepth: {book_imbalance}x | ATR: {atr_val} pts\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+{dyn_tp1_pts:.0f} pts)\n🎯 TP2 (50%): ${tp2:.1f} (+{dyn_tp2_pts:.0f} pts)\n📦 Qty: {qty} BTC")
 
         elif is_top_dump:
             self.last_trade_bar = live['time']
             self.locked_closing_id = None
-            risk = 110.0
-            sl = round(entry + risk, 1)
-            tp1 = round(entry - 110.0, 1)
-            tp2 = round(entry - 220.0, 1)
+            self.tp1_locked = False
+            self.sl_locked = False
+            sl = round(entry + dyn_sl_pts, 1)
+            tp1 = round(entry - dyn_tp1_pts, 1)
+            tp2 = round(entry - dyn_tp2_pts, 1)
 
             trade_obj = {
                 'type': 'SHORT', 'entry': entry, 'sl': sl, 
-                'tp1': tp1, 'tp2': tp2, 'risk': risk, 
+                'tp1': tp1, 'tp2': tp2, 'risk': dyn_sl_pts, 
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY BREAKDOWN CONFIRMED] BTC SHORT\n1H Bias: {htf_trend} 🔴 | AI Confidence: {ai_score}%\nDepth: {book_imbalance}x | ATR: {atr_val} pts\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [DYNAMIC ATR BREAKDOWN] BTC SHORT\n1H Bias: {htf_trend} 🔴 | AI Confidence: {ai_score}%\nDepth: {book_imbalance}x | ATR: {atr_val} pts\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+{dyn_tp1_pts:.0f} pts)\n🎯 TP2 (50%): ${tp2:.1f} (+{dyn_tp2_pts:.0f} pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -643,7 +705,7 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_telegram_alert("⚡ [SYSTEM READY] Hard Bar Lock Active! Over-trading Shield Online.")
+    send_telegram_alert("⚡ [SYSTEM READY] Hard SQLite Risk Gate & Anti-Duplicate Active!")
     return cmd
 
 launch_full_architecture()
@@ -664,7 +726,7 @@ def render_live_dashboard():
     cur = conn.cursor()
     cur.execute("SELECT timestamp, trade_type, entry, result, pts, pnl_usd FROM trades ORDER BY id DESC")
     rows = cur.fetchall()
-    history_list = [{"time": r[0], "type": r[1], "entry": r[2], "result": r[3], "pts": r[4], "pnl_usd": r[5]} for r in rows]
+    history_list = [{"time": r[0].split(" ")[-1] if " " in r[0] else r[0], "type": r[1], "entry": r[2], "result": r[3], "pts": r[4], "pnl_usd": r[5]} for r in rows]
 
     cur.execute("SELECT COUNT(*), SUM(CASE WHEN result LIKE '%TP%' OR result LIKE '%BE%' OR result LIKE '%CHOP%' THEN 1 ELSE 0 END) FROM trades")
     t_count, win_count = cur.fetchone()
@@ -673,15 +735,6 @@ def render_live_dashboard():
     win_rate = round((win_count / t_count) * 100, 1) if t_count > 0 else 0.0
     active_trade = get_db_state("active_trade")
     kill_switch = get_db_state("kill_switch_active", False)
-
-    if active_trade and isinstance(active_trade, dict) and 'entry' in active_trade:
-        e = float(active_trade['entry'])
-        is_long = active_trade.get('type') == 'LONG'
-        if 'tp1' not in active_trade or not active_trade['tp1']:
-            active_trade['tp1'] = round(e + 110.0 if is_long else e - 110.0, 1)
-        if 'tp2' not in active_trade or not active_trade['tp2']:
-            active_trade['tp2'] = round(e + 220.0 if is_long else e - 220.0, 1)
-        set_db_state("active_trade", active_trade)
 
     cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
 
@@ -757,12 +810,12 @@ def render_live_dashboard():
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">LIVE</span>
+            ⚡ QUANT RADAR <span class="badge-scan">PRO DYNAMIC</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
-        <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
-        <div class="stat-card"><div class="stat-label">TP1 (50%)</div><div id="disp-tp1" class="stat-val" style="color:#00e676;">--</div></div>
-        <div class="stat-card"><div class="stat-label">TP2 (50%)</div><div id="disp-tp2" class="stat-val" style="color:#00b0ff;">--</div></div>
+        <div class="stat-card"><div class="stat-label">DYN SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
+        <div class="stat-card"><div class="stat-label">DYN TP1</div><div id="disp-tp1" class="stat-val" style="color:#00e676;">--</div></div>
+        <div class="stat-card"><div class="stat-label">DYN TP2</div><div id="disp-tp2" class="stat-val" style="color:#00b0ff;">--</div></div>
         <button class="btn-compact" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
         <button class="btn-compact" onclick="window.parent.location.reload()">🔄</button>
         <div style="margin-left: auto; display: flex; align-items: center;">
@@ -791,15 +844,15 @@ def render_live_dashboard():
         <div class="bottom-bar">
             <div class="metric-cell">
                 <span class="cell-head">LOCK SYSTEM</span>
-                <div class="cell-body" id="htf-status" style="color:#00e676;">2-BAR SHIELD 🛡️</div>
+                <div class="cell-body" id="htf-status" style="color:#00e676;">SQLITE RISK GATE 🛡️</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TP1 TARGET</span>
-                <div class="cell-body" style="color:#00e676;">+110 PTS (50%)</div>
+                <div class="cell-body" style="color:#00e676;">DYNAMIC (50%)</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TP2 TARGET</span>
-                <div class="cell-body" style="color:#38bdf8;">+220 PTS RUN</div>
+                <div class="cell-body" style="color:#38bdf8;">DYNAMIC RUN</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">SCAN STATUS</span>
@@ -940,10 +993,9 @@ def render_live_dashboard():
             if (activeTrade && activeTrade.entry) {
                 let entryVal = parseFloat(activeTrade.entry);
                 let slVal = parseFloat(activeTrade.sl);
+                let tp1Val = parseFloat(activeTrade.tp1);
+                let tp2Val = parseFloat(activeTrade.tp2);
                 let isLong = activeTrade.type === "LONG";
-
-                let tp1Val = activeTrade.tp1 ? parseFloat(activeTrade.tp1) : (isLong ? (entryVal + 110.0) : (entryVal - 110.0));
-                let tp2Val = activeTrade.tp2 ? parseFloat(activeTrade.tp2) : (isLong ? (entryVal + 220.0) : (entryVal - 220.0));
 
                 lineEntry = series.createPriceLine({ 
                     price: entryVal, color: '#38bdf8', lineWidth: 2, 
@@ -1045,7 +1097,7 @@ def render_live_dashboard():
                 if (activeTrade && activeTrade.entry) {
                     let isLong = activeTrade.type === "LONG";
                     let slVal = parseFloat(activeTrade.sl);
-                    let tp2Val = activeTrade.tp2 ? parseFloat(activeTrade.tp2) : (isLong ? (activeTrade.entry + 220) : (activeTrade.entry - 220));
+                    let tp2Val = parseFloat(activeTrade.tp2);
 
                     if (isLong && (price <= slVal || price >= tp2Val)) {
                         activeTrade = null;
