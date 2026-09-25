@@ -7,11 +7,10 @@ import requests
 import json
 import os
 import uuid
-import math
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: 5-ENGINE CORE + PHASE 1 RISK + PHASE 2 HTF & EARLY DETECTION
+# PRO QUANT ENGINE: PHASE 1 (RISK) + PHASE 2 (HTF) + PHASE 3 (MICRO-DATA FEEDS)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -64,7 +63,7 @@ def set_db_state(key, value):
         conn.close()
     except: pass
 
-# --- PHASE 1 UI URL ACTION DISPATCHERS ---
+# --- UI ACTION DISPATCHERS ---
 if st.query_params.get("clear_vault") == "confirmed":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -94,6 +93,7 @@ if st.query_params.get("force_close") == "confirmed":
             conn.close()
         except: pass
         set_db_state("active_trade", None)
+        set_db_state("last_exit_epoch", time.time())
         try:
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
             requests.post(url, json={"chat_id": str(CHAT_ID).strip(), "text": f"⚠️ [MANUAL OVERRIDE] Position on {act['type']} Force Closed from Dashboard!"}, timeout=3)
@@ -117,7 +117,6 @@ if st.query_params.get("toggle_emergency") == "confirmed":
     st.query_params.clear()
     st.rerun()
 
-# ZERO-DELAY ASYNC TELEGRAM DISPATCHER
 def _send_tg_worker(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": str(CHAT_ID).strip(), "text": msg}
@@ -135,7 +134,9 @@ def read_shared_memory():
         "last_heartbeat": time.time(), "consecutive_losses": 0, 
         "last_trade_time": 0, "daily_loss_sum": 0.0, 
         "current_day": datetime.now().strftime("%Y-%m-%d"),
-        "htf_trend": "NEUTRAL"
+        "htf_trend": "NEUTRAL",
+        "funding_rate": 0.0,
+        "book_imbalance": 1.0
     }
     if not os.path.exists(SHARED_MEMORY_FILE):
         return default_mem
@@ -149,11 +150,11 @@ def write_shared_memory(data):
         with open(SHARED_MEMORY_FILE, "w") as f: json.dump(data, f)
     except: pass
 
-# --- 3. DATA & NEWS SENTIMENT ENGINE (WITH PHASE 2 HTF 1H BIAS) ---
+# --- 3. DATA, SENTIMENT & PHASE 3 MICRO-DATA ENGINE ---
 def run_data_news_engine():
     while True:
         try:
-            # Fear & Greed API
+            # 1. Fear & Greed API
             r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3)
             score = 50
             label = "NEUTRAL"
@@ -161,14 +162,13 @@ def run_data_news_engine():
                 score = int(r.json()['data'][0]['value'])
                 label = "GREED" if score >= 60 else ("FEAR" if score <= 40 else "NEUTRAL")
             
-            # Phase 2: HTF (1H) Trend Direction Fetcher
+            # 2. Phase 2: HTF (1H) Trend Direction Fetcher
             htf_trend = "NEUTRAL"
             try:
                 r_htf = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=30", timeout=3)
                 if r_htf.status_code == 200:
                     raw_htf = r_htf.json()
                     closes = [float(x[4]) for x in raw_htf]
-                    # Calculate 1H EMA20
                     k = 2 / (20 + 1)
                     ema20 = closes[0]
                     for cl in closes[1:]:
@@ -180,14 +180,36 @@ def run_data_news_engine():
                         htf_trend = "BEARISH"
             except: pass
 
+            # 3. PHASE 3: Funding Rate Fetcher (Futures Sentiment)
+            funding_rate = 0.0
+            try:
+                r_fund = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT", timeout=3)
+                if r_fund.status_code == 200:
+                    funding_rate = float(r_fund.json().get('lastFundingRate', 0.0))
+            except: pass
+
+            # 4. PHASE 3: L2 Order Book Depth Imbalance (Top 20 Bids vs Asks)
+            book_imbalance = 1.0
+            try:
+                r_depth = requests.get("https://data-api.binance.vision/api/v3/depth?symbol=BTCUSDT&limit=20", timeout=3)
+                if r_depth.status_code == 200:
+                    depth_data = r_depth.json()
+                    total_bids = sum(float(x[1]) for x in depth_data.get('bids', []))
+                    total_asks = sum(float(x[1]) for x in depth_data.get('asks', []))
+                    if total_asks > 0:
+                        book_imbalance = round(total_bids / total_asks, 2)
+            except: pass
+
             mem = read_shared_memory()
             mem['sentiment_score'] = score
             mem['sentiment_label'] = label
             mem['htf_trend'] = htf_trend
+            mem['funding_rate'] = funding_rate
+            mem['book_imbalance'] = book_imbalance
             mem['last_heartbeat'] = time.time()
             write_shared_memory(mem)
         except: pass
-        time.sleep(60)
+        time.sleep(45)
 
 # --- 4. FAST BINANCE DATA FETCHER ---
 def fetch_binance_klines():
@@ -214,8 +236,7 @@ class MasterCommanderEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
         self.last_trade_bar = 0
-        self.last_exit_time = 0
-        self.is_closing = False
+        self.locked_closing_id = None
 
     def record_to_vault(self, t_type, entry, exit_price, result, pts, pnl_usd, qty):
         now_str = datetime.now().strftime("%H:%M")
@@ -231,7 +252,8 @@ class MasterCommanderEngine:
         except: pass
 
     def manage_position(self, t, live, closed):
-        if self.is_closing:
+        curr_trade_ref = f"{t.get('type')}_{t.get('entry')}"
+        if self.locked_closing_id == curr_trade_ref:
             return
 
         qty = t.get("qty", 0.01)
@@ -248,7 +270,6 @@ class MasterCommanderEngine:
 
         # LONG POSITION MONITOR
         if t['type'] == 'LONG':
-            # 1. TP1 Trigger (+110 pts) -> 50% Profit Book + Breakeven Shift
             if not t.get('tp1_hit', False) and curr_price >= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
@@ -257,49 +278,53 @@ class MasterCommanderEngine:
                 half_qty = round(qty * 0.5, 4)
                 half_usd = round(110.0 * half_qty, 2)
                 
-                self.record_to_vault("LONG", entry, t['tp1'], "TP1 BOOK (50%) 🎯", "+110", f"+${half_usd:.2f}", half_qty)
                 set_db_state("active_trade", t)
+                self.record_to_vault("LONG", entry, t['tp1'], "TP1 BOOK (50%) 🎯", "+110", f"+${half_usd:.2f}", half_qty)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # 2. MID-WAY CHOP / STALL GUARD
             elif t.get('tp1_hit', False) and (curr_price < t['tp2']) and (curr_price > float(t['sl'])):
                 bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
                 is_stalled = (bars_passed >= 2) and (curr_price < c0['low']) and (c0['close'] < c0['open'])
                 
                 if is_stalled:
-                    self.is_closing = True
+                    self.locked_closing_id = curr_trade_ref
+                    set_db_state("active_trade", None)
+                    set_db_state("last_exit_epoch", time.time())
+                    
                     rem_qty = round(qty * 0.5, 4)
                     pts = round(curr_price - entry, 1)
                     rem_usd = round(pts * rem_qty, 2)
                     self.record_to_vault("LONG", entry, curr_price, "CHOP EXIT ⚡", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
-                    set_db_state("active_trade", None)
-                    self.last_exit_time = time.time()
+                    
                     self.last_trade_bar = live['time']
                     mem['last_trade_time'] = time.time()
                     write_shared_memory(mem)
-                    self.is_closing = False
+                    self.locked_closing_id = None
                     send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC LONG\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
                     return
 
-            # 3. TP2 Full Hit (+220 pts)
             elif curr_price >= t['tp2']:
-                self.is_closing = True
+                self.locked_closing_id = curr_trade_ref
+                set_db_state("active_trade", None)
+                set_db_state("last_exit_epoch", time.time())
+
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(t['tp2'] - entry, 1)
                 rem_usd = round(pts * rem_qty, 2)
                 self.record_to_vault("LONG", entry, t['tp2'], "TP2 FULL HIT 🔥", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
-                set_db_state("active_trade", None)
-                self.last_exit_time = time.time()
+                
                 self.last_trade_bar = live['time']
                 mem['consecutive_losses'] = 0
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
-                self.is_closing = False
+                self.locked_closing_id = None
                 send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
-            # 4. Breakeven or Stop Loss Exit
             elif curr_price <= float(t['sl']):
-                self.is_closing = True
+                self.locked_closing_id = curr_trade_ref
+                set_db_state("active_trade", None)
+                set_db_state("last_exit_epoch", time.time())
+
                 if t.get('tp1_hit', False):
                     rem_qty = round(qty * 0.5, 4)
                     rem_usd = round(10.0 * rem_qty, 2)
@@ -313,16 +338,13 @@ class MasterCommanderEngine:
                     mem['daily_loss_sum'] = mem.get('daily_loss_sum', 0.0) + loss_usd
                     send_telegram_alert(f"🛑 [EXIT] BTC LONG SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
                 
-                set_db_state("active_trade", None)
-                self.last_exit_time = time.time()
                 self.last_trade_bar = live['time']
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
-                self.is_closing = False
+                self.locked_closing_id = None
 
         # SHORT POSITION MONITOR
         elif t['type'] == 'SHORT':
-            # 1. TP1 Trigger (+110 pts Drop) -> 50% Profit Book + Breakeven Shift
             if not t.get('tp1_hit', False) and curr_price <= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
@@ -331,49 +353,53 @@ class MasterCommanderEngine:
                 half_qty = round(qty * 0.5, 4)
                 half_usd = round(110.0 * half_qty, 2)
                 
-                self.record_to_vault("SHORT", entry, t['tp1'], "TP1 BOOK (50%) 🎯", "+110", f"+${half_usd:.2f}", half_qty)
                 set_db_state("active_trade", t)
+                self.record_to_vault("SHORT", entry, t['tp1'], "TP1 BOOK (50%) 🎯", "+110", f"+${half_usd:.2f}", half_qty)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
-            # 2. MID-WAY CHOP / STALL GUARD
             elif t.get('tp1_hit', False) and (curr_price > t['tp2']) and (curr_price < float(t['sl'])):
                 bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
                 is_stalled = (bars_passed >= 2) and (curr_price > c0['high']) and (c0['close'] > c0['open'])
                 
                 if is_stalled:
-                    self.is_closing = True
+                    self.locked_closing_id = curr_trade_ref
+                    set_db_state("active_trade", None)
+                    set_db_state("last_exit_epoch", time.time())
+
                     rem_qty = round(qty * 0.5, 4)
                     pts = round(entry - curr_price, 1)
                     rem_usd = round(pts * rem_qty, 2)
                     self.record_to_vault("SHORT", entry, curr_price, "CHOP EXIT ⚡", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
-                    set_db_state("active_trade", None)
-                    self.last_exit_time = time.time()
+                    
                     self.last_trade_bar = live['time']
                     mem['last_trade_time'] = time.time()
                     write_shared_memory(mem)
-                    self.is_closing = False
+                    self.locked_closing_id = None
                     send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC SHORT\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
                     return
 
-            # 3. TP2 Full Hit (+220 pts Drop)
             elif curr_price <= t['tp2']:
-                self.is_closing = True
+                self.locked_closing_id = curr_trade_ref
+                set_db_state("active_trade", None)
+                set_db_state("last_exit_epoch", time.time())
+
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(entry - t['tp2'], 1)
                 rem_usd = round(pts * rem_qty, 2)
                 self.record_to_vault("SHORT", entry, t['tp2'], "TP2 FULL HIT 🔥", f"+{pts:.0f}", f"+${rem_usd:.2f}", rem_qty)
-                set_db_state("active_trade", None)
-                self.last_exit_time = time.time()
+                
                 self.last_trade_bar = live['time']
                 mem['consecutive_losses'] = 0
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
-                self.is_closing = False
+                self.locked_closing_id = None
                 send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
-            # 4. Breakeven or Stop Loss Exit
             elif curr_price >= float(t['sl']):
-                self.is_closing = True
+                self.locked_closing_id = curr_trade_ref
+                set_db_state("active_trade", None)
+                set_db_state("last_exit_epoch", time.time())
+
                 if t.get('tp1_hit', False):
                     rem_qty = round(qty * 0.5, 4)
                     rem_usd = round(10.0 * rem_qty, 2)
@@ -387,16 +413,18 @@ class MasterCommanderEngine:
                     mem['daily_loss_sum'] = mem.get('daily_loss_sum', 0.0) + loss_usd
                     send_telegram_alert(f"🛑 [EXIT] BTC SHORT SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
                 
-                set_db_state("active_trade", None)
-                self.last_exit_time = time.time()
                 self.last_trade_bar = live['time']
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
-                self.is_closing = False
+                self.locked_closing_id = None
 
-    # --- ADVANCED SIGNAL LOGIC: PRE-MOVE SQUEEZE + ANTI-TRAP WICK FILTER + PHASE 2 HTF BIAS ---
+    # --- ADVANCED SIGNAL LOGIC (PHASE 1 + PHASE 2 + PHASE 3) ---
     def evaluate_market_moves(self, closed, live):
         if get_db_state("kill_switch_active", False):
+            return
+
+        last_exit_epoch = get_db_state("last_exit_epoch", 0)
+        if time.time() - last_exit_epoch < 900:
             return
 
         mem = read_shared_memory()
@@ -417,11 +445,14 @@ class MasterCommanderEngine:
         if live['time'] <= self.last_trade_bar:
             return
 
-        if time.time() - self.last_exit_time < 900:
+        candle_elapsed = (time.time() * 1000 - live['time']) / 1000
+        if candle_elapsed < 45.0:
             return
 
         sent_label = mem.get('sentiment_label', 'NEUTRAL')
         htf_trend = mem.get('htf_trend', 'NEUTRAL')
+        funding_rate = mem.get('funding_rate', 0.0)
+        book_imbalance = mem.get('book_imbalance', 1.0)
 
         # PRE-MOVE COMPRESSION ANALYSIS (3-4 Candles)
         recent_bars = closed[-4:]
@@ -431,7 +462,6 @@ class MasterCommanderEngine:
         body_low = min(min(c['open'], c['close']) for c in recent_bars)
         squeeze_range = comp_high - comp_low
 
-        # PRE-MOVE FILTER: Squeeze between 35 and 160 pts confirms volatility buildup
         if squeeze_range < 35.0 or squeeze_range > 160.0:
             return
 
@@ -445,16 +475,20 @@ class MasterCommanderEngine:
         ema9 = closes[0]
         for cl in closes[1:]: ema9 = (cl * k9) + (ema9 * (1 - k9))
 
-        # VOLUME EXPANSION FILTER (Confirming real breakout, no low-volume fakeout)
+        # VOLUME EXPANSION FILTER
         avg_vol = sum(c['vol'] for c in closed[-8:]) / 8.0
         has_volume = (c0['vol'] >= avg_vol * 1.15) or (live['vol'] >= avg_vol * 0.6)
 
-        # LATE-ENTRY EXHAUSTION GUARD
         candle_run = abs(curr_price - live_open)
         if candle_run > 110.0:
-            return  # Move nikal chuka hai, chasing strictly banned
+            return
 
-        # ANTI-TRAP WICK FILTER: Entry triggers right at early ignition (5-15 pts above body)
+        # PHASE 3 GUARDS: Funding Rate & Order Book Depth Confirmations
+        is_funding_safe_long = funding_rate <= 0.0006   # Overcrowded long trap shield
+        is_funding_safe_short = funding_rate >= -0.0006  # Overcrowded short squeeze shield
+        has_bid_support = book_imbalance >= 0.75         # Genuine buying pressure in order book
+        has_ask_pressure = book_imbalance <= 1.35        # Genuine selling pressure in order book
+
         is_bottom_pump = (
             (curr_price >= body_high + 5.0) and
             (curr_price > comp_high - 10.0) and
@@ -462,7 +496,9 @@ class MasterCommanderEngine:
             (curr_price > ema9) and
             has_volume and
             (sent_label != 'FEAR') and
-            (htf_trend != 'BEARISH')  # PHASE 2: Major 1H Downtrend me BUY block
+            (htf_trend != 'BEARISH') and
+            is_funding_safe_long and
+            has_bid_support
         )
 
         is_top_dump = (
@@ -472,7 +508,9 @@ class MasterCommanderEngine:
             (curr_price < ema9) and
             has_volume and
             (sent_label != 'GREED') and
-            (htf_trend != 'BULLISH')  # PHASE 2: Major 1H Uptrend me SHORT block
+            (htf_trend != 'BULLISH') and
+            is_funding_safe_short and
+            has_ask_pressure
         )
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
@@ -493,7 +531,7 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY BREAKOUT CONFIRMED] BTC LONG\n1H Bias: {htf_trend} 🟢\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY BREAKOUT CONFIRMED] BTC LONG\n1H Bias: {htf_trend} 🟢 | Depth: {book_imbalance}x\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
         elif is_top_dump:
             self.last_trade_bar = live['time']
@@ -508,7 +546,7 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY BREAKDOWN CONFIRMED] BTC SHORT\n1H Bias: {htf_trend} 🔴\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY BREAKDOWN CONFIRMED] BTC SHORT\n1H Bias: {htf_trend} 🔴 | Depth: {book_imbalance}x\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -548,7 +586,7 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_telegram_alert("⚡ [SYSTEM READY] Phase 1 + Phase 2 (1H Trend + Early Ignition) Online!")
+    send_telegram_alert("⚡ [SYSTEM READY] Phase 1 + 2 + 3 (Micro-Data & L2 Depth) Online!")
     return cmd
 
 launch_full_architecture()
@@ -660,7 +698,7 @@ terminal_html = """<!DOCTYPE html>
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">PHASE 2</span>
+            ⚡ QUANT RADAR <span class="badge-scan">PHASE 3</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -693,8 +731,8 @@ terminal_html = """<!DOCTYPE html>
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">HTF 1H BIAS</span>
-                <div class="cell-body" id="htf-status" style="color:#00e676;">PHASE 2 ACTIVE 🎯</div>
+                <span class="cell-head">MICRO-DATA L2</span>
+                <div class="cell-body" id="htf-status" style="color:#00e676;">PHASE 3 ACTIVE 📡</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TP1 TARGET</span>
