@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: FULL MULTI-ENGINE ANALYSIS + NO-AGGRESSION POST-EXIT GUARD
+# PRO QUANT ENGINE: 5-ENGINE CORE + PHASE 1 SAFETY & RISK CONTROLS
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -43,25 +43,6 @@ def init_db():
 
 init_db()
 
-# Direct One-Click Vault Clear Handler
-if st.query_params.get("clear_vault") == "confirmed":
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=5)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM trades")
-        conn.commit()
-        conn.close()
-        try:
-            conn2 = sqlite3.connect(DB_FILE, timeout=5)
-            c2 = conn2.cursor()
-            c2.execute("INSERT OR REPLACE INTO state (key, value) VALUES ('active_trade', 'null')")
-            conn2.commit()
-            conn2.close()
-        except: pass
-    except: pass
-    st.query_params.clear()
-    st.rerun()
-
 def get_db_state(key, default=None):
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -82,6 +63,63 @@ def set_db_state(key, value):
         conn.close()
     except: pass
 
+# --- PHASE 1: DIRECT UI URL ACTION DISPATCHERS ---
+# 1. Clear Vault
+if st.query_params.get("clear_vault") == "confirmed":
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=5)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM trades")
+        conn.commit()
+        conn.close()
+        set_db_state("active_trade", None)
+    except: pass
+    st.query_params.clear()
+    st.rerun()
+
+# 2. Force Close Current Position
+if st.query_params.get("force_close") == "confirmed":
+    act = get_db_state("active_trade")
+    if act and isinstance(act, dict) and 'entry' in act:
+        now_str = datetime.now().strftime("%H:%M")
+        e = float(act['entry'])
+        q = float(act.get('qty', 0.01))
+        # Record Force Exit to Vault
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=5)
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (now_str, "BTCUSDT", act['type'], e, e, "MANUAL FORCE CLOSE ⚠️", "0", "$0.00", q))
+            conn.commit()
+            conn.close()
+        except: pass
+        set_db_state("active_trade", None)
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            requests.post(url, json={"chat_id": str(CHAT_ID).strip(), "text": f"⚠️ [MANUAL OVERRIDE] Position on {act['type']} Force Closed from Dashboard!"}, timeout=3)
+        except: pass
+    st.query_params.clear()
+    st.rerun()
+
+# 3. Emergency Kill Switch (Toggle Freeze/Resume)
+if st.query_params.get("toggle_emergency") == "confirmed":
+    curr_kill = get_db_state("kill_switch_active", False)
+    new_kill = not curr_kill
+    set_db_state("kill_switch_active", new_kill)
+    if new_kill:
+        set_db_state("active_trade", None)
+        status_msg = "🚨 [EMERGENCY STOP ACTIVATED] Bot trading has been FROZEN completely!"
+    else:
+        status_msg = "🟢 [EMERGENCY STOP RELEASED] Bot trading has resumed regular scanning."
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": str(CHAT_ID).strip(), "text": status_msg}, timeout=3)
+    except: pass
+    st.query_params.clear()
+    st.rerun()
+
 # ZERO-DELAY ASYNC TELEGRAM DISPATCHER
 def _send_tg_worker(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -95,12 +133,17 @@ def send_telegram_alert(msg):
 
 # --- 2. SHARED MEMORY / JSON ENGINE ---
 def read_shared_memory():
+    default_mem = {
+        "sentiment_score": 50, "sentiment_label": "NEUTRAL", 
+        "last_heartbeat": time.time(), "consecutive_losses": 0, 
+        "last_trade_time": 0, "daily_loss_sum": 0.0, "current_day": datetime.now().strftime("%Y-%m-%d")
+    }
     if not os.path.exists(SHARED_MEMORY_FILE):
-        return {"sentiment_score": 50, "sentiment_label": "NEUTRAL", "last_heartbeat": time.time(), "consecutive_losses": 0, "last_trade_time": 0}
+        return default_mem
     try:
         with open(SHARED_MEMORY_FILE, "r") as f: return json.load(f)
     except:
-        return {"sentiment_score": 50, "sentiment_label": "NEUTRAL", "last_heartbeat": time.time(), "consecutive_losses": 0, "last_trade_time": 0}
+        return default_mem
 
 def write_shared_memory(data):
     try:
@@ -151,7 +194,8 @@ class MasterCommanderEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
         self.last_trade_bar = 0
-        self.last_exit_time = 0  # Mandatory in-memory cool down
+        self.last_exit_time = 0
+        self.is_closing = False
 
     def record_to_vault(self, t_type, entry, exit_price, result, pts, pnl_usd, qty):
         now_str = datetime.now().strftime("%H:%M")
@@ -167,6 +211,9 @@ class MasterCommanderEngine:
         except: pass
 
     def manage_position(self, t, live, closed):
+        if self.is_closing:
+            return
+
         qty = t.get("qty", 0.01)
         curr_price = float(live['close'])
         entry = float(t['entry'])
@@ -181,6 +228,7 @@ class MasterCommanderEngine:
 
         # LONG POSITION MONITOR
         if t['type'] == 'LONG':
+            # 1. TP1 Trigger (+110 pts) -> 50% Profit Book + Breakeven Shift
             if not t.get('tp1_hit', False) and curr_price >= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
@@ -193,11 +241,13 @@ class MasterCommanderEngine:
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC LONG\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
+            # 2. MID-WAY CHOP / STALL GUARD
             elif t.get('tp1_hit', False) and (curr_price < t['tp2']) and (curr_price > float(t['sl'])):
                 bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
                 is_stalled = (bars_passed >= 2) and (curr_price < c0['low']) and (c0['close'] < c0['open'])
                 
                 if is_stalled:
+                    self.is_closing = True
                     rem_qty = round(qty * 0.5, 4)
                     pts = round(curr_price - entry, 1)
                     rem_usd = round(pts * rem_qty, 2)
@@ -207,10 +257,13 @@ class MasterCommanderEngine:
                     self.last_trade_bar = live['time']
                     mem['last_trade_time'] = time.time()
                     write_shared_memory(mem)
+                    self.is_closing = False
                     send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC LONG\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
                     return
 
+            # 3. TP2 Full Hit (+220 pts)
             elif curr_price >= t['tp2']:
+                self.is_closing = True
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(t['tp2'] - entry, 1)
                 rem_usd = round(pts * rem_qty, 2)
@@ -221,9 +274,12 @@ class MasterCommanderEngine:
                 mem['consecutive_losses'] = 0
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
+                self.is_closing = False
                 send_telegram_alert(f"🚀 [TP2 FULL HIT] BTC LONG Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
+            # 4. Breakeven or Stop Loss Exit
             elif curr_price <= float(t['sl']):
+                self.is_closing = True
                 if t.get('tp1_hit', False):
                     rem_qty = round(qty * 0.5, 4)
                     rem_usd = round(10.0 * rem_qty, 2)
@@ -234,6 +290,7 @@ class MasterCommanderEngine:
                     loss_usd = round(loss_pts * qty, 2)
                     self.record_to_vault("LONG", entry, t['sl'], "SL HIT 🛑", f"-{loss_pts:.0f}", f"-${loss_usd:.2f}", qty)
                     mem['consecutive_losses'] = mem.get('consecutive_losses', 0) + 1
+                    mem['daily_loss_sum'] = mem.get('daily_loss_sum', 0.0) + loss_usd
                     send_telegram_alert(f"🛑 [EXIT] BTC LONG SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
                 
                 set_db_state("active_trade", None)
@@ -241,9 +298,11 @@ class MasterCommanderEngine:
                 self.last_trade_bar = live['time']
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
+                self.is_closing = False
 
         # SHORT POSITION MONITOR
         elif t['type'] == 'SHORT':
+            # 1. TP1 Trigger (+110 pts Drop) -> 50% Profit Book + Breakeven Shift
             if not t.get('tp1_hit', False) and curr_price <= t['tp1']:
                 t['tp1_hit'] = True
                 t['be_hit'] = True
@@ -256,11 +315,13 @@ class MasterCommanderEngine:
                 set_db_state("active_trade", t)
                 send_telegram_alert(f"🎯 [TP1 HIT] BTC SHORT\nPrice: ${curr_price:.1f}\nBooked 50%: +${half_usd:.2f} (+110 pts)\n🛡️ SL Shifted to Breakeven: ${t['sl']:.1f}")
 
+            # 2. MID-WAY CHOP / STALL GUARD
             elif t.get('tp1_hit', False) and (curr_price > t['tp2']) and (curr_price < float(t['sl'])):
                 bars_passed = (live['time'] - t.get('tp1_bar_time', live['time'])) // 300000
                 is_stalled = (bars_passed >= 2) and (curr_price > c0['high']) and (c0['close'] > c0['open'])
                 
                 if is_stalled:
+                    self.is_closing = True
                     rem_qty = round(qty * 0.5, 4)
                     pts = round(entry - curr_price, 1)
                     rem_usd = round(pts * rem_qty, 2)
@@ -270,10 +331,13 @@ class MasterCommanderEngine:
                     self.last_trade_bar = live['time']
                     mem['last_trade_time'] = time.time()
                     write_shared_memory(mem)
+                    self.is_closing = False
                     send_telegram_alert(f"⚡ [MID-RUN CHOP EXIT] BTC SHORT\nMarket stalling before TP2! Locked profit on current candle.\nExit: ${curr_price:.1f} (+{pts:.0f} pts, +${rem_usd:.2f})")
                     return
 
+            # 3. TP2 Full Hit (+220 pts Drop)
             elif curr_price <= t['tp2']:
+                self.is_closing = True
                 rem_qty = round(qty * 0.5, 4) if t.get('tp1_hit', False) else qty
                 pts = round(entry - t['tp2'], 1)
                 rem_usd = round(pts * rem_qty, 2)
@@ -284,9 +348,12 @@ class MasterCommanderEngine:
                 mem['consecutive_losses'] = 0
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
+                self.is_closing = False
                 send_telegram_alert(f"🩸 [TP2 FULL HIT] BTC SHORT Completed!\nFinal Exit: +${rem_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp2']:.1f}")
 
+            # 4. Breakeven or Stop Loss Exit
             elif curr_price >= float(t['sl']):
+                self.is_closing = True
                 if t.get('tp1_hit', False):
                     rem_qty = round(qty * 0.5, 4)
                     rem_usd = round(10.0 * rem_qty, 2)
@@ -297,6 +364,7 @@ class MasterCommanderEngine:
                     loss_usd = round(loss_pts * qty, 2)
                     self.record_to_vault("SHORT", entry, t['sl'], "SL HIT 🛑", f"-{loss_pts:.0f}", f"-${loss_usd:.2f}", qty)
                     mem['consecutive_losses'] = mem.get('consecutive_losses', 0) + 1
+                    mem['daily_loss_sum'] = mem.get('daily_loss_sum', 0.0) + loss_usd
                     send_telegram_alert(f"🛑 [EXIT] BTC SHORT SL Hit\nLoss: -${loss_usd:.2f} (-{loss_pts:.0f} pts)\nExit: ${curr_price:.1f}")
                 
                 set_db_state("active_trade", None)
@@ -304,65 +372,86 @@ class MasterCommanderEngine:
                 self.last_trade_bar = live['time']
                 mem['last_trade_time'] = time.time()
                 write_shared_memory(mem)
+                self.is_closing = False
 
-    # --- MULTI-ENGINE DEEP ANALYSIS & SAFE ENTRY EVALUATION ---
+    # --- 5-ENGINE SIGNAL EVALUATION WITH PHASE 1 RISK SHIELD ---
     def evaluate_market_moves(self, closed, live):
-        # 1. Same Candle Re-entry Guard: Ek candle par ek hi baar trade
+        # PHASE 1 GUARD 1: Emergency Kill Switch Activated
+        if get_db_state("kill_switch_active", False):
+            return
+
+        # PHASE 1 GUARD 2: Daily Drawdown Check ($10 Max Daily Loss Limit)
+        mem = read_shared_memory()
+        today = datetime.now().strftime("%Y-%m-%d")
+        if mem.get("current_day") != today:
+            mem["current_day"] = today
+            mem["daily_loss_sum"] = 0.0
+            mem["consecutive_losses"] = 0
+            write_shared_memory(mem)
+
+        if mem.get("daily_loss_sum", 0.0) >= 10.0:
+            return  # Trading paused for the day due to max daily drawdown
+
+        # PHASE 1 GUARD 3: Consecutive Loss Circuit Breaker (3 losses = 2 hr halt)
+        if mem.get('consecutive_losses', 0) >= 3:
+            if time.time() - mem.get('last_trade_time', 0) < 7200:
+                return
+
+        # 1. Same Candle Filter
         if live['time'] <= self.last_trade_bar:
             return
 
-        # 2. Strict Post-Exit Analysis Window: Trade exit hone ke agle 15 min (900 sec) tak NO aggressive trade
+        # 2. Strict Post-Exit Buffer (15 mins = 900s)
         if time.time() - self.last_exit_time < 900:
             return
 
-        mem = read_shared_memory()
+        # Sentiment Filter
+        sent_label = mem.get('sentiment_label', 'NEUTRAL')
 
-        # Risk Guard: Max 3 Consecutive Losses Lock
-        if mem.get('consecutive_losses', 0) >= 3:
-            return
+        # Structure Squeeze (3-4 candles consolidation - Early Entry)
+        recent_bars = closed[-4:]
+        comp_high = max(c['high'] for c in recent_bars)
+        comp_low = min(c['low'] for c in recent_bars)
+        squeeze_range = comp_high - comp_low
 
-        # Engine 1: Structure & Squeeze Analysis
-        last_10 = closed[-10:]
-        box_high = max(c['high'] for c in last_10)
-        box_low = min(c['low'] for c in last_10)
-        box_range = box_high - box_low
-
-        # Agar market chop me hai (< 60 pts range) ya over-extended (> 350 pts pump ho chuki hai) toh trade ignore
-        if box_range < 50.0 or box_range > 400.0:
+        if squeeze_range < 30.0 or squeeze_range > 180.0:
             return
 
         c0 = closed[-1]
-        c1 = closed[-2]
         curr_price = float(live['close'])
         live_open = float(live['open'])
 
-        # EMA Trend & Momentum Alignment
+        # EMA9 Alignment
         closes = [c['close'] for c in closed]
         k9 = 2 / 10
         ema9 = closes[0]
         for cl in closes[1:]: ema9 = (cl * k9) + (ema9 * (1 - k9))
 
-        # Engine 2: Volume & Clean Breakout Confirmation
-        avg_vol = sum(c['vol'] for c in last_10) / len(last_10)
-        has_volume = c0['vol'] >= (avg_vol * 0.9)
+        # Volume Confirmation
+        avg_vol = sum(c['vol'] for c in closed[-10:]) / 10.0
+        has_volume = c0['vol'] >= (avg_vol * 0.85)
 
-        # Reversal / Ignition conditions with strict multi-candle support
+        # Early Ignition Condition (Catching breakout right at start, no late chase)
+        candle_run = abs(curr_price - live_open)
+        if candle_run > 120.0:
+            return  # Exhaustion guard
+
         is_bottom_pump = (
-            (curr_price > box_high) and
-            (curr_price > c0['high']) and
-            (curr_price > live_open + 15.0) and
+            (curr_price > comp_high) and
+            (curr_price >= live_open + 10.0) and
             (curr_price > ema9) and
-            (c0['close'] > c0['open']) and
-            has_volume
+            (c0['close'] >= c0['open']) and
+            has_volume and
+            (sent_label != 'FEAR')
         )
 
         is_top_dump = (
-            (curr_price < box_low) and
-            (curr_price < c0['low']) and
-            (curr_price < live_open - 15.0) and
+            (curr_price < comp_low) and
+            (curr_price <= live_open - 10.0) and
             (curr_price < ema9) and
-            (c0['close'] < c0['open']) and
-            has_volume
+            (c0['close'] <= c0['open']) and
+            has_volume and
+            (sent_label != 'GREED')
         )
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
@@ -383,7 +472,7 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [CONFIRMED BREAKOUT] BTC LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY BREAKOUT CONFIRMED] BTC LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
         elif is_top_dump:
             self.last_trade_bar = live['time']
@@ -398,7 +487,7 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [CONFIRMED BREAKDOWN] BTC SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY BREAKDOWN CONFIRMED] BTC SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -438,13 +527,13 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_telegram_alert("⚡ [SYSTEM READY] Multi-Engine Analysis & Strict Risk Guard Active!")
+    send_telegram_alert("⚡ [SYSTEM READY] 5-Engine Core + Phase 1 Risk Shields Online!")
     return cmd
 
 launch_full_architecture()
 
 # -------------------------------------------------------------
-# FRONTEND UI & ZERO-MARGIN DISPLAY
+# FRONTEND UI & CONTROLS DOCK
 # -------------------------------------------------------------
 st.set_page_config(page_title="AI SNIPER BOT", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -455,7 +544,7 @@ iframe { width: 100vw !important; height: calc(100vh - 5px) !important; border: 
 
 conn = sqlite3.connect(DB_FILE, timeout=5)
 cur = conn.cursor()
-cur.execute("SELECT timestamp, trade_type, entry, result, pts, pnl_usd FROM trades ORDER BY id DESC LIMIT 50")
+cur.execute("SELECT timestamp, trade_type, entry, result, pts, pnl_usd FROM trades ORDER BY id DESC")
 rows = cur.fetchall()
 history_list = [{"time": r[0], "type": r[1], "entry": r[2], "result": r[3], "pts": r[4], "pnl_usd": r[5]} for r in rows]
 
@@ -465,6 +554,7 @@ conn.close()
 
 win_rate = round((win_count / t_count) * 100, 1) if t_count > 0 else 0.0
 active_trade = get_db_state("active_trade")
+kill_switch = get_db_state("kill_switch_active", False)
 
 if active_trade and isinstance(active_trade, dict) and 'entry' in active_trade:
     e = float(active_trade['entry'])
@@ -481,6 +571,7 @@ js_active_trade = json.dumps(active_trade)
 js_history = json.dumps(history_list)
 js_stats = json.dumps({"total": t_count, "win_rate": win_rate})
 js_cfg = json.dumps(cfg)
+js_kill = json.dumps(kill_switch)
 
 terminal_html = """<!DOCTYPE html>
 <html>
@@ -507,12 +598,15 @@ terminal_html = """<!DOCTYPE html>
         .btn-compact { background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 8px; font-size: 9px; font-weight: 800; cursor: pointer; }
         
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
-        #chart-zone { width: 100vw; height: 55vh; background: #080a0f; }
+        #chart-zone { width: 100vw; height: 53vh; background: #080a0f; }
         
-        .trade-dock { width: 100vw; height: 36px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 0 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
+        .trade-dock { width: 100vw; height: 38px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 0 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
         .dock-group { display: flex; align-items: center; gap: 5px; }
         .dock-input { background: #121824; border: 1px solid #23304a; color: #00e676; font-size: 10px; font-weight: 800; border-radius: 4px; padding: 2px 4px; width: 44px; text-align: center; }
         
+        .btn-override-danger { background: rgba(255, 59, 48, 0.2); color: #ff3b30; border: 1px solid #ff3b30; border-radius: 4px; padding: 2px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
+        .btn-override-warn { background: rgba(240, 185, 11, 0.2); color: #f0b90b; border: 1px solid #f0b90b; border-radius: 4px; padding: 2px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
+
         .bottom-bar { width: 100vw; height: 46px; background: #0d121c; border-top: 1px solid #1a2336; padding: 4px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.4fr; gap: 6px; align-items: center; }
         .metric-cell { display: flex; flex-direction: column; justify-content: center; background: #101624; padding: 2px 6px; border-radius: 4px; border: 1px solid #192233; height: 36px; }
         .cell-head { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 2px; }
@@ -537,9 +631,6 @@ terminal_html = """<!DOCTYPE html>
             width: 100%;
             display: block;
             outline: none;
-            user-select: none;
-            -webkit-user-select: none;
-            -webkit-touch-callout: none;
         }
         .btn-modal-clear:active { background: #ff3b30; color: #fff; }
     </style>
@@ -548,7 +639,7 @@ terminal_html = """<!DOCTYPE html>
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">ONLINE</span>
+            ⚡ QUANT RADAR <span class="badge-scan">PHASE 1</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -569,17 +660,21 @@ terminal_html = """<!DOCTYPE html>
                 <input id="input-amount" class="dock-input" type="number" value="100" onchange="updateCalcQty()">
                 <span style="color:#62697a; font-weight:800;">LEV:</span>
                 <input id="input-lev" class="dock-input" type="number" value="10" onchange="updateCalcQty()">
-            </div>
-            <div class="dock-group">
                 <span style="color:#62697a;">POS:</span>
                 <b id="calc-qty" style="color:#38bdf8; font-size:10px;">0.0119 BTC</b>
+            </div>
+            
+            <!-- PHASE 1 MANUAL SAFETY ACTIONS -->
+            <div class="dock-group">
+                <button type="button" class="btn-override-warn" onclick="triggerForceClose()">⚡ FORCE CLOSE</button>
+                <button type="button" class="btn-override-danger" id="btn-kill" onclick="triggerEmergencyToggle()">🚨 KILL SWITCH</button>
             </div>
         </div>
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">MULTI-ENGINE</span>
-                <div class="cell-body" style="color:#00e676;">CONSENSUS ACTIVE 🟢</div>
+                <span class="cell-head">RISK SHIELD</span>
+                <div class="cell-body" id="risk-status" style="color:#00e676;">DD GUARD ACTIVE 🛡️</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TP1 TARGET</span>
@@ -591,7 +686,7 @@ terminal_html = """<!DOCTYPE html>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">SCAN STATUS</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING CONSOLIDATION...</div>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING SQUEEZE...</div>
             </div>
         </div>
     </div>
@@ -622,9 +717,18 @@ terminal_html = """<!DOCTYPE html>
         let tradeHistory = __TRADE_HISTORY__;
         let stats = __STATS__;
         let cfg = __CFG__;
+        let killActive = __KILL_SWITCH__;
 
         document.getElementById('input-amount').value = cfg.capital;
         document.getElementById('input-lev').value = cfg.leverage;
+
+        if (killActive) {
+            document.getElementById('btn-kill').style.background = "#ff3b30";
+            document.getElementById('btn-kill').style.color = "#fff";
+            document.getElementById('btn-kill').innerText = "🟢 RESUME BOT";
+            document.getElementById('risk-status').innerText = "BOT FROZEN 🛑";
+            document.getElementById('risk-status').style.color = "#ff3b30";
+        }
 
         let lineEntry = null, lineSL = null, lineTP1 = null, lineTP2 = null;
         let currentPrice = 84000.0;
@@ -645,6 +749,28 @@ terminal_html = """<!DOCTYPE html>
                 window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?clear_vault=confirmed";
             } catch(e) {
                 window.location.href = window.location.pathname + "?clear_vault=confirmed";
+            }
+        }
+
+        function triggerForceClose() {
+            if (!activeTrade) { alert("No active trade to close!"); return; }
+            if (confirm("Force close active position at market price?")) {
+                try {
+                    window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?force_close=confirmed";
+                } catch(e) {
+                    window.location.href = window.location.pathname + "?force_close=confirmed";
+                }
+            }
+        }
+
+        function triggerEmergencyToggle() {
+            let msg = killActive ? "Resume bot execution?" : "EMERGENCY STOP: Freeze all trading activities?";
+            if (confirm(msg)) {
+                try {
+                    window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?toggle_emergency=confirmed";
+                } catch(e) {
+                    window.location.href = window.location.pathname + "?toggle_emergency=confirmed";
+                }
             }
         }
 
@@ -744,11 +870,11 @@ terminal_html = """<!DOCTYPE html>
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp1').innerText = "--";
                 document.getElementById('disp-tp2').innerText = "--";
-                document.getElementById('val-setup').innerText = "SCANNING CONSOLIDATION...";
-                document.getElementById('val-setup').style.color = "#38bdf8";
+                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "SCANNING SQUEEZE...";
+                document.getElementById('val-setup').style.color = killActive ? "#ff3b30" : "#38bdf8";
             }
 
-            document.getElementById('hist-count').innerText = tradeHistory.length;
+            document.getElementById('hist-count').innerText = stats.total;
             document.getElementById('stat-total').innerText = stats.total;
             document.getElementById('stat-rate').innerText = stats.win_rate + "%";
 
@@ -837,6 +963,7 @@ terminal_html = """<!DOCTYPE html>
 final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
                           .replace("__TRADE_HISTORY__", js_history)\
                           .replace("__STATS__", js_stats)\
-                          .replace("__CFG__", js_cfg)
+                          .replace("__CFG__", js_cfg)\
+                          .replace("__KILL_SWITCH__", js_kill)
 
 components.html(final_html, height=710, scrolling=False)
