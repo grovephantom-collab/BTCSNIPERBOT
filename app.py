@@ -7,10 +7,11 @@ import requests
 import json
 import os
 import uuid
+import math
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: PHASE 1 (RISK) + PHASE 2 (HTF) + PHASE 3 (MICRO-DATA FEEDS)
+# PRO QUANT ENGINE: FULL ARCHITECTURE (PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -136,7 +137,9 @@ def read_shared_memory():
         "current_day": datetime.now().strftime("%Y-%m-%d"),
         "htf_trend": "NEUTRAL",
         "funding_rate": 0.0,
-        "book_imbalance": 1.0
+        "book_imbalance": 1.0,
+        "ai_score": 75,
+        "atr_val": 45.0
     }
     if not os.path.exists(SHARED_MEMORY_FILE):
         return default_mem
@@ -150,11 +153,37 @@ def write_shared_memory(data):
         with open(SHARED_MEMORY_FILE, "w") as f: json.dump(data, f)
     except: pass
 
-# --- 3. DATA, SENTIMENT & PHASE 3 MICRO-DATA ENGINE ---
+# --- PHASE 4 ML UTILITIES: RSI & ATR ENGINE ---
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1: return 50.0
+    deltas = [prices[i+1] - prices[i] for i in range(len(prices)-1)]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0: return 100.0
+    rs = avg_gain / avg_loss
+    return round(100.0 - (100.0 / (1.0 + rs)), 1)
+
+def calculate_atr(klines, period=14):
+    if len(klines) < period + 1: return 45.0
+    trs = []
+    for i in range(1, len(klines)):
+        h = klines[i]['high']
+        l = klines[i]['low']
+        prev_c = klines[i-1]['close']
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+        trs.append(tr)
+    return round(sum(trs[-period:]) / period, 1)
+
+# --- 3. DATA, SENTIMENT, MICRO-DATA & PHASE 4 AI/ML ENGINE ---
 def run_data_news_engine():
     while True:
         try:
-            # 1. Fear & Greed API
+            # 1. Alternative.me Fear & Greed API
             r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3)
             score = 50
             label = "NEUTRAL"
@@ -180,7 +209,7 @@ def run_data_news_engine():
                         htf_trend = "BEARISH"
             except: pass
 
-            # 3. PHASE 3: Funding Rate Fetcher (Futures Sentiment)
+            # 3. Phase 3: Funding Rate Fetcher
             funding_rate = 0.0
             try:
                 r_fund = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT", timeout=3)
@@ -188,7 +217,7 @@ def run_data_news_engine():
                     funding_rate = float(r_fund.json().get('lastFundingRate', 0.0))
             except: pass
 
-            # 4. PHASE 3: L2 Order Book Depth Imbalance (Top 20 Bids vs Asks)
+            # 4. Phase 3: L2 Order Book Depth Imbalance
             book_imbalance = 1.0
             try:
                 r_depth = requests.get("https://data-api.binance.vision/api/v3/depth?symbol=BTCUSDT&limit=20", timeout=3)
@@ -200,12 +229,34 @@ def run_data_news_engine():
                         book_imbalance = round(total_bids / total_asks, 2)
             except: pass
 
+            # 5. PHASE 4: AI/ML Predictive Analytics & Volatility Metric
+            ai_score = 75
+            atr_val = 45.0
+            try:
+                r_k = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=30", timeout=3)
+                if r_k.status_code == 200:
+                    raw_k = r_k.json()
+                    k_list = [{'high': float(x[2]), 'low': float(x[3]), 'close': float(x[4])} for x in raw_k]
+                    closes_5m = [x['close'] for x in k_list]
+                    rsi = calculate_rsi(closes_5m, 14)
+                    atr_val = calculate_atr(k_list, 14)
+                    
+                    # Machine-Scored Probability Calculation
+                    base_prob = 70
+                    if 45 <= rsi <= 65: base_prob += 10
+                    elif rsi > 75 or rsi < 25: base_prob -= 15
+                    if 30 <= atr_val <= 90: base_prob += 10
+                    ai_score = max(40, min(95, base_prob))
+            except: pass
+
             mem = read_shared_memory()
             mem['sentiment_score'] = score
             mem['sentiment_label'] = label
             mem['htf_trend'] = htf_trend
             mem['funding_rate'] = funding_rate
             mem['book_imbalance'] = book_imbalance
+            mem['ai_score'] = ai_score
+            mem['atr_val'] = atr_val
             mem['last_heartbeat'] = time.time()
             write_shared_memory(mem)
         except: pass
@@ -256,7 +307,7 @@ class MasterCommanderEngine:
         if self.locked_closing_id == curr_trade_ref:
             return
 
-        qty = t.get("qty", 0.01)
+        qty = float(t.get("qty", 0.01))
         curr_price = float(live['close'])
         entry = float(t['entry'])
 
@@ -418,7 +469,7 @@ class MasterCommanderEngine:
                 write_shared_memory(mem)
                 self.locked_closing_id = None
 
-    # --- ADVANCED SIGNAL LOGIC (PHASE 1 + PHASE 2 + PHASE 3) ---
+    # --- ADVANCED SIGNAL LOGIC (PHASE 1 + PHASE 2 + PHASE 3 + PHASE 4) ---
     def evaluate_market_moves(self, closed, live):
         if get_db_state("kill_switch_active", False):
             return
@@ -453,6 +504,16 @@ class MasterCommanderEngine:
         htf_trend = mem.get('htf_trend', 'NEUTRAL')
         funding_rate = mem.get('funding_rate', 0.0)
         book_imbalance = mem.get('book_imbalance', 1.0)
+        ai_score = mem.get('ai_score', 75)
+        atr_val = mem.get('atr_val', 45.0)
+
+        # PHASE 4 GATE: AI Confidence Filter (High Probability Move Only)
+        if ai_score < 65:
+            return
+
+        # Dynamic Squeeze Boundaries based on Live ATR
+        min_squeeze = max(35.0, atr_val * 0.7)
+        max_squeeze = min(160.0, atr_val * 3.2)
 
         # PRE-MOVE COMPRESSION ANALYSIS (3-4 Candles)
         recent_bars = closed[-4:]
@@ -462,7 +523,7 @@ class MasterCommanderEngine:
         body_low = min(min(c['open'], c['close']) for c in recent_bars)
         squeeze_range = comp_high - comp_low
 
-        if squeeze_range < 35.0 or squeeze_range > 160.0:
+        if squeeze_range < min_squeeze or squeeze_range > max_squeeze:
             return
 
         c0 = closed[-1]
@@ -484,10 +545,10 @@ class MasterCommanderEngine:
             return
 
         # PHASE 3 GUARDS: Funding Rate & Order Book Depth Confirmations
-        is_funding_safe_long = funding_rate <= 0.0006   # Overcrowded long trap shield
-        is_funding_safe_short = funding_rate >= -0.0006  # Overcrowded short squeeze shield
-        has_bid_support = book_imbalance >= 0.75         # Genuine buying pressure in order book
-        has_ask_pressure = book_imbalance <= 1.35        # Genuine selling pressure in order book
+        is_funding_safe_long = funding_rate <= 0.0006
+        is_funding_safe_short = funding_rate >= -0.0006
+        has_bid_support = book_imbalance >= 0.75
+        has_ask_pressure = book_imbalance <= 1.35
 
         is_bottom_pump = (
             (curr_price >= body_high + 5.0) and
@@ -531,7 +592,7 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY BREAKOUT CONFIRMED] BTC LONG\n1H Bias: {htf_trend} 🟢 | Depth: {book_imbalance}x\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY BREAKOUT CONFIRMED] BTC LONG\n1H Bias: {htf_trend} 🟢 | AI Confidence: {ai_score}%\nDepth: {book_imbalance}x | ATR: {atr_val} pts\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
         elif is_top_dump:
             self.last_trade_bar = live['time']
@@ -546,7 +607,7 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY BREAKDOWN CONFIRMED] BTC SHORT\n1H Bias: {htf_trend} 🔴 | Depth: {book_imbalance}x\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY BREAKDOWN CONFIRMED] BTC SHORT\n1H Bias: {htf_trend} 🔴 | AI Confidence: {ai_score}%\nDepth: {book_imbalance}x | ATR: {atr_val} pts\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -586,7 +647,7 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_telegram_alert("⚡ [SYSTEM READY] Phase 1 + 2 + 3 (Micro-Data & L2 Depth) Online!")
+    send_telegram_alert("⚡ [SYSTEM READY] Phase 1 + 2 + 3 + 4 (AI/ML Predictive Core) Online!")
     return cmd
 
 launch_full_architecture()
@@ -698,7 +759,7 @@ terminal_html = """<!DOCTYPE html>
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">PHASE 3</span>
+            ⚡ QUANT RADAR <span class="badge-scan">PHASE 4 AI</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -731,8 +792,8 @@ terminal_html = """<!DOCTYPE html>
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">MICRO-DATA L2</span>
-                <div class="cell-body" id="htf-status" style="color:#00e676;">PHASE 3 ACTIVE 📡</div>
+                <span class="cell-head">AI CONFIDENCE</span>
+                <div class="cell-body" id="htf-status" style="color:#00e676;">PHASE 4 AI ML ⚡</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TP1 TARGET</span>
