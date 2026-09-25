@@ -7,10 +7,11 @@ import requests
 import json
 import os
 import uuid
+import math
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: 5-ENGINE CORE + PHASE 1 SAFETY & RISK CONTROLS
+# PRO QUANT ENGINE: 5-ENGINE CORE + PHASE 1 RISK + PHASE 2 HTF & EARLY DETECTION
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -63,8 +64,7 @@ def set_db_state(key, value):
         conn.close()
     except: pass
 
-# --- PHASE 1: DIRECT UI URL ACTION DISPATCHERS ---
-# 1. Clear Vault
+# --- PHASE 1 UI URL ACTION DISPATCHERS ---
 if st.query_params.get("clear_vault") == "confirmed":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -77,14 +77,12 @@ if st.query_params.get("clear_vault") == "confirmed":
     st.query_params.clear()
     st.rerun()
 
-# 2. Force Close Current Position
 if st.query_params.get("force_close") == "confirmed":
     act = get_db_state("active_trade")
     if act and isinstance(act, dict) and 'entry' in act:
         now_str = datetime.now().strftime("%H:%M")
         e = float(act['entry'])
         q = float(act.get('qty', 0.01))
-        # Record Force Exit to Vault
         try:
             conn = sqlite3.connect(DB_FILE, timeout=5)
             cur = conn.cursor()
@@ -103,7 +101,6 @@ if st.query_params.get("force_close") == "confirmed":
     st.query_params.clear()
     st.rerun()
 
-# 3. Emergency Kill Switch (Toggle Freeze/Resume)
 if st.query_params.get("toggle_emergency") == "confirmed":
     curr_kill = get_db_state("kill_switch_active", False)
     new_kill = not curr_kill
@@ -136,7 +133,9 @@ def read_shared_memory():
     default_mem = {
         "sentiment_score": 50, "sentiment_label": "NEUTRAL", 
         "last_heartbeat": time.time(), "consecutive_losses": 0, 
-        "last_trade_time": 0, "daily_loss_sum": 0.0, "current_day": datetime.now().strftime("%Y-%m-%d")
+        "last_trade_time": 0, "daily_loss_sum": 0.0, 
+        "current_day": datetime.now().strftime("%Y-%m-%d"),
+        "htf_trend": "NEUTRAL"
     }
     if not os.path.exists(SHARED_MEMORY_FILE):
         return default_mem
@@ -150,10 +149,11 @@ def write_shared_memory(data):
         with open(SHARED_MEMORY_FILE, "w") as f: json.dump(data, f)
     except: pass
 
-# --- 3. DATA & NEWS SENTIMENT ENGINE ---
+# --- 3. DATA & NEWS SENTIMENT ENGINE (WITH PHASE 2 HTF 1H BIAS) ---
 def run_data_news_engine():
     while True:
         try:
+            # Fear & Greed API
             r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3)
             score = 50
             label = "NEUTRAL"
@@ -161,9 +161,29 @@ def run_data_news_engine():
                 score = int(r.json()['data'][0]['value'])
                 label = "GREED" if score >= 60 else ("FEAR" if score <= 40 else "NEUTRAL")
             
+            # Phase 2: HTF (1H) Trend Direction Fetcher
+            htf_trend = "NEUTRAL"
+            try:
+                r_htf = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=30", timeout=3)
+                if r_htf.status_code == 200:
+                    raw_htf = r_htf.json()
+                    closes = [float(x[4]) for x in raw_htf]
+                    # Calculate 1H EMA20
+                    k = 2 / (20 + 1)
+                    ema20 = closes[0]
+                    for cl in closes[1:]:
+                        ema20 = (cl * k) + (ema20 * (1 - k))
+                    curr_htf_price = closes[-1]
+                    if curr_htf_price > ema20 + 15.0:
+                        htf_trend = "BULLISH"
+                    elif curr_htf_price < ema20 - 15.0:
+                        htf_trend = "BEARISH"
+            except: pass
+
             mem = read_shared_memory()
             mem['sentiment_score'] = score
             mem['sentiment_label'] = label
+            mem['htf_trend'] = htf_trend
             mem['last_heartbeat'] = time.time()
             write_shared_memory(mem)
         except: pass
@@ -374,13 +394,11 @@ class MasterCommanderEngine:
                 write_shared_memory(mem)
                 self.is_closing = False
 
-    # --- 5-ENGINE SIGNAL EVALUATION WITH PHASE 1 RISK SHIELD ---
+    # --- ADVANCED SIGNAL LOGIC: PRE-MOVE SQUEEZE + ANTI-TRAP WICK FILTER + PHASE 2 HTF BIAS ---
     def evaluate_market_moves(self, closed, live):
-        # PHASE 1 GUARD 1: Emergency Kill Switch Activated
         if get_db_state("kill_switch_active", False):
             return
 
-        # PHASE 1 GUARD 2: Daily Drawdown Check ($10 Max Daily Loss Limit)
         mem = read_shared_memory()
         today = datetime.now().strftime("%Y-%m-%d")
         if mem.get("current_day") != today:
@@ -390,31 +408,31 @@ class MasterCommanderEngine:
             write_shared_memory(mem)
 
         if mem.get("daily_loss_sum", 0.0) >= 10.0:
-            return  # Trading paused for the day due to max daily drawdown
+            return
 
-        # PHASE 1 GUARD 3: Consecutive Loss Circuit Breaker (3 losses = 2 hr halt)
         if mem.get('consecutive_losses', 0) >= 3:
             if time.time() - mem.get('last_trade_time', 0) < 7200:
                 return
 
-        # 1. Same Candle Filter
         if live['time'] <= self.last_trade_bar:
             return
 
-        # 2. Strict Post-Exit Buffer (15 mins = 900s)
         if time.time() - self.last_exit_time < 900:
             return
 
-        # Sentiment Filter
         sent_label = mem.get('sentiment_label', 'NEUTRAL')
+        htf_trend = mem.get('htf_trend', 'NEUTRAL')
 
-        # Structure Squeeze (3-4 candles consolidation - Early Entry)
+        # PRE-MOVE COMPRESSION ANALYSIS (3-4 Candles)
         recent_bars = closed[-4:]
         comp_high = max(c['high'] for c in recent_bars)
         comp_low = min(c['low'] for c in recent_bars)
+        body_high = max(max(c['open'], c['close']) for c in recent_bars)
+        body_low = min(min(c['open'], c['close']) for c in recent_bars)
         squeeze_range = comp_high - comp_low
 
-        if squeeze_range < 30.0 or squeeze_range > 180.0:
+        # PRE-MOVE FILTER: Squeeze between 35 and 160 pts confirms volatility buildup
+        if squeeze_range < 35.0 or squeeze_range > 160.0:
             return
 
         c0 = closed[-1]
@@ -427,31 +445,34 @@ class MasterCommanderEngine:
         ema9 = closes[0]
         for cl in closes[1:]: ema9 = (cl * k9) + (ema9 * (1 - k9))
 
-        # Volume Confirmation
-        avg_vol = sum(c['vol'] for c in closed[-10:]) / 10.0
-        has_volume = c0['vol'] >= (avg_vol * 0.85)
+        # VOLUME EXPANSION FILTER (Confirming real breakout, no low-volume fakeout)
+        avg_vol = sum(c['vol'] for c in closed[-8:]) / 8.0
+        has_volume = (c0['vol'] >= avg_vol * 1.15) or (live['vol'] >= avg_vol * 0.6)
 
-        # Early Ignition Condition (Catching breakout right at start, no late chase)
+        # LATE-ENTRY EXHAUSTION GUARD
         candle_run = abs(curr_price - live_open)
-        if candle_run > 120.0:
-            return  # Exhaustion guard
+        if candle_run > 110.0:
+            return  # Move nikal chuka hai, chasing strictly banned
 
+        # ANTI-TRAP WICK FILTER: Entry triggers right at early ignition (5-15 pts above body)
         is_bottom_pump = (
-            (curr_price > comp_high) and
-            (curr_price >= live_open + 10.0) and
+            (curr_price >= body_high + 5.0) and
+            (curr_price > comp_high - 10.0) and
+            (curr_price >= live_open + 8.0) and
             (curr_price > ema9) and
-            (c0['close'] >= c0['open']) and
             has_volume and
-            (sent_label != 'FEAR')
+            (sent_label != 'FEAR') and
+            (htf_trend != 'BEARISH')  # PHASE 2: Major 1H Downtrend me BUY block
         )
 
         is_top_dump = (
-            (curr_price < comp_low) and
-            (curr_price <= live_open - 10.0) and
+            (curr_price <= body_low - 5.0) and
+            (curr_price < comp_low + 10.0) and
+            (curr_price <= live_open - 8.0) and
             (curr_price < ema9) and
-            (c0['close'] <= c0['open']) and
             has_volume and
-            (sent_label != 'GREED')
+            (sent_label != 'GREED') and
+            (htf_trend != 'BULLISH')  # PHASE 2: Major 1H Uptrend me SHORT block
         )
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
@@ -472,7 +493,7 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY BREAKOUT CONFIRMED] BTC LONG\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY BREAKOUT CONFIRMED] BTC LONG\n1H Bias: {htf_trend} 🟢\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
         elif is_top_dump:
             self.last_trade_bar = live['time']
@@ -487,7 +508,7 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [EARLY BREAKDOWN CONFIRMED] BTC SHORT\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [EARLY BREAKDOWN CONFIRMED] BTC SHORT\n1H Bias: {htf_trend} 🔴\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{risk:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+110 pts)\n🎯 TP2 (50%): ${tp2:.1f} (+220 pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -527,7 +548,7 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_telegram_alert("⚡ [SYSTEM READY] 5-Engine Core + Phase 1 Risk Shields Online!")
+    send_telegram_alert("⚡ [SYSTEM READY] Phase 1 + Phase 2 (1H Trend + Early Ignition) Online!")
     return cmd
 
 launch_full_architecture()
@@ -639,7 +660,7 @@ terminal_html = """<!DOCTYPE html>
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">PHASE 1</span>
+            ⚡ QUANT RADAR <span class="badge-scan">PHASE 2</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -664,7 +685,6 @@ terminal_html = """<!DOCTYPE html>
                 <b id="calc-qty" style="color:#38bdf8; font-size:10px;">0.0119 BTC</b>
             </div>
             
-            <!-- PHASE 1 MANUAL SAFETY ACTIONS -->
             <div class="dock-group">
                 <button type="button" class="btn-override-warn" onclick="triggerForceClose()">⚡ FORCE CLOSE</button>
                 <button type="button" class="btn-override-danger" id="btn-kill" onclick="triggerEmergencyToggle()">🚨 KILL SWITCH</button>
@@ -673,8 +693,8 @@ terminal_html = """<!DOCTYPE html>
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">RISK SHIELD</span>
-                <div class="cell-body" id="risk-status" style="color:#00e676;">DD GUARD ACTIVE 🛡️</div>
+                <span class="cell-head">HTF 1H BIAS</span>
+                <div class="cell-body" id="htf-status" style="color:#00e676;">PHASE 2 ACTIVE 🎯</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TP1 TARGET</span>
@@ -726,8 +746,8 @@ terminal_html = """<!DOCTYPE html>
             document.getElementById('btn-kill').style.background = "#ff3b30";
             document.getElementById('btn-kill').style.color = "#fff";
             document.getElementById('btn-kill').innerText = "🟢 RESUME BOT";
-            document.getElementById('risk-status').innerText = "BOT FROZEN 🛑";
-            document.getElementById('risk-status').style.color = "#ff3b30";
+            document.getElementById('htf-status').innerText = "BOT FROZEN 🛑";
+            document.getElementById('htf-status').style.color = "#ff3b30";
         }
 
         let lineEntry = null, lineSL = null, lineTP1 = null, lineTP2 = null;
