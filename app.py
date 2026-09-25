@@ -649,7 +649,7 @@ def launch_full_architecture():
 launch_full_architecture()
 
 # -------------------------------------------------------------
-# FRONTEND UI & CONTROLS DOCK
+# FRONTEND UI & CONTROLS DOCK (FLICKER-FREE FRAGMENT AUTO-SYNC)
 # -------------------------------------------------------------
 st.set_page_config(page_title="AI SNIPER BOT", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -658,38 +658,40 @@ header, footer, #MainMenu { display: none !important; }
 iframe { width: 100vw !important; height: calc(100vh - 5px) !important; border: none !important; display: block !important; }
 </style>""", unsafe_allow_html=True)
 
-conn = sqlite3.connect(DB_FILE, timeout=5)
-cur = conn.cursor()
-cur.execute("SELECT timestamp, trade_type, entry, result, pts, pnl_usd FROM trades ORDER BY id DESC")
-rows = cur.fetchall()
-history_list = [{"time": r[0], "type": r[1], "entry": r[2], "result": r[3], "pts": r[4], "pnl_usd": r[5]} for r in rows]
+@st.fragment(run_every=2)
+def render_live_dashboard():
+    conn = sqlite3.connect(DB_FILE, timeout=5)
+    cur = conn.cursor()
+    cur.execute("SELECT timestamp, trade_type, entry, result, pts, pnl_usd FROM trades ORDER BY id DESC")
+    rows = cur.fetchall()
+    history_list = [{"time": r[0], "type": r[1], "entry": r[2], "result": r[3], "pts": r[4], "pnl_usd": r[5]} for r in rows]
 
-cur.execute("SELECT COUNT(*), SUM(CASE WHEN result LIKE '%TP%' OR result LIKE '%BE%' OR result LIKE '%CHOP%' THEN 1 ELSE 0 END) FROM trades")
-t_count, win_count = cur.fetchone()
-conn.close()
+    cur.execute("SELECT COUNT(*), SUM(CASE WHEN result LIKE '%TP%' OR result LIKE '%BE%' OR result LIKE '%CHOP%' THEN 1 ELSE 0 END) FROM trades")
+    t_count, win_count = cur.fetchone()
+    conn.close()
 
-win_rate = round((win_count / t_count) * 100, 1) if t_count > 0 else 0.0
-active_trade = get_db_state("active_trade")
-kill_switch = get_db_state("kill_switch_active", False)
+    win_rate = round((win_count / t_count) * 100, 1) if t_count > 0 else 0.0
+    active_trade = get_db_state("active_trade")
+    kill_switch = get_db_state("kill_switch_active", False)
 
-if active_trade and isinstance(active_trade, dict) and 'entry' in active_trade:
-    e = float(active_trade['entry'])
-    is_long = active_trade.get('type') == 'LONG'
-    if 'tp1' not in active_trade or not active_trade['tp1']:
-        active_trade['tp1'] = round(e + 110.0 if is_long else e - 110.0, 1)
-    if 'tp2' not in active_trade or not active_trade['tp2']:
-        active_trade['tp2'] = round(e + 220.0 if is_long else e - 220.0, 1)
-    set_db_state("active_trade", active_trade)
+    if active_trade and isinstance(active_trade, dict) and 'entry' in active_trade:
+        e = float(active_trade['entry'])
+        is_long = active_trade.get('type') == 'LONG'
+        if 'tp1' not in active_trade or not active_trade['tp1']:
+            active_trade['tp1'] = round(e + 110.0 if is_long else e - 110.0, 1)
+        if 'tp2' not in active_trade or not active_trade['tp2']:
+            active_trade['tp2'] = round(e + 220.0 if is_long else e - 220.0, 1)
+        set_db_state("active_trade", active_trade)
 
-cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
+    cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
 
-js_active_trade = json.dumps(active_trade)
-js_history = json.dumps(history_list)
-js_stats = json.dumps({"total": t_count, "win_rate": win_rate})
-js_cfg = json.dumps(cfg)
-js_kill = json.dumps(kill_switch)
+    js_active_trade = json.dumps(active_trade)
+    js_history = json.dumps(history_list)
+    js_stats = json.dumps({"total": t_count, "win_rate": win_rate})
+    js_cfg = json.dumps(cfg)
+    js_kill = json.dumps(kill_switch)
 
-terminal_html = """<!DOCTYPE html>
+    terminal_html = """<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -755,7 +757,7 @@ terminal_html = """<!DOCTYPE html>
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">SYNC ON</span>
+            ⚡ QUANT RADAR <span class="badge-scan">LIVE</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SAFE SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -1071,23 +1073,16 @@ terminal_html = """<!DOCTYPE html>
 
         syncCandles();
         window.onresize = () => chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
-
-        // SILENT AUTO-REFRESH INTERVAL (Har 10s me Vault aur UI update bina screen flick ke)
-        setInterval(() => {
-            try {
-                if (document.getElementById('modal-bg').style.display !== 'flex') {
-                    window.parent.location.reload();
-                }
-            } catch(e) {}
-        }, 10000);
     </script>
 </body>
 </html>"""
 
-final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
-                          .replace("__TRADE_HISTORY__", js_history)\
-                          .replace("__STATS__", js_stats)\
-                          .replace("__CFG__", js_cfg)\
-                          .replace("__KILL_SWITCH__", js_kill)
+    final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
+                              .replace("__TRADE_HISTORY__", js_history)\
+                              .replace("__STATS__", js_stats)\
+                              .replace("__CFG__", js_cfg)\
+                              .replace("__KILL_SWITCH__", js_kill)
 
-components.html(final_html, height=710, scrolling=False)
+    components.html(final_html, height=710, scrolling=False)
+
+render_live_dashboard()
