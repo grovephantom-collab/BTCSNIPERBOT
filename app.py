@@ -11,7 +11,7 @@ import math
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: FULL ARCHITECTURE (PHASE 1-4 + HARD BAR LOCK + DYNAMIC ATR)
+# PRO QUANT ENGINE: CLOSED-CANDLE TREND STRUCTURE + HARD RISK LOCK + DYNAMIC ATR
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -20,7 +20,7 @@ DB_FILE = "sniper_vault.db"
 SHARED_MEMORY_FILE = "sniper_brain_data.json"
 WATCHDOG_LOCK = "overseer_watchdog.pid"
 
-# --- 1. LOGGING & DATABASE (VAULT WITH DATABASE-LEVEL UNIQUE LOCK) ---
+# --- 1. LOGGING & DATABASE (SQLITE WITH UNIQUE RESTRAINT) ---
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cur = conn.cursor()
@@ -66,12 +66,9 @@ def set_db_state(key, value):
     except: pass
 
 def check_db_risk_guard():
-    """Checks 3-consecutive losses and daily loss limit directly from SQLite to guarantee 100% enforcement."""
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
         cur = conn.cursor()
-        
-        # 1. Check Consecutive SL Hits from last records
         cur.execute("SELECT result FROM trades ORDER BY id DESC LIMIT 5")
         rows = cur.fetchall()
         consecutive_losses = 0
@@ -82,7 +79,6 @@ def check_db_risk_guard():
             else:
                 break
         
-        # 2. Check Today's Total Loss Sum
         today_date = datetime.now().strftime("%Y-%m-%d")
         cur.execute("SELECT pnl_usd FROM trades WHERE timestamp LIKE ? AND result LIKE '%SL HIT%'", (f"{today_date}%",))
         sl_rows = cur.fetchall()
@@ -213,6 +209,14 @@ def calculate_atr(klines, period=14):
         trs.append(tr)
     return round(sum(trs[-period:]) / period, 1)
 
+def calculate_ema(prices, period):
+    if len(prices) < period: return prices[-1]
+    k = 2 / (period + 1)
+    ema = prices[0]
+    for p in prices[1:]:
+        ema = (p * k) + (ema * (1 - k))
+    return ema
+
 # --- 3. DATA, SENTIMENT, MICRO-DATA & PHASE 4 AI/ML ENGINE ---
 def run_data_news_engine():
     while True:
@@ -226,18 +230,15 @@ def run_data_news_engine():
             
             htf_trend = "NEUTRAL"
             try:
-                r_htf = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=30", timeout=3)
+                r_htf = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=40", timeout=3)
                 if r_htf.status_code == 200:
                     raw_htf = r_htf.json()
                     closes = [float(x[4]) for x in raw_htf]
-                    k = 2 / (20 + 1)
-                    ema20 = closes[0]
-                    for cl in closes[1:]:
-                        ema20 = (cl * k) + (ema20 * (1 - k))
+                    ema20 = calculate_ema(closes, 20)
                     curr_htf_price = closes[-1]
-                    if curr_htf_price > ema20 + 15.0:
+                    if curr_htf_price > ema20 + 20.0:
                         htf_trend = "BULLISH"
-                    elif curr_htf_price < ema20 - 15.0:
+                    elif curr_htf_price < ema20 - 20.0:
                         htf_trend = "BEARISH"
             except: pass
 
@@ -262,7 +263,7 @@ def run_data_news_engine():
             ai_score = 75
             atr_val = 45.0
             try:
-                r_k = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=30", timeout=3)
+                r_k = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=40", timeout=3)
                 if r_k.status_code == 200:
                     raw_k = r_k.json()
                     k_list = [{'high': float(x[2]), 'low': float(x[3]), 'close': float(x[4])} for x in raw_k]
@@ -273,7 +274,7 @@ def run_data_news_engine():
                     base_prob = 70
                     if 45 <= rsi <= 65: base_prob += 10
                     elif rsi > 75 or rsi < 25: base_prob -= 15
-                    if 30 <= atr_val <= 90: base_prob += 10
+                    if 35 <= atr_val <= 110: base_prob += 10
                     ai_score = max(40, min(95, base_prob))
             except: pass
 
@@ -288,20 +289,20 @@ def run_data_news_engine():
             mem['last_heartbeat'] = time.time()
             write_shared_memory(mem)
         except: pass
-        time.sleep(45)
+        time.sleep(40)
 
 # --- 4. FAST BINANCE DATA FETCHER ---
 def fetch_binance_klines():
     urls = [
-        "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=50",
-        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=50"
+        "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60",
+        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60"
     ]
     for u in urls:
         try:
             r = requests.get(u, timeout=2.5)
             if r.status_code == 200:
                 raw = r.json()
-                if isinstance(raw, list) and len(raw) >= 30:
+                if isinstance(raw, list) and len(raw) >= 35:
                     closed = [{'time': int(d[0]), 'open': float(d[1]), 'high': float(d[2]),
                                'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])} for d in raw[:-1]]
                     live = {'time': int(raw[-1][0]), 'open': float(raw[-1][1]), 'high': float(raw[-1][2]),
@@ -342,18 +343,17 @@ class MasterCommanderEngine:
         curr_price = float(live['close'])
         entry = float(t['entry'])
 
-        mem = read_shared_memory()
         c0 = closed[-1]
 
         # LONG POSITION MONITOR
         if t['type'] == 'LONG':
-            # Dynamic TP1 Hit Check with Strict RAM + DB Lock
+            # Dynamic TP1 Hit Check
             if not t.get('tp1_hit', False) and not self.tp1_locked and curr_price >= t['tp1']:
                 self.tp1_locked = True
                 t['tp1_hit'] = True
                 t['be_hit'] = True
                 t['tp1_bar_time'] = live['time']
-                t['sl'] = round(entry + 10.0, 1)
+                t['sl'] = round(entry + 10.0, 1)  # Breakeven shifted
                 half_qty = round(qty * 0.5, 4)
                 booked_pts = round(t['tp1'] - entry, 1)
                 half_usd = round(booked_pts * half_qty, 2)
@@ -423,13 +423,13 @@ class MasterCommanderEngine:
 
         # SHORT POSITION MONITOR
         elif t['type'] == 'SHORT':
-            # Dynamic TP1 Hit Check with Strict RAM + DB Lock
+            # Dynamic TP1 Hit Check
             if not t.get('tp1_hit', False) and not self.tp1_locked and curr_price <= t['tp1']:
                 self.tp1_locked = True
                 t['tp1_hit'] = True
                 t['be_hit'] = True
                 t['tp1_bar_time'] = live['time']
-                t['sl'] = round(entry - 10.0, 1)
+                t['sl'] = round(entry - 10.0, 1)  # Breakeven shifted
                 half_qty = round(qty * 0.5, 4)
                 booked_pts = round(entry - t['tp1'], 1)
                 half_usd = round(booked_pts * half_qty, 2)
@@ -497,12 +497,12 @@ class MasterCommanderEngine:
                 
                 self.last_trade_bar = live['time']
 
-    # --- ADVANCED SIGNAL LOGIC WITH STRICT DATABASE RISK SHIELDS ---
+    # --- ADVANCED SIGNAL LOGIC: CANDLE CLOSE STRUCTURE + 4 ENGINES ---
     def evaluate_market_moves(self, closed, live):
         if get_db_state("kill_switch_active", False):
             return
 
-        # 1. HARD 15-MINUTE (900 SEC) POST-EXIT COOLDOWN TO KILL OVER-TRADING
+        # 1. HARD 15-MINUTE (900s) EXIT COOLDOWN
         last_exit_epoch = get_db_state("last_exit_epoch", 0)
         if time.time() - last_exit_epoch < 900:
             return
@@ -512,21 +512,22 @@ class MasterCommanderEngine:
             if bars_since_exit < 3:
                 return
 
-        # 2. REAL-TIME SQLITE RISK GATE: 3 CONSECUTIVE LOSSES & -$10 LIMIT
+        # 2. SQLITE RISK BARRIER: 3 LOSSES & -$10 LIMIT
         consec_losses, daily_loss = check_db_risk_guard()
         if daily_loss >= 10.0:
             return
 
         if consec_losses >= 3:
-            # 2 Hours Hard Pause after 3 consecutive SL hits
             if time.time() - last_exit_epoch < 7200:
                 return
 
+        # Bar Lock: ek candle par sirf ek hi trade ho sakti hai
         if live['time'] <= self.last_trade_bar:
             return
 
+        # Running tick execution block (Candle ke pehle 20 second me fresh close par entry)
         candle_elapsed = (time.time() * 1000 - live['time']) / 1000
-        if candle_elapsed < 45.0:
+        if candle_elapsed > 120.0:
             return
 
         mem = read_shared_memory()
@@ -537,10 +538,11 @@ class MasterCommanderEngine:
         ai_score = mem.get('ai_score', 75)
         atr_val = mem.get('atr_val', 45.0)
 
+        # AI Confidence Gate
         if ai_score < 65:
             return
 
-        # ACCUMULATED MOVE RANGE FILTER
+        # Exhaustion Shield (Pichle 1 ghante ka run check)
         recent_12 = closed[-12:]
         h12 = max(c['high'] for c in recent_12)
         l12 = min(c['low'] for c in recent_12)
@@ -554,73 +556,62 @@ class MasterCommanderEngine:
         if is_dump_exhausted or is_pump_exhausted:
             return
 
-        # CANDLE BODY CLOSE VS WICK FILTER
+        # Candle Analysis on CLOSED candle (c0)
         c0 = closed[-1]
+        c1 = closed[-2]
         c0_range = max(1.0, c0['high'] - c0['low'])
+        c0_body = abs(c0['close'] - c0['open'])
         c0_upper_wick = c0['high'] - max(c0['open'], c0['close'])
         c0_lower_wick = min(c0['open'], c0['close']) - c0['low']
 
-        has_bearish_rejection_wick = (c0_lower_wick / c0_range) >= 0.40
-        has_bullish_rejection_wick = (c0_upper_wick / c0_range) >= 0.40
-
-        min_squeeze = max(35.0, atr_val * 0.7)
-        max_squeeze = min(160.0, atr_val * 3.2)
-
-        recent_bars = closed[-4:]
-        comp_high = max(c['high'] for c in recent_bars)
-        comp_low = min(c['low'] for c in recent_bars)
-        body_high = max(max(c['open'], c['close']) for c in recent_bars)
-        body_low = min(min(c['open'], c['close']) for c in recent_bars)
-        squeeze_range = comp_high - comp_low
-
-        if squeeze_range < min_squeeze or squeeze_range > max_squeeze:
+        # Wick Rejection Gate
+        if (c0_lower_wick / c0_range) >= 0.40 or (c0_upper_wick / c0_range) >= 0.40:
             return
 
-        live_open = float(live['open'])
+        # Body strength gate (Chop doji candles ko reject karega)
+        if (c0_body / c0_range) < 0.50:
+            return
 
+        # EMAs on 5m Closed Data
         closes = [c['close'] for c in closed]
-        k9 = 2 / 10
-        ema9 = closes[0]
-        for cl in closes[1:]: ema9 = (cl * k9) + (ema9 * (1 - k9))
+        ema9 = calculate_ema(closes, 9)
+        ema21 = calculate_ema(closes, 21)
 
+        # Volume Expansion Gate
         avg_vol = sum(c['vol'] for c in closed[-8:]) / 8.0
-        has_volume = (c0['vol'] >= avg_vol * 1.15) or (live['vol'] >= avg_vol * 0.6)
+        has_volume = c0['vol'] >= avg_vol * 1.25
 
-        candle_run = abs(curr_price - live_open)
-        if candle_run > 110.0:
-            return
-
+        # Funding & Depth Safe Checks
         is_funding_safe_long = funding_rate <= 0.0006
         is_funding_safe_short = funding_rate >= -0.0006
-        has_bid_support = book_imbalance >= 0.75
-        has_ask_pressure = book_imbalance <= 1.35
+        has_bid_support = book_imbalance >= 0.85
+        has_ask_pressure = book_imbalance <= 1.25
 
-        is_bottom_pump = (
-            (curr_price >= body_high + 5.0) and
-            (curr_price > comp_high - 10.0) and
-            (curr_price >= live_open + 8.0) and
-            (curr_price > ema9) and
+        # --- RIGID ENTRY CONDITIONS (CONFIRMED STRUCTURE BREAK) ---
+        is_bullish_breakout = (
+            (c0['close'] > c0['open']) and
+            (c0['close'] > ema9) and
+            (ema9 > ema21) and
+            (c0['close'] > c1['high']) and
             has_volume and
             (sent_label != 'FEAR') and
-            (htf_trend != 'BEARISH') and
+            (htf_trend == 'BULLISH') and  # 1H Supreme Court Aligned
             is_funding_safe_long and
             has_bid_support and
-            not is_pump_exhausted and
-            not has_bullish_rejection_wick
+            not is_pump_exhausted
         )
 
-        is_top_dump = (
-            (curr_price <= body_low - 5.0) and
-            (curr_price < comp_low + 10.0) and
-            (curr_price <= live_open - 8.0) and
-            (curr_price < ema9) and
+        is_bearish_breakdown = (
+            (c0['close'] < c0['open']) and
+            (c0['close'] < ema9) and
+            (ema9 < ema21) and
+            (c0['close'] < c1['low']) and
             has_volume and
             (sent_label != 'GREED') and
-            (htf_trend != 'BULLISH') and
+            (htf_trend == 'BEARISH') and  # 1H Supreme Court Aligned
             is_funding_safe_short and
             has_ask_pressure and
-            not is_dump_exhausted and
-            not has_bearish_rejection_wick
+            not is_dump_exhausted
         )
 
         cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
@@ -628,12 +619,12 @@ class MasterCommanderEngine:
         entry = round(curr_price, 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
-        # DYNAMIC ATR TARGETS & STOP LOSS
+        # DYNAMIC ATR CALCULATION
         dyn_sl_pts = round(max(45.0, min(160.0, atr_val * 1.5)), 1)
         dyn_tp1_pts = round(max(40.0, min(140.0, atr_val * 1.2)), 1)
         dyn_tp2_pts = round(max(80.0, min(280.0, atr_val * 2.4)), 1)
 
-        if is_bottom_pump:
+        if is_bullish_breakout:
             self.last_trade_bar = live['time']
             self.locked_closing_id = None
             self.tp1_locked = False
@@ -648,9 +639,9 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [DYNAMIC ATR BREAKOUT] BTC LONG\n1H Bias: {htf_trend} 🟢 | AI Confidence: {ai_score}%\nDepth: {book_imbalance}x | ATR: {atr_val} pts\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+{dyn_tp1_pts:.0f} pts)\n🎯 TP2 (50%): ${tp2:.1f} (+{dyn_tp2_pts:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [CONFIRMED 5M BREAKOUT] BTC LONG\n1H Trend: {htf_trend} 🟢 | AI Score: {ai_score}%\nDepth: {book_imbalance}x | Vol: +{int((c0['vol']/avg_vol - 1)*100)}%\n\n📍 Entry: ${entry:.1f}\n🛡️ Dynamic SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+{dyn_tp1_pts:.0f} pts)\n🎯 TP2 (50%): ${tp2:.1f} (+{dyn_tp2_pts:.0f} pts)\n📦 Qty: {qty} BTC")
 
-        elif is_top_dump:
+        elif is_bearish_breakdown:
             self.last_trade_bar = live['time']
             self.locked_closing_id = None
             self.tp1_locked = False
@@ -665,7 +656,7 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [DYNAMIC ATR BREAKDOWN] BTC SHORT\n1H Bias: {htf_trend} 🔴 | AI Confidence: {ai_score}%\nDepth: {book_imbalance}x | ATR: {atr_val} pts\n\n📍 Entry: ${entry:.1f}\n🛡️ SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+{dyn_tp1_pts:.0f} pts)\n🎯 TP2 (50%): ${tp2:.1f} (+{dyn_tp2_pts:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(f"⚡ [CONFIRMED 5M BREAKDOWN] BTC SHORT\n1H Trend: {htf_trend} 🔴 | AI Score: {ai_score}%\nDepth: {book_imbalance}x | Vol: +{int((c0['vol']/avg_vol - 1)*100)}%\n\n📍 Entry: ${entry:.1f}\n🛡️ Dynamic SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+{dyn_tp1_pts:.0f} pts)\n🎯 TP2 (50%): ${tp2:.1f} (+{dyn_tp2_pts:.0f} pts)\n📦 Qty: {qty} BTC")
 
     def run(self):
         while True:
@@ -705,7 +696,7 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_telegram_alert("⚡ [SYSTEM READY] Hard SQLite Risk Gate & Anti-Duplicate Active!")
+    send_telegram_alert("⚡ [SYSTEM READY] Precision Trend Structure & Dynamic ATR Online!")
     return cmd
 
 launch_full_architecture()
@@ -810,7 +801,7 @@ def render_live_dashboard():
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">PRO DYNAMIC</span>
+            ⚡ QUANT RADAR <span class="badge-scan">DYNAMIC STRUCTURE</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">DYN SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -856,7 +847,7 @@ def render_live_dashboard():
             </div>
             <div class="metric-cell">
                 <span class="cell-head">SCAN STATUS</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING SQUEEZE...</div>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">AWAITING CONFIRMATION...</div>
             </div>
         </div>
     </div>
@@ -1039,7 +1030,7 @@ def render_live_dashboard():
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp1').innerText = "--";
                 document.getElementById('disp-tp2').innerText = "--";
-                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "SCANNING SQUEEZE...";
+                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "AWAITING CONFIRMATION...";
                 document.getElementById('val-setup').style.color = killActive ? "#ff3b30" : "#38bdf8";
             }
 
