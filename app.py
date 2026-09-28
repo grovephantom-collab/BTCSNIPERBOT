@@ -18,7 +18,6 @@ CHAT_ID = "7886716805"
 DISCORD_WEBHOOK_URL = ""
 DB_FILE = "sniper_vault.db"
 SHARED_MEMORY_FILE = "sniper_brain_data.json"
-WATCHDOG_LOCK = "overseer_watchdog.pid"
 
 # --- 1. LOGGING & DATABASE ---
 def init_db():
@@ -121,9 +120,10 @@ def read_shared_memory():
         "funding_rate": 0.0,
         "oi_delta": 0.0,
         "oi_current": 0.0,
-        "liq_upper_pool": 0.0,      # Phase 2: Upper Liquidation Target
-        "liq_lower_pool": 0.0,      # Phase 2: Lower Liquidation Target
+        "liq_upper_pool": 0.0,
+        "liq_lower_pool": 0.0,
         "risk_circuit_broken": False,
+        "commander_heartbeat": time.time(),
         "atr_val": 45.0
     }
     if not os.path.exists(SHARED_MEMORY_FILE):
@@ -163,7 +163,6 @@ def run_data_news_engine():
     prev_oi = None
     while True:
         try:
-            # 1. 1-Hour Trend
             htf_trend = "NEUTRAL"
             try:
                 r_htf = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=40", timeout=3)
@@ -178,7 +177,6 @@ def run_data_news_engine():
                         htf_trend = "BEARISH"
             except: pass
 
-            # 2. Open Interest Delta
             oi_val = 0.0
             oi_delta_pct = 0.0
             try:
@@ -190,7 +188,6 @@ def run_data_news_engine():
                     prev_oi = oi_val
             except: pass
 
-            # 3. Funding Rate
             funding_rate = 0.0
             try:
                 r_fund = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT", timeout=3)
@@ -198,7 +195,6 @@ def run_data_news_engine():
                     funding_rate = float(r_fund.json().get('lastFundingRate', 0.0))
             except: pass
 
-            # 4. Phase 2: Liquidation Cluster Mapping from Deep Orderbook
             upper_liq_target = 0.0
             lower_liq_target = 0.0
             try:
@@ -215,7 +211,6 @@ def run_data_news_engine():
                         lower_liq_target = round(float(top_bid_wall[0]), 1)
             except: pass
 
-            # 5. Volatility (ATR)
             atr_val = 45.0
             try:
                 r_k = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=40", timeout=3)
@@ -238,24 +233,36 @@ def run_data_news_engine():
         except: pass
         time.sleep(35)
 
-# --- THREAD 4: DEDICATED HARD RISK & DRAWDOWN MANAGER (PHASE 2) ---
+# --- THREAD 4: DEDICATED HARD RISK MANAGER ---
 def run_risk_trade_manager():
     while True:
         try:
             consec_losses, daily_loss = check_db_risk_guard()
             mem = read_shared_memory()
-            # Hard Drawdown Guard: -$25/day loss or 3 consecutive losses shuts down execution
             if daily_loss >= 25.0 or consec_losses >= 3:
                 if not mem.get('risk_circuit_broken', False):
                     mem['risk_circuit_broken'] = True
                     write_shared_memory(mem)
-                    send_alert(f"🚨 [RISK MANAGER INTERVENTION] Daily loss limit hit (-${daily_loss:.2f})! Bot execution temporarily FROZEN for capital safety.")
+                    send_alert(f"🚨 [RISK MANAGER] Daily loss limit reached (-${daily_loss:.2f})! Bot trading frozen.")
             else:
                 if mem.get('risk_circuit_broken', False):
                     mem['risk_circuit_broken'] = False
                     write_shared_memory(mem)
         except: pass
         time.sleep(15)
+
+# --- THREAD 3: WATCHDOG (DEFINED BEFORE USE) ---
+def run_overseer_watchdog():
+    while True:
+        try:
+            mem = read_shared_memory()
+            last_hb = mem.get("commander_heartbeat", time.time())
+            if time.time() - last_hb > 45.0:
+                send_alert("⚠️ [WATCHDOG] Engine Freeze Detected! Reviving Background Stream...")
+                mem['commander_heartbeat'] = time.time()
+                write_shared_memory(mem)
+        except: pass
+        time.sleep(10)
 
 # --- 4. FAST BINANCE DATA FETCHERS ---
 def fetch_binance_klines():
@@ -294,7 +301,7 @@ def fetch_binance_1m_klines():
         except: continue
     return None
 
-# --- 5. COMMANDER ENGINE (MULTI-STAGE TP + TRAILING ON EMA 21) ---
+# --- 5. COMMANDER ENGINE ---
 class MasterCommanderEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
@@ -330,23 +337,20 @@ class MasterCommanderEngine:
 
         # LONG POSITION MONITOR
         if t['type'] == 'LONG':
-            # Phase 2: Stage 1 Profit Booking (+300 pts par 50% lock + SL to Entry)
             if not t.get('stage1_booked', False) and (curr_price - entry) >= 300.0:
                 t['stage1_booked'] = True
-                t['sl'] = round(entry + 25.0, 1)  # Risk-Free Lock
+                t['sl'] = round(entry + 25.0, 1)
                 half_qty = round(qty * 0.5, 4)
                 booked_usd = round(300.0 * half_qty, 2)
                 set_db_state("active_trade", t)
                 self.record_to_vault("LONG", entry, curr_price, "STAGE 1 BOOK (50%) 🎯", "+300", f"+${booked_usd:.2f}", half_qty)
-                send_alert(f"🎯 [STAGE 1 HIT] BTC LONG\nBooked 50%: +${booked_usd:.2f} (+300 pts)\n🛡️ SL Shifted to Breakeven (+25 pts profit lock)")
+                send_alert(f"🎯 [STAGE 1 HIT] BTC LONG\nBooked 50%: +${booked_usd:.2f} (+300 pts)\n🛡️ SL Shifted to Breakeven (+25 pts lock)")
 
-            # Stage 2 Trailing on EMA21
             if (curr_price - entry) >= 200.0 and ema21 > float(t['sl']):
                 t['sl'] = round(ema21 - 15.0, 1)
                 t['trailed'] = True
                 set_db_state("active_trade", t)
 
-            # FULL LIQUIDATION TARGET TP HIT
             if curr_price >= t['tp']:
                 self.locked_closing_id = curr_trade_ref
                 self.sl_locked = False
@@ -361,7 +365,6 @@ class MasterCommanderEngine:
                 self.last_trade_bar = live['time']
                 send_alert(f"🚀 [LIQUIDATION TARGET HIT] BTC LONG\nFinal Exit: +${pnl_usd:.2f} (+{pts:.0f} pts)\nPrice: ${t['tp']:.1f}")
 
-            # SL / TRAIL HIT
             elif curr_price <= float(t['sl']):
                 if self.sl_locked: return
                 self.sl_locked = True
@@ -390,7 +393,7 @@ class MasterCommanderEngine:
                 booked_usd = round(300.0 * half_qty, 2)
                 set_db_state("active_trade", t)
                 self.record_to_vault("SHORT", entry, curr_price, "STAGE 1 BOOK (50%) 🎯", "+300", f"+${booked_usd:.2f}", half_qty)
-                send_alert(f"🎯 [STAGE 1 HIT] BTC SHORT\nBooked 50%: +${booked_usd:.2f} (+300 pts)\n🛡️ SL Shifted to Breakeven (+25 pts profit lock)")
+                send_alert(f"🎯 [STAGE 1 HIT] BTC SHORT\nBooked 50%: +${booked_usd:.2f} (+300 pts)\n🛡️ SL Shifted to Breakeven (+25 pts lock)")
 
             if (entry - curr_price) >= 200.0 and ema21 < float(t['sl']):
                 t['sl'] = round(ema21 + 15.0, 1)
@@ -465,7 +468,6 @@ class MasterCommanderEngine:
 
         curr_price = float(live['close'])
 
-        # 1-MINUTE LEAD
         klines_1m = fetch_binance_1m_klines()
         if not klines_1m or len(klines_1m) < 10:
             m1_c0 = {'close': live['close'], 'open': live['open']}
@@ -507,9 +509,7 @@ class MasterCommanderEngine:
         entry = round(curr_price, 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
-        # Dynamic Stop Loss
         dyn_sl_pts = round(max(90.0, min(160.0, atr_val * 2.2)), 1)
-        # Liquidation Target: Liquidation wall magnet ya default 850 pts run
         target_long_pts = round(liq_upper - entry, 1) if (liq_upper - entry) > 500.0 else round(atr_val * 14.0, 1)
         target_short_pts = round(entry - liq_lower, 1) if (entry - liq_lower) > 500.0 else round(atr_val * 14.0, 1)
 
@@ -575,14 +575,12 @@ class MasterCommanderEngine:
 
             time.sleep(0.5)
 
-# --- ENGINE STARTERS (ALL 4 THREADS) ---
+# --- ENGINE STARTERS (ALL 4 THREADS INITIALIZED IN ORDER) ---
 @st.cache_resource
 def launch_full_architecture():
     eid = str(uuid.uuid4())
-    with open(WATCHDOG_LOCK, "w") as f: f.write(eid)
-
     threading.Thread(target=run_data_news_engine, daemon=False).start()
-    threading.Thread(target=run_risk_trade_manager, daemon=False).start()   # THREAD 4 ACTIVATED
+    threading.Thread(target=run_risk_trade_manager, daemon=False).start()
     cmd = MasterCommanderEngine(eid)
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
@@ -690,7 +688,7 @@ def render_live_dashboard():
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">PHASE 2: RISK + LIQ</span>
+            ⚡ QUANT RADAR <span class="badge-scan">PHASE 2: ONLINE</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SL / TRAIL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -897,7 +895,7 @@ def render_live_dashboard():
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "SCANNING LIQUIDATION POOLS...";
+                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "SEARCHING LIQUIDATION POOLS...";
                 document.getElementById('val-setup').style.color = killActive ? "#ff3b30" : "#38bdf8";
             }
 
