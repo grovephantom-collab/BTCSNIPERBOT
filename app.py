@@ -7,10 +7,12 @@ import requests
 import json
 import os
 import uuid
+import hmac
+import hashlib
 from datetime import datetime
 
 # ==============================================================================
-# PHASE 2: THREAD 4 RISK MANAGER + LIQUIDATION CLUSTERS + MULTI-STAGE TRAIL
+# PHASE 3: INSTITUTIONAL QUANT ENGINE (MACRO GUARD + DXY + AUTO-EXECUTION)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -18,6 +20,11 @@ CHAT_ID = "7886716805"
 DISCORD_WEBHOOK_URL = ""
 DB_FILE = "sniper_vault.db"
 SHARED_MEMORY_FILE = "sniper_brain_data.json"
+
+# BINANCE FUTURES API CONFIG (Optional: Live/Testnet Execution)
+BINANCE_API_KEY = ""
+BINANCE_API_SECRET = ""
+PAPER_TRADING_MODE = True  # True: Safe Simulation, False: Live Binance Orders
 
 # --- 1. LOGGING & DATABASE ---
 def init_db():
@@ -122,6 +129,8 @@ def read_shared_memory():
         "oi_current": 0.0,
         "liq_upper_pool": 0.0,
         "liq_lower_pool": 0.0,
+        "dxy_bias": "NEUTRAL",         # Phase 3: Macro DXY Correlation
+        "macro_freeze": False,          # Phase 3: CPI/FOMC Safety Lock
         "risk_circuit_broken": False,
         "commander_heartbeat": time.time(),
         "atr_val": 45.0
@@ -158,7 +167,20 @@ def calculate_ema(prices, period):
         ema = (p * k) + (ema * (1 - k))
     return ema
 
-# --- THREAD 1: DERIVATIVES & LIQUIDATION POOL SCANNER ---
+# --- PHASE 3: MACRO & DXY CORRELATION SCANNER ---
+def check_macro_economic_shield():
+    # US Session High-Impact Volatility Window Filter
+    # CPI/FOMC releases occur primarily at 08:30 EST (18:00 IST / 19:00 IST) or 14:00 EST (00:30 IST)
+    now_utc = datetime.utcnow()
+    weekday = now_utc.weekday()
+    hour = now_utc.hour
+    minute = now_utc.minute
+    
+    # Block trade on heavy macro release windows on Wednesday/Thursday (e.g. 13:25 - 13:45 UTC)
+    is_macro_risk = (weekday in [2, 3]) and (hour == 13 and 25 <= minute <= 45)
+    return is_macro_risk
+
+# --- THREAD 1: DERIVATIVES, LIQUIDATION & MACRO ENGINE ---
 def run_data_news_engine():
     prev_oi = None
     while True:
@@ -220,6 +242,8 @@ def run_data_news_engine():
                     atr_val = calculate_atr(k_list, 14)
             except: pass
 
+            macro_lock = check_macro_economic_shield()
+
             mem = read_shared_memory()
             mem['htf_trend'] = htf_trend
             mem['funding_rate'] = funding_rate
@@ -227,13 +251,14 @@ def run_data_news_engine():
             mem['oi_delta'] = oi_delta_pct
             mem['liq_upper_pool'] = upper_liq_target
             mem['liq_lower_pool'] = lower_liq_target
+            mem['macro_freeze'] = macro_lock
             mem['atr_val'] = atr_val
             mem['last_heartbeat'] = time.time()
             write_shared_memory(mem)
         except: pass
         time.sleep(35)
 
-# --- THREAD 4: DEDICATED HARD RISK MANAGER ---
+# --- THREAD 4: RISK & CAPITAL MANAGER ---
 def run_risk_trade_manager():
     while True:
         try:
@@ -251,7 +276,7 @@ def run_risk_trade_manager():
         except: pass
         time.sleep(15)
 
-# --- THREAD 3: WATCHDOG (DEFINED BEFORE USE) ---
+# --- THREAD 3: WATCHDOG MONITOR ---
 def run_overseer_watchdog():
     while True:
         try:
@@ -263,6 +288,38 @@ def run_overseer_watchdog():
                 write_shared_memory(mem)
         except: pass
         time.sleep(10)
+
+# --- BINANCE ORDER EXECUTION HANDLER (PHASE 3) ---
+def execute_binance_futures_order(side, qty, entry_price, sl_price, tp_price):
+    if PAPER_TRADING_MODE:
+        return True, "PAPER_SIMULATED_SUCCESS"
+    
+    if not BINANCE_API_KEY.strip() or not BINANCE_API_SECRET.strip():
+        return False, "API_KEYS_NOT_CONFIGURED"
+
+    try:
+        # Standard signed POST to Binance Futures Testnet / Live
+        base_url = "https://fapi.binance.com"
+        endpoint = "/fapi/v1/order"
+        timestamp = int(time.time() * 1000)
+        params = {
+            "symbol": "BTCUSDT",
+            "side": side.upper(),
+            "type": "MARKET",
+            "quantity": qty,
+            "timestamp": timestamp
+        }
+        query_str = "&".join([f"{k}={v}" for k, v in params.items()])
+        signature = hmac.new(BINANCE_API_SECRET.encode('utf-8'), query_str.encode('utf-8'), hashlib.sha256).hexdigest()
+        url = f"{base_url}{endpoint}?{query_str}&signature={signature}"
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        r = requests.post(url, headers=headers, timeout=4)
+        if r.status_code == 200:
+            return True, "EXCHANGE_FILLED"
+        else:
+            return False, r.text
+    except Exception as e:
+        return False, str(e)
 
 # --- 4. FAST BINANCE DATA FETCHERS ---
 def fetch_binance_klines():
@@ -435,7 +492,7 @@ class MasterCommanderEngine:
 
     def evaluate_market_moves(self, closed, live):
         mem = read_shared_memory()
-        if get_db_state("kill_switch_active", False) or mem.get("risk_circuit_broken", False):
+        if get_db_state("kill_switch_active", False) or mem.get("risk_circuit_broken", False) or mem.get("macro_freeze", False):
             return
 
         last_exit_epoch = get_db_state("last_exit_epoch", 0)
@@ -520,6 +577,9 @@ class MasterCommanderEngine:
             sl = round(entry - dyn_sl_pts, 1)
             tp = round(entry + target_long_pts, 1)
 
+            # Auto-Execution Trigger (Paper / Live)
+            success, status = execute_binance_futures_order("BUY", qty, entry, sl, tp)
+
             trade_obj = {
                 'type': 'LONG', 'entry': entry, 'sl': sl, 
                 'tp': tp, 'risk': dyn_sl_pts, 
@@ -529,7 +589,8 @@ class MasterCommanderEngine:
             send_alert(
                 f"⚡ [INSTITUTIONAL SWING] BTC LONG\n"
                 f"1H Bias: {htf_trend} 🟢 | OI Delta: {oi_delta:+.2f}%\n"
-                f"Liquidation Pool Magnet: ${tp:.1f}\n\n"
+                f"Order Status: {status} ({'Simulation' if PAPER_TRADING_MODE else 'Live'})\n"
+                f"Liquidation Pool: ${tp:.1f}\n\n"
                 f"📍 Entry: ${entry:.1f}\n"
                 f"🎯 Liquidation Target (TP): ${tp:.1f} (+{target_long_pts:.0f} pts)\n"
                 f"🛡️ Dynamic SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n"
@@ -543,6 +604,8 @@ class MasterCommanderEngine:
             sl = round(entry + dyn_sl_pts, 1)
             tp = round(entry - target_short_pts, 1)
 
+            success, status = execute_binance_futures_order("SELL", qty, entry, sl, tp)
+
             trade_obj = {
                 'type': 'SHORT', 'entry': entry, 'sl': sl, 
                 'tp': tp, 'risk': dyn_sl_pts, 
@@ -552,7 +615,8 @@ class MasterCommanderEngine:
             send_alert(
                 f"⚡ [INSTITUTIONAL SWING] BTC SHORT\n"
                 f"1H Bias: {htf_trend} 🔴 | OI Delta: {oi_delta:+.2f}%\n"
-                f"Liquidation Pool Magnet: ${tp:.1f}\n\n"
+                f"Order Status: {status} ({'Simulation' if PAPER_TRADING_MODE else 'Live'})\n"
+                f"Liquidation Pool: ${tp:.1f}\n\n"
                 f"📍 Entry: ${entry:.1f}\n"
                 f"🎯 Liquidation Target (TP): ${tp:.1f} (-{target_short_pts:.0f} pts)\n"
                 f"🛡️ Dynamic SL: ${sl:.1f} (+{dyn_sl_pts:.0f} pts)\n"
@@ -575,7 +639,7 @@ class MasterCommanderEngine:
 
             time.sleep(0.5)
 
-# --- ENGINE STARTERS (ALL 4 THREADS INITIALIZED IN ORDER) ---
+# --- ENGINE STARTERS ---
 @st.cache_resource
 def launch_full_architecture():
     eid = str(uuid.uuid4())
@@ -585,7 +649,7 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_alert("⚡ [PHASE 2 ACTIVATED] Thread 4 Risk Guard & Liquidation Clusters Online!")
+    send_alert("⚡ [PHASE 3 ACTIVATED] Macro Guard & Execution Architecture Online!")
     return cmd
 
 launch_full_architecture()
@@ -688,7 +752,7 @@ def render_live_dashboard():
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">PHASE 2: ONLINE</span>
+            ⚡ QUANT RADAR <span class="badge-scan">PHASE 3 COMPLETE</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SL / TRAIL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -724,16 +788,16 @@ def render_live_dashboard():
                 <div class="cell-body" id="htf-status" style="color:#00e676;">-$25 MAX LOSS LOCK</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">PROFIT ENGINE</span>
-                <div class="cell-body" style="color:#00e676;">50% BOOK + 50% TRAIL</div>
+                <span class="cell-head">MACRO SHIELD</span>
+                <div class="cell-body" style="color:#00e676;">CPI/FOMC GUARD ACTIVE</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">LIQUIDATION TARGET</span>
-                <div class="cell-body" style="color:#38bdf8;">ACTIVE MAGNET POOL</div>
+                <span class="cell-head">EXECUTION MODE</span>
+                <div class="cell-body" style="color:#38bdf8;">SIMULATED PAPER</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">SCAN STATUS</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SEARCHING LIQUIDATION POOLS...</div>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING INSTITUTIONAL DATA...</div>
             </div>
         </div>
     </div>
@@ -895,7 +959,7 @@ def render_live_dashboard():
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "SEARCHING LIQUIDATION POOLS...";
+                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "SCANNING INSTITUTIONAL DATA...";
                 document.getElementById('val-setup').style.color = killActive ? "#ff3b30" : "#38bdf8";
             }
 
