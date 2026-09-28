@@ -10,11 +10,12 @@ import uuid
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: 1M LEAD SNIPER + DIRECT MEGA TP + 5M EMA21 TRAILING SL
+# PHASE 1: INSTITUTIONAL OI DELTA + 2-3 HR SWING SNIPER + TRAILING ENGINE
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
 CHAT_ID = "7886716805"
+DISCORD_WEBHOOK_URL = ""  # Optional: Discord webhook URL yahan paste kar sakte hain
 DB_FILE = "sniper_vault.db"
 SHARED_MEMORY_FILE = "sniper_brain_data.json"
 WATCHDOG_LOCK = "overseer_watchdog.pid"
@@ -93,60 +94,7 @@ def check_db_risk_guard():
     except:
         return 0, 0.0
 
-# --- UI ACTION DISPATCHERS ---
-if st.query_params.get("clear_vault") == "confirmed":
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=5)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM trades")
-        conn.commit()
-        conn.close()
-        set_db_state("active_trade", None)
-    except: pass
-    st.query_params.clear()
-    st.rerun()
-
-if st.query_params.get("force_close") == "confirmed":
-    act = get_db_state("active_trade")
-    if act and isinstance(act, dict) and 'entry' in act:
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        e = float(act['entry'])
-        q = float(act.get('qty', 0.01))
-        try:
-            conn = sqlite3.connect(DB_FILE, timeout=5)
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT OR IGNORE INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
-                VALUES (?,?,?,?,?,?,?,?,?)
-            """, (now_str, "BTCUSDT", act['type'], e, e, "MANUAL FORCE CLOSE ⚠️", "0", "$0.00", q))
-            conn.commit()
-            conn.close()
-        except: pass
-        set_db_state("active_trade", None)
-        set_db_state("last_exit_epoch", time.time())
-        try:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-            requests.post(url, json={"chat_id": str(CHAT_ID).strip(), "text": f"⚠️ [MANUAL OVERRIDE] Position on {act['type']} Force Closed!"}, timeout=3)
-        except: pass
-    st.query_params.clear()
-    st.rerun()
-
-if st.query_params.get("toggle_emergency") == "confirmed":
-    curr_kill = get_db_state("kill_switch_active", False)
-    new_kill = not curr_kill
-    set_db_state("kill_switch_active", new_kill)
-    if new_kill:
-        set_db_state("active_trade", None)
-        status_msg = "🚨 [EMERGENCY STOP ACTIVATED] Bot trading has been FROZEN completely!"
-    else:
-        status_msg = "🟢 [EMERGENCY STOP RELEASED] Bot trading has resumed regular scanning."
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": str(CHAT_ID).strip(), "text": status_msg}, timeout=3)
-    except: pass
-    st.query_params.clear()
-    st.rerun()
-
+# --- ALERTS ENGINE (TELEGRAM + DISCORD) ---
 def _send_tg_worker(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": str(CHAT_ID).strip(), "text": msg}
@@ -154,7 +102,12 @@ def _send_tg_worker(msg):
         requests.post(url, json=payload, timeout=3)
     except: pass
 
-def send_telegram_alert(msg):
+    if DISCORD_WEBHOOK_URL.strip():
+        try:
+            requests.post(DISCORD_WEBHOOK_URL.strip(), json={"content": msg}, timeout=3)
+        except: pass
+
+def send_alert(msg):
     threading.Thread(target=_send_tg_worker, args=(msg,), daemon=True).start()
 
 # --- 2. SHARED MEMORY / JSON ENGINE ---
@@ -166,9 +119,10 @@ def read_shared_memory():
         "current_day": datetime.now().strftime("%Y-%m-%d"),
         "htf_trend": "NEUTRAL",
         "funding_rate": 0.0,
-        "book_imbalance": 1.0,
-        "ai_score": 75,
-        "atr_val": 45.0
+        "oi_delta": 0.0,          # Open Interest percentage change (Phase 1)
+        "oi_current": 0.0,
+        "atr_val": 45.0,
+        "paper_trading": True     # True: Paper Mode, False: Live
     }
     if not os.path.exists(SHARED_MEMORY_FILE):
         return default_mem
@@ -182,7 +136,7 @@ def write_shared_memory(data):
         with open(SHARED_MEMORY_FILE, "w") as f: json.dump(data, f)
     except: pass
 
-# --- PHASE 4 UTILITIES: ATR & EMA ENGINE ---
+# --- UTILITIES: ATR & EMA ---
 def calculate_atr(klines, period=14):
     if len(klines) < period + 1: return 45.0
     trs = []
@@ -202,10 +156,12 @@ def calculate_ema(prices, period):
         ema = (p * k) + (ema * (1 - k))
     return ema
 
-# --- 3. DATA & SENTIMENT ENGINE ---
+# --- 3. DATA & DERIVATIVES FLOW ENGINE (OPEN INTEREST & FUNDING) ---
 def run_data_news_engine():
+    prev_oi = None
     while True:
         try:
+            # 1. 1-Hour Macro Trend
             htf_trend = "NEUTRAL"
             try:
                 r_htf = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=40", timeout=3)
@@ -220,6 +176,19 @@ def run_data_news_engine():
                         htf_trend = "BEARISH"
             except: pass
 
+            # 2. Binance Futures Open Interest (Institutional Position Flow)
+            oi_val = 0.0
+            oi_delta_pct = 0.0
+            try:
+                r_oi = requests.get("https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT", timeout=3)
+                if r_oi.status_code == 200:
+                    oi_val = float(r_oi.json().get('openInterest', 0.0))
+                    if prev_oi and prev_oi > 0:
+                        oi_delta_pct = round(((oi_val - prev_oi) / prev_oi) * 100, 2)
+                    prev_oi = oi_val
+            except: pass
+
+            # 3. Funding Rate
             funding_rate = 0.0
             try:
                 r_fund = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT", timeout=3)
@@ -227,6 +196,7 @@ def run_data_news_engine():
                     funding_rate = float(r_fund.json().get('lastFundingRate', 0.0))
             except: pass
 
+            # 4. Volatility (ATR)
             atr_val = 45.0
             try:
                 r_k = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=40", timeout=3)
@@ -239,13 +209,15 @@ def run_data_news_engine():
             mem = read_shared_memory()
             mem['htf_trend'] = htf_trend
             mem['funding_rate'] = funding_rate
+            mem['oi_current'] = oi_val
+            mem['oi_delta'] = oi_delta_pct
             mem['atr_val'] = atr_val
             mem['last_heartbeat'] = time.time()
             write_shared_memory(mem)
         except: pass
-        time.sleep(40)
+        time.sleep(35)
 
-# --- 4. DATA FETCHERS (5M & 1M LEAD) ---
+# --- 4. FAST BINANCE DATA FETCHERS ---
 def fetch_binance_klines():
     urls = [
         "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60",
@@ -282,7 +254,7 @@ def fetch_binance_1m_klines():
         except: continue
     return None
 
-# --- 5. COMMANDER ENGINE (DIRECT MEGA TP & 5M EMA21 TRAILING) ---
+# --- 5. COMMANDER ENGINE (OPEN INTEREST EXPANSION + 2-3 HR RUN) ---
 class MasterCommanderEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
@@ -318,13 +290,13 @@ class MasterCommanderEngine:
 
         # LONG POSITION MONITOR
         if t['type'] == 'LONG':
-            # Dynamic Trailing SL: +200 pts profit hone ke baad SL EMA 21 ke niche lock hota jayega
+            # Profit Trailing: +200 pts ke baad EMA 21 ke niche lock hota rahega
             if (curr_price - entry) >= 200.0 and ema21 > float(t['sl']):
                 t['sl'] = round(ema21 - 15.0, 1)
                 t['trailed'] = True
                 set_db_state("active_trade", t)
 
-            # DIRECT MEGA TP HIT
+            # DIRECT MEGA TP HIT (2-3 Hr Target)
             if curr_price >= t['tp']:
                 self.locked_closing_id = curr_trade_ref
                 self.sl_locked = False
@@ -334,9 +306,9 @@ class MasterCommanderEngine:
 
                 pts = round(t['tp'] - entry, 1)
                 pnl_usd = round(pts * qty, 2)
-                self.record_to_vault("LONG", entry, t['tp'], "DIRECT MEGA TP 🔥", f"+{pts:.0f}", f"+${pnl_usd:.2f}", qty)
+                self.record_to_vault("LONG", entry, t['tp'], "INSTITUTIONAL TP 🔥", f"+{pts:.0f}", f"+${pnl_usd:.2f}", qty)
                 self.last_trade_bar = live['time']
-                send_telegram_alert(f"🚀 [DIRECT MEGA TP HIT] BTC LONG Completed!\nFinal Exit: +${pnl_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp']:.1f}")
+                send_alert(f"🚀 [INSTITUTIONAL 2-3 HR TP HIT] BTC LONG\nTarget: ${t['tp']:.1f}\nPoints: +{pts:.0f} pts | Profit: +${pnl_usd:.2f}")
 
             # SL YA TRAILING SL HIT
             elif curr_price <= float(t['sl']):
@@ -355,17 +327,15 @@ class MasterCommanderEngine:
                 
                 self.record_to_vault("LONG", entry, t['sl'], res_type, pts_sign, usd_sign, qty)
                 self.last_trade_bar = live['time']
-                send_telegram_alert(f"{'🛡️' if pts > 0 else '🛑'} [EXIT] BTC LONG {res_type}\nPoints: {pts_sign}\nPnL: {usd_sign}\nExit: ${curr_price:.1f}")
+                send_alert(f"{'🛡️' if pts > 0 else '🛑'} [EXIT] BTC LONG {res_type}\nPoints: {pts_sign} | PnL: {usd_sign}\nExit: ${curr_price:.1f}")
 
         # SHORT POSITION MONITOR
         elif t['type'] == 'SHORT':
-            # Dynamic Trailing SL: +200 pts profit hone ke baad SL EMA 21 ke upar lock hota jayega
             if (entry - curr_price) >= 200.0 and ema21 < float(t['sl']):
                 t['sl'] = round(ema21 + 15.0, 1)
                 t['trailed'] = True
                 set_db_state("active_trade", t)
 
-            # DIRECT MEGA TP HIT
             if curr_price <= t['tp']:
                 self.locked_closing_id = curr_trade_ref
                 self.sl_locked = False
@@ -375,11 +345,10 @@ class MasterCommanderEngine:
 
                 pts = round(entry - t['tp'], 1)
                 pnl_usd = round(pts * qty, 2)
-                self.record_to_vault("SHORT", entry, t['tp'], "DIRECT MEGA TP 🔥", f"+{pts:.0f}", f"+${pnl_usd:.2f}", qty)
+                self.record_to_vault("SHORT", entry, t['tp'], "INSTITUTIONAL TP 🔥", f"+{pts:.0f}", f"+${pnl_usd:.2f}", qty)
                 self.last_trade_bar = live['time']
-                send_telegram_alert(f"🩸 [DIRECT MEGA TP HIT] BTC SHORT Completed!\nFinal Exit: +${pnl_usd:.2f} (+{pts:.0f} pts)\nExit Price: ${t['tp']:.1f}")
+                send_alert(f"🩸 [INSTITUTIONAL 2-3 HR TP HIT] BTC SHORT\nTarget: ${t['tp']:.1f}\nPoints: +{pts:.0f} pts | Profit: +${pnl_usd:.2f}")
 
-            # SL YA TRAILING SL HIT
             elif curr_price >= float(t['sl']):
                 if self.sl_locked: return
                 self.sl_locked = True
@@ -396,9 +365,8 @@ class MasterCommanderEngine:
 
                 self.record_to_vault("SHORT", entry, t['sl'], res_type, pts_sign, usd_sign, qty)
                 self.last_trade_bar = live['time']
-                send_telegram_alert(f"{'🛡️' if pts > 0 else '🛑'} [EXIT] BTC SHORT {res_type}\nPoints: {pts_sign}\nPnL: {usd_sign}\nExit: ${curr_price:.1f}")
+                send_alert(f"{'🛡️' if pts > 0 else '🛑'} [EXIT] BTC SHORT {res_type}\nPoints: {pts_sign} | PnL: {usd_sign}\nExit: ${curr_price:.1f}")
 
-    # --- ADVANCED SIGNAL LOGIC: EARLY ENTRY + DIRECT MEGA TP ---
     def evaluate_market_moves(self, closed, live):
         if get_db_state("kill_switch_active", False):
             return
@@ -416,9 +384,8 @@ class MasterCommanderEngine:
         if daily_loss >= 10.0:
             return
 
-        if consec_losses >= 3:
-            if time.time() - last_exit_epoch < 7200:
-                return
+        if consec_losses >= 3 and (time.time() - last_exit_epoch < 7200):
+            return
 
         if live['time'] <= self.last_trade_bar:
             return
@@ -426,9 +393,10 @@ class MasterCommanderEngine:
         mem = read_shared_memory()
         htf_trend = mem.get('htf_trend', 'NEUTRAL')
         funding_rate = mem.get('funding_rate', 0.0)
+        oi_delta = mem.get('oi_delta', 0.0)
         atr_val = mem.get('atr_val', 45.0)
 
-        # 5M Macro Filter
+        # 5M Trend Direction
         closes_5m = [c['close'] for c in closed]
         ema9_5m = calculate_ema(closes_5m, 9)
         ema21_5m = calculate_ema(closes_5m, 21)
@@ -438,6 +406,7 @@ class MasterCommanderEngine:
         is_funding_safe_long = funding_rate <= 0.0006
         is_funding_safe_short = funding_rate >= -0.0006
 
+        # Exhaustion Guard
         recent_12 = closed[-12:]
         h12 = max(c['high'] for c in recent_12)
         l12 = min(c['low'] for c in recent_12)
@@ -448,18 +417,25 @@ class MasterCommanderEngine:
         is_dump_exhausted = (curr_price <= l12 + 50.0) and (total_hour_run > max_run_limit)
         is_pump_exhausted = (curr_price >= h12 - 50.0) and (total_hour_run > max_run_limit)
 
-        # 1-MINUTE LEAD SNIPER
+        # 1-MINUTE LEAD ENGINE WITH FALLBACK
         klines_1m = fetch_binance_1m_klines()
         if not klines_1m or len(klines_1m) < 10:
-            return
+            m1_c0 = {'close': live['close'], 'open': live['open']}
+            has_lead_vol = True
+            ema5_1m = ema9_5m
+            ema13_1m = ema21_5m
+        else:
+            m1_c0 = klines_1m[-1]
+            m1_closes = [c['close'] for c in klines_1m]
+            ema5_1m = calculate_ema(m1_closes, 5)
+            ema13_1m = calculate_ema(m1_closes, 13)
+            avg_vol_1m = sum(c['vol'] for c in klines_1m[-6:]) / 6.0
+            has_lead_vol = m1_c0['vol'] >= (avg_vol_1m * 1.05)
 
-        m1_c0 = klines_1m[-1]
-        m1_closes = [c['close'] for c in klines_1m]
-        ema5_1m = calculate_ema(m1_closes, 5)
-        ema13_1m = calculate_ema(m1_closes, 13)
-
-        avg_vol_1m = sum(c['vol'] for c in klines_1m[-6:]) / 6.0
-        has_lead_vol = m1_c0['vol'] >= (avg_vol_1m * 1.15)
+        # OPEN INTEREST FILTER (PHASE 1 UPGRADE):
+        # Move ke waqt Open Interest ka collapse nahi hona chahiye
+        is_oi_healthy_long = (oi_delta >= -0.5)
+        is_oi_healthy_short = (oi_delta >= -0.5)
 
         is_early_long = (
             (ema9_5m >= ema21_5m) and
@@ -467,6 +443,7 @@ class MasterCommanderEngine:
             (m1_c0['close'] > ema5_1m) and
             (m1_c0['close'] > m1_c0['open']) and
             has_lead_vol and
+            is_oi_healthy_long and
             htf_allows_long and
             is_funding_safe_long and
             not is_pump_exhausted
@@ -478,6 +455,7 @@ class MasterCommanderEngine:
             (m1_c0['close'] < ema5_1m) and
             (m1_c0['close'] < m1_c0['open']) and
             has_lead_vol and
+            is_oi_healthy_short and
             htf_allows_short and
             is_funding_safe_short and
             not is_dump_exhausted
@@ -488,9 +466,9 @@ class MasterCommanderEngine:
         entry = round(curr_price, 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
-        # DIRECT MEGA TREND TARGETS (1000+ POINT RUN)
+        # 2-3 HOUR MEGA SWING TARGETS
         dyn_sl_pts = round(max(90.0, min(160.0, atr_val * 2.2)), 1)
-        dyn_tp_pts = round(max(650.0, min(1200.0, atr_val * 14.0)), 1)  # DIRECT MEGA TP
+        dyn_tp_pts = round(max(700.0, min(1300.0, atr_val * 14.0)), 1)
 
         if is_early_long:
             self.last_trade_bar = live['time']
@@ -505,13 +483,14 @@ class MasterCommanderEngine:
                 'qty': qty, 'trailed': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(
-                f"⚡ [BIG MOVE SNIPER] BTC LONG\n"
-                f"1H Bias: {htf_trend} 🟢 | 1M Lead: Confirmed 🚀\n\n"
+            send_alert(
+                f"⚡ [2-3 HR INSTITUTIONAL SWING] BTC LONG\n"
+                f"1H Trend: {htf_trend} 🟢 | OI Delta: {oi_delta:+.2f}%\n"
+                f"Volume Flow: Confirmed 🚀\n\n"
                 f"📍 Entry: ${entry:.1f}\n"
-                f"🎯 Direct Mega TP: ${tp:.1f} (+{dyn_tp_pts:.0f} pts)\n"
-                f"🛡️ Initial SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n"
-                f"📦 Qty: {qty} BTC"
+                f"🎯 Expected 2-3 Hr Target: ${tp:.1f} (+{dyn_tp_pts:.0f} pts)\n"
+                f"🛡️ Initial Invalidation (SL): ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n"
+                f"📦 Size: {qty} BTC"
             )
 
         elif is_early_short:
@@ -527,13 +506,14 @@ class MasterCommanderEngine:
                 'qty': qty, 'trailed': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(
-                f"⚡ [BIG MOVE SNIPER] BTC SHORT\n"
-                f"1H Bias: {htf_trend} 🔴 | 1M Lead: Confirmed 🩸\n\n"
+            send_alert(
+                f"⚡ [2-3 HR INSTITUTIONAL SWING] BTC SHORT\n"
+                f"1H Trend: {htf_trend} 🔴 | OI Delta: {oi_delta:+.2f}%\n"
+                f"Volume Flow: Confirmed 🩸\n\n"
                 f"📍 Entry: ${entry:.1f}\n"
-                f"🎯 Direct Mega TP: ${tp:.1f} (-{dyn_tp_pts:.0f} pts)\n"
-                f"🛡️ Initial SL: ${sl:.1f} (+{dyn_sl_pts:.0f} pts)\n"
-                f"📦 Qty: {qty} BTC"
+                f"🎯 Expected 2-3 Hr Target: ${tp:.1f} (-{dyn_tp_pts:.0f} pts)\n"
+                f"🛡️ Initial Invalidation (SL): ${sl:.1f} (+{dyn_sl_pts:.0f} pts)\n"
+                f"📦 Size: {qty} BTC"
             )
 
     def run(self):
@@ -552,20 +532,20 @@ class MasterCommanderEngine:
 
             time.sleep(0.5)
 
-# --- 6. OVERSEER WATCHDOG ---
+# --- 6. WATCHDOG FAILOVER ---
 def run_overseer_watchdog():
     while True:
         try:
             mem = read_shared_memory()
             last_hb = mem.get("commander_heartbeat", time.time())
             if time.time() - last_hb > 45.0:
-                send_telegram_alert("⚠️ [WATCHDOG] Engine Freeze Detected! Reviving Background Stream...")
+                send_alert("⚠️ [WATCHDOG] Engine Freeze Detected! Reviving Background Stream...")
                 mem['commander_heartbeat'] = time.time()
                 write_shared_memory(mem)
         except: pass
         time.sleep(10)
 
-# --- 24/7 MULTI-ENGINE STARTER ---
+# --- ENGINE STARTER ---
 @st.cache_resource
 def launch_full_architecture():
     eid = str(uuid.uuid4())
@@ -576,13 +556,13 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_telegram_alert("⚡ [SYSTEM READY] Big Move Engine Online (Direct Mega TP)!")
+    send_alert("⚡ [PHASE 1 ACTIVATED] Open Interest Flow & 2-3 Hr Trend Rider Online!")
     return cmd
 
 launch_full_architecture()
 
 # -------------------------------------------------------------
-# FRONTEND UI & CONTROLS DOCK
+# FRONTEND UI & CONTROLS DOCK (FLICKER-FREE AUTO-SYNC)
 # -------------------------------------------------------------
 st.set_page_config(page_title="AI SNIPER BOT", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -673,18 +653,17 @@ def render_live_dashboard():
             display: block;
             outline: none;
         }
-        .btn-modal-clear:active { background: #ff3b30; color: #fff; }
     </style>
 </head>
 <body>
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">BIG TREND RIDER</span>
+            ⚡ QUANT RADAR <span class="badge-scan">PHASE 1: OI ACTIVE</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SL / TRAIL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
-        <div class="stat-card"><div class="stat-label">DIRECT MEGA TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
+        <div class="stat-card"><div class="stat-label">2-3 HR TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
         <button class="btn-compact" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
         <button class="btn-compact" onclick="window.parent.location.reload()">🔄</button>
         <div style="margin-left: auto; display: flex; align-items: center;">
@@ -712,20 +691,20 @@ def render_live_dashboard():
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">LOCK SYSTEM</span>
-                <div class="cell-body" id="htf-status" style="color:#00e676;">SQLITE RISK GATE 🛡️</div>
+                <span class="cell-head">DERIVATIVES FLOW</span>
+                <div class="cell-body" id="htf-status" style="color:#00e676;">OI & FUNDING ACTIVE</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">STRATEGY</span>
-                <div class="cell-body" style="color:#00e676;">MEGA RUN (1-3 HR)</div>
+                <span class="cell-head">TARGET HORIZON</span>
+                <div class="cell-body" style="color:#00e676;">2 - 3 HOURS WAVE</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">TRAILING ENGINE</span>
+                <span class="cell-head">TRAILING SYSTEM</span>
                 <div class="cell-body" style="color:#38bdf8;">5M EMA21 DYNAMIC</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">SCAN STATUS</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">AWAITING CONFIRMATION...</div>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING INSTITUTIONAL MOVE...</div>
             </div>
         </div>
     </div>
@@ -882,7 +861,7 @@ def render_live_dashboard():
                     price: tpVal, color: '#00e676', lineWidth: 2, 
                     lineStyle: LightweightCharts.LineStyle.Solid, 
                     axisLabelVisible: true, 
-                    title: 'MEGA TP $' + tpVal.toFixed(1) 
+                    title: '2-3 HR TP $' + tpVal.toFixed(1) 
                 });
 
                 document.getElementById('disp-entry').innerText = "$" + entryVal.toFixed(1);
@@ -895,7 +874,7 @@ def render_live_dashboard():
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "AWAITING CONFIRMATION...";
+                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "SCANNING INSTITUTIONAL MOVE...";
                 document.getElementById('val-setup').style.color = killActive ? "#ff3b30" : "#38bdf8";
             }
 
