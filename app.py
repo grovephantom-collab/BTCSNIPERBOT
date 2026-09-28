@@ -12,7 +12,7 @@ import hashlib
 from datetime import datetime
 
 # ==============================================================================
-# PHASE 3: INSTITUTIONAL QUANT ENGINE (MACRO GUARD + DXY + AUTO-EXECUTION)
+# PRO QUANT ENGINE: PHASE 3 (SPAM LOCK + HARD DB FLUSH + DYNAMIC RISK GUARD)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -21,10 +21,10 @@ DISCORD_WEBHOOK_URL = ""
 DB_FILE = "sniper_vault.db"
 SHARED_MEMORY_FILE = "sniper_brain_data.json"
 
-# BINANCE FUTURES API CONFIG (Optional: Live/Testnet Execution)
+# BINANCE FUTURES CONFIG
 BINANCE_API_KEY = ""
 BINANCE_API_SECRET = ""
-PAPER_TRADING_MODE = True  # True: Safe Simulation, False: Live Binance Orders
+PAPER_TRADING_MODE = True  # True: Paper Mode, False: Live Binance Orders
 
 # --- 1. LOGGING & DATABASE ---
 def init_db():
@@ -129,8 +129,8 @@ def read_shared_memory():
         "oi_current": 0.0,
         "liq_upper_pool": 0.0,
         "liq_lower_pool": 0.0,
-        "dxy_bias": "NEUTRAL",         # Phase 3: Macro DXY Correlation
-        "macro_freeze": False,          # Phase 3: CPI/FOMC Safety Lock
+        "dxy_bias": "NEUTRAL",
+        "macro_freeze": False,
         "risk_circuit_broken": False,
         "commander_heartbeat": time.time(),
         "atr_val": 45.0
@@ -167,16 +167,13 @@ def calculate_ema(prices, period):
         ema = (p * k) + (ema * (1 - k))
     return ema
 
-# --- PHASE 3: MACRO & DXY CORRELATION SCANNER ---
+# --- MACRO RELEASE PROTECTION ---
 def check_macro_economic_shield():
-    # US Session High-Impact Volatility Window Filter
-    # CPI/FOMC releases occur primarily at 08:30 EST (18:00 IST / 19:00 IST) or 14:00 EST (00:30 IST)
     now_utc = datetime.utcnow()
     weekday = now_utc.weekday()
     hour = now_utc.hour
     minute = now_utc.minute
-    
-    # Block trade on heavy macro release windows on Wednesday/Thursday (e.g. 13:25 - 13:45 UTC)
+    # US CPI/FOMC window shield (Wednesday/Thursday high risk windows)
     is_macro_risk = (weekday in [2, 3]) and (hour == 13 and 25 <= minute <= 45)
     return is_macro_risk
 
@@ -258,21 +255,28 @@ def run_data_news_engine():
         except: pass
         time.sleep(35)
 
-# --- THREAD 4: RISK & CAPITAL MANAGER ---
+# --- THREAD 4: RISK & CAPITAL MANAGER (SPAM-LOCK FIXED) ---
 def run_risk_trade_manager():
+    alert_already_sent = False
     while True:
         try:
             consec_losses, daily_loss = check_db_risk_guard()
             mem = read_shared_memory()
-            if daily_loss >= 25.0 or consec_losses >= 3:
-                if not mem.get('risk_circuit_broken', False):
-                    mem['risk_circuit_broken'] = True
-                    write_shared_memory(mem)
-                    send_alert(f"🚨 [RISK MANAGER] Daily loss limit reached (-${daily_loss:.2f})! Bot trading frozen.")
+            
+            # Drawdown limit: $25 daily loss ya 4 consecutive losses
+            if daily_loss >= 25.0 or consec_losses >= 4:
+                mem['risk_circuit_broken'] = True
+                write_shared_memory(mem)
+                
+                # Sirf EK hi baar message aayega, loop me baar-baar nahi
+                if not alert_already_sent:
+                    send_alert(f"🚨 [RISK MANAGER] Daily loss limit reached (-${daily_loss:.2f})! Bot execution paused for capital protection.")
+                    alert_already_sent = True
             else:
                 if mem.get('risk_circuit_broken', False):
                     mem['risk_circuit_broken'] = False
                     write_shared_memory(mem)
+                alert_already_sent = False
         except: pass
         time.sleep(15)
 
@@ -289,7 +293,7 @@ def run_overseer_watchdog():
         except: pass
         time.sleep(10)
 
-# --- BINANCE ORDER EXECUTION HANDLER (PHASE 3) ---
+# --- BINANCE ORDER EXECUTION HANDLER ---
 def execute_binance_futures_order(side, qty, entry_price, sl_price, tp_price):
     if PAPER_TRADING_MODE:
         return True, "PAPER_SIMULATED_SUCCESS"
@@ -298,7 +302,6 @@ def execute_binance_futures_order(side, qty, entry_price, sl_price, tp_price):
         return False, "API_KEYS_NOT_CONFIGURED"
 
     try:
-        # Standard signed POST to Binance Futures Testnet / Live
         base_url = "https://fapi.binance.com"
         endpoint = "/fapi/v1/order"
         timestamp = int(time.time() * 1000)
@@ -577,7 +580,6 @@ class MasterCommanderEngine:
             sl = round(entry - dyn_sl_pts, 1)
             tp = round(entry + target_long_pts, 1)
 
-            # Auto-Execution Trigger (Paper / Live)
             success, status = execute_binance_futures_order("BUY", qty, entry, sl, tp)
 
             trade_obj = {
@@ -649,7 +651,7 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_alert("⚡ [PHASE 3 ACTIVATED] Macro Guard & Execution Architecture Online!")
+    send_alert("⚡ [SYSTEM READY] Bot Restarted & Cleaned. Real-time scanning active!")
     return cmd
 
 launch_full_architecture()
@@ -663,6 +665,58 @@ header, footer, #MainMenu { display: none !important; }
 .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; }
 iframe { width: 100vw !important; height: calc(100vh - 5px) !important; border: none !important; display: block !important; }
 </style>""", unsafe_allow_html=True)
+
+# UI ACTION DISPATCHERS
+if st.query_params.get("clear_vault") == "confirmed":
+    try:
+        conn = sqlite3.connect(DB_FILE, timeout=5)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM trades")
+        conn.commit()
+        conn.close()
+        set_db_state("active_trade", None)
+        set_db_state("last_exit_epoch", 0)
+        mem = read_shared_memory()
+        mem['risk_circuit_broken'] = False
+        write_shared_memory(mem)
+    except: pass
+    st.query_params.clear()
+    st.rerun()
+
+if st.query_params.get("force_close") == "confirmed":
+    act = get_db_state("active_trade")
+    if act and isinstance(act, dict) and 'entry' in act:
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        e = float(act['entry'])
+        q = float(act.get('qty', 0.01))
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=5)
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT OR IGNORE INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
+                VALUES (?,?,?,?,?,?,?,?,?)
+            """, (now_str, "BTCUSDT", act['type'], e, e, "MANUAL FORCE CLOSE ⚠️", "0", "$0.00", q))
+            conn.commit()
+            conn.close()
+        except: pass
+        set_db_state("active_trade", None)
+        set_db_state("last_exit_epoch", time.time())
+        send_alert(f"⚠️ [MANUAL OVERRIDE] Position on {act['type']} Force Closed!")
+    st.query_params.clear()
+    st.rerun()
+
+if st.query_params.get("toggle_emergency") == "confirmed":
+    curr_kill = get_db_state("kill_switch_active", False)
+    new_kill = not curr_kill
+    set_db_state("kill_switch_active", new_kill)
+    if new_kill:
+        set_db_state("active_trade", None)
+        status_msg = "🚨 [EMERGENCY STOP ACTIVATED] Bot trading has been FROZEN completely!"
+    else:
+        status_msg = "🟢 [EMERGENCY STOP RELEASED] Bot trading has resumed regular scanning."
+    send_alert(status_msg)
+    st.query_params.clear()
+    st.rerun()
 
 @st.fragment(run_every=2)
 def render_live_dashboard():
@@ -752,7 +806,7 @@ def render_live_dashboard():
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">PHASE 3 COMPLETE</span>
+            ⚡ QUANT RADAR <span class="badge-scan">PHASE 3 LIVE</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SL / TRAIL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
@@ -784,15 +838,15 @@ def render_live_dashboard():
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">THREAD 4 RISK</span>
-                <div class="cell-body" id="htf-status" style="color:#00e676;">-$25 MAX LOSS LOCK</div>
+                <span class="cell-head">RISK SHIELD</span>
+                <div class="cell-body" id="htf-status" style="color:#00e676;">ACTIVE (SAFE) 🛡️</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">MACRO SHIELD</span>
-                <div class="cell-body" style="color:#00e676;">CPI/FOMC GUARD ACTIVE</div>
+                <span class="cell-head">MACRO CALENDAR</span>
+                <div class="cell-body" style="color:#00e676;">NO HIGH-RISK NEWS</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">EXECUTION MODE</span>
+                <span class="cell-head">EXECUTION ENGINE</span>
                 <div class="cell-body" style="color:#38bdf8;">SIMULATED PAPER</div>
             </div>
             <div class="metric-cell">
