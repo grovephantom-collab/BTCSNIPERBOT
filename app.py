@@ -11,7 +11,7 @@ import math
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: CLOSED-CANDLE TREND STRUCTURE + HARD RISK LOCK + DYNAMIC ATR
+# PRO QUANT ENGINE: 1M LEAD SNIPER + 5M DYNAMIC STRUCTURE + DYNAMIC ATR
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -183,7 +183,7 @@ def write_shared_memory(data):
         with open(SHARED_MEMORY_FILE, "w") as f: json.dump(data, f)
     except: pass
 
-# --- PHASE 4 ML UTILITIES: RSI & ATR ENGINE ---
+# --- PHASE 4 ML UTILITIES: RSI, ATR & EMA ENGINE ---
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1: return 50.0
     deltas = [prices[i+1] - prices[i] for i in range(len(prices)-1)]
@@ -291,7 +291,7 @@ def run_data_news_engine():
         except: pass
         time.sleep(40)
 
-# --- 4. FAST BINANCE DATA FETCHER ---
+# --- 4. FAST BINANCE DATA FETCHERS (5M & 1M LEAD) ---
 def fetch_binance_klines():
     urls = [
         "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60",
@@ -310,6 +310,23 @@ def fetch_binance_klines():
                     return closed, live
         except: continue
     return None, None
+
+def fetch_binance_1m_klines():
+    urls = [
+        "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=30",
+        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=30"
+    ]
+    for u in urls:
+        try:
+            r = requests.get(u, timeout=2.0)
+            if r.status_code == 200:
+                raw = r.json()
+                if isinstance(raw, list) and len(raw) >= 15:
+                    closed = [{'time': int(d[0]), 'open': float(d[1]), 'high': float(d[2]),
+                               'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])} for d in raw[:-1]]
+                    return closed
+        except: continue
+    return None
 
 # --- 5. COMMANDER, RISK GUARD & EXECUTION CORE ---
 class MasterCommanderEngine:
@@ -342,12 +359,10 @@ class MasterCommanderEngine:
         qty = float(t.get("qty", 0.01))
         curr_price = float(live['close'])
         entry = float(t['entry'])
-
         c0 = closed[-1]
 
         # LONG POSITION MONITOR
         if t['type'] == 'LONG':
-            # Dynamic TP1 Hit Check
             if not t.get('tp1_hit', False) and not self.tp1_locked and curr_price >= t['tp1']:
                 self.tp1_locked = True
                 t['tp1_hit'] = True
@@ -423,7 +438,6 @@ class MasterCommanderEngine:
 
         # SHORT POSITION MONITOR
         elif t['type'] == 'SHORT':
-            # Dynamic TP1 Hit Check
             if not t.get('tp1_hit', False) and not self.tp1_locked and curr_price <= t['tp1']:
                 self.tp1_locked = True
                 t['tp1_hit'] = True
@@ -497,7 +511,7 @@ class MasterCommanderEngine:
                 
                 self.last_trade_bar = live['time']
 
-    # --- ADVANCED SIGNAL LOGIC: CANDLE CLOSE STRUCTURE + 4 ENGINES ---
+    # --- ADVANCED SIGNAL LOGIC: 1M LEAD SNIPER + 5M DYNAMIC STRUCTURE ---
     def evaluate_market_moves(self, closed, live):
         if get_db_state("kill_switch_active", False):
             return
@@ -509,7 +523,7 @@ class MasterCommanderEngine:
 
         if self.last_exit_bar > 0:
             bars_since_exit = (live['time'] - self.last_exit_bar) // 300000
-            if bars_since_exit < 3:
+            if bars_since_exit < 2:
                 return
 
         # 2. SQLITE RISK BARRIER: 3 LOSSES & -$10 LIMIT
@@ -525,22 +539,21 @@ class MasterCommanderEngine:
         if live['time'] <= self.last_trade_bar:
             return
 
-        # Running tick execution block (Candle ke pehle 20 second me fresh close par entry)
-        candle_elapsed = (time.time() * 1000 - live['time']) / 1000
-        if candle_elapsed > 120.0:
-            return
-
         mem = read_shared_memory()
-        sent_label = mem.get('sentiment_label', 'NEUTRAL')
         htf_trend = mem.get('htf_trend', 'NEUTRAL')
         funding_rate = mem.get('funding_rate', 0.0)
-        book_imbalance = mem.get('book_imbalance', 1.0)
-        ai_score = mem.get('ai_score', 75)
         atr_val = mem.get('atr_val', 45.0)
 
-        # AI Confidence Gate
-        if ai_score < 65:
-            return
+        # 5M Macro Trend Baseline
+        closes_5m = [c['close'] for c in closed]
+        ema9_5m = calculate_ema(closes_5m, 9)
+        ema21_5m = calculate_ema(closes_5m, 21)
+
+        # Relaxed HTF Trend Filter (Opposing trend block hoga, neutral allow hoga)
+        htf_allows_long = (htf_trend in ['BULLISH', 'NEUTRAL'])
+        htf_allows_short = (htf_trend in ['BEARISH', 'NEUTRAL'])
+        is_funding_safe_long = funding_rate <= 0.0006
+        is_funding_safe_short = funding_rate >= -0.0006
 
         # Exhaustion Shield (Pichle 1 ghante ka run check)
         recent_12 = closed[-12:]
@@ -550,67 +563,43 @@ class MasterCommanderEngine:
         max_run_limit = max(450.0, atr_val * 7.5)
 
         curr_price = float(live['close'])
-        is_dump_exhausted = (curr_price <= l12 + 60.0) and (total_hour_run > max_run_limit)
-        is_pump_exhausted = (curr_price >= h12 - 60.0) and (total_hour_run > max_run_limit)
+        is_dump_exhausted = (curr_price <= l12 + 50.0) and (total_hour_run > max_run_limit)
+        is_pump_exhausted = (curr_price >= h12 - 50.0) and (total_hour_run > max_run_limit)
 
-        if is_dump_exhausted or is_pump_exhausted:
+        # --- 1-MINUTE LEAD SNIPER ENGINE ---
+        klines_1m = fetch_binance_1m_klines()
+        if not klines_1m or len(klines_1m) < 10:
             return
 
-        # Candle Analysis on CLOSED candle (c0)
-        c0 = closed[-1]
-        c1 = closed[-2]
-        c0_range = max(1.0, c0['high'] - c0['low'])
-        c0_body = abs(c0['close'] - c0['open'])
-        c0_upper_wick = c0['high'] - max(c0['open'], c0['close'])
-        c0_lower_wick = min(c0['open'], c0['close']) - c0['low']
+        m1_c0 = klines_1m[-1]  # Latest closed 1m candle
+        m1_closes = [c['close'] for c in klines_1m]
+        ema5_1m = calculate_ema(m1_closes, 5)
+        ema13_1m = calculate_ema(m1_closes, 13)
 
-        # Wick Rejection Gate
-        if (c0_lower_wick / c0_range) >= 0.40 or (c0_upper_wick / c0_range) >= 0.40:
-            return
+        # 1M Volume Spike Check
+        avg_vol_1m = sum(c['vol'] for c in klines_1m[-6:]) / 6.0
+        has_lead_vol = m1_c0['vol'] >= (avg_vol_1m * 1.15)
 
-        # Body strength gate (Chop doji candles ko reject karega)
-        if (c0_body / c0_range) < 0.50:
-            return
-
-        # EMAs on 5m Closed Data
-        closes = [c['close'] for c in closed]
-        ema9 = calculate_ema(closes, 9)
-        ema21 = calculate_ema(closes, 21)
-
-        # Volume Expansion Gate
-        avg_vol = sum(c['vol'] for c in closed[-8:]) / 8.0
-        has_volume = c0['vol'] >= avg_vol * 1.25
-
-        # Funding & Depth Safe Checks
-        is_funding_safe_long = funding_rate <= 0.0006
-        is_funding_safe_short = funding_rate >= -0.0006
-        has_bid_support = book_imbalance >= 0.85
-        has_ask_pressure = book_imbalance <= 1.25
-
-        # --- RIGID ENTRY CONDITIONS (CONFIRMED STRUCTURE BREAK) ---
-        is_bullish_breakout = (
-            (c0['close'] > c0['open']) and
-            (c0['close'] > ema9) and
-            (ema9 > ema21) and
-            (c0['close'] > c1['high']) and
-            has_volume and
-            (sent_label != 'FEAR') and
-            (htf_trend == 'BULLISH') and  # 1H Supreme Court Aligned
+        # --- EARLY SIGNALS ---
+        is_early_long = (
+            (ema9_5m >= ema21_5m) and
+            (ema5_1m > ema13_1m) and
+            (m1_c0['close'] > ema5_1m) and
+            (m1_c0['close'] > m1_c0['open']) and
+            has_lead_vol and
+            htf_allows_long and
             is_funding_safe_long and
-            has_bid_support and
             not is_pump_exhausted
         )
 
-        is_bearish_breakdown = (
-            (c0['close'] < c0['open']) and
-            (c0['close'] < ema9) and
-            (ema9 < ema21) and
-            (c0['close'] < c1['low']) and
-            has_volume and
-            (sent_label != 'GREED') and
-            (htf_trend == 'BEARISH') and  # 1H Supreme Court Aligned
+        is_early_short = (
+            (ema9_5m <= ema21_5m) and
+            (ema5_1m < ema13_1m) and
+            (m1_c0['close'] < ema5_1m) and
+            (m1_c0['close'] < m1_c0['open']) and
+            has_lead_vol and
+            htf_allows_short and
             is_funding_safe_short and
-            has_ask_pressure and
             not is_dump_exhausted
         )
 
@@ -619,12 +608,12 @@ class MasterCommanderEngine:
         entry = round(curr_price, 1)
         qty = round(pos_usd / entry, 4) or 0.001
 
-        # DYNAMIC ATR CALCULATION
-        dyn_sl_pts = round(max(45.0, min(160.0, atr_val * 1.5)), 1)
-        dyn_tp1_pts = round(max(40.0, min(140.0, atr_val * 1.2)), 1)
-        dyn_tp2_pts = round(max(80.0, min(280.0, atr_val * 2.4)), 1)
+        # DYNAMIC ATR CALCULATION (Quick Sniping Multipliers)
+        dyn_sl_pts = round(max(40.0, min(140.0, atr_val * 1.3)), 1)
+        dyn_tp1_pts = round(max(45.0, min(130.0, atr_val * 1.1)), 1)
+        dyn_tp2_pts = round(max(85.0, min(260.0, atr_val * 2.2)), 1)
 
-        if is_bullish_breakout:
+        if is_early_long:
             self.last_trade_bar = live['time']
             self.locked_closing_id = None
             self.tp1_locked = False
@@ -639,9 +628,17 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [CONFIRMED 5M BREAKOUT] BTC LONG\n1H Trend: {htf_trend} 🟢 | AI Score: {ai_score}%\nDepth: {book_imbalance}x | Vol: +{int((c0['vol']/avg_vol - 1)*100)}%\n\n📍 Entry: ${entry:.1f}\n🛡️ Dynamic SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+{dyn_tp1_pts:.0f} pts)\n🎯 TP2 (50%): ${tp2:.1f} (+{dyn_tp2_pts:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(
+                f"⚡ [EARLY 1M LEAD SNIPER] BTC LONG\n"
+                f"1H Bias: {htf_trend} 🟢 | 1M Cross: Bullish 🚀\n"
+                f"📍 Entry: ${entry:.1f}\n"
+                f"🛡️ Dynamic SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n"
+                f"🎯 TP1 (50%): ${tp1:.1f} (+{dyn_tp1_pts:.0f} pts)\n"
+                f"🎯 TP2 (50%): ${tp2:.1f} (+{dyn_tp2_pts:.0f} pts)\n"
+                f"📦 Qty: {qty} BTC"
+            )
 
-        elif is_bearish_breakdown:
+        elif is_early_short:
             self.last_trade_bar = live['time']
             self.locked_closing_id = None
             self.tp1_locked = False
@@ -656,7 +653,15 @@ class MasterCommanderEngine:
                 'qty': qty, 'be_hit': False, 'tp1_hit': False
             }
             set_db_state("active_trade", trade_obj)
-            send_telegram_alert(f"⚡ [CONFIRMED 5M BREAKDOWN] BTC SHORT\n1H Trend: {htf_trend} 🔴 | AI Score: {ai_score}%\nDepth: {book_imbalance}x | Vol: +{int((c0['vol']/avg_vol - 1)*100)}%\n\n📍 Entry: ${entry:.1f}\n🛡️ Dynamic SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n🎯 TP1 (50%): ${tp1:.1f} (+{dyn_tp1_pts:.0f} pts)\n🎯 TP2 (50%): ${tp2:.1f} (+{dyn_tp2_pts:.0f} pts)\n📦 Qty: {qty} BTC")
+            send_telegram_alert(
+                f"⚡ [EARLY 1M LEAD SNIPER] BTC SHORT\n"
+                f"1H Bias: {htf_trend} 🔴 | 1M Cross: Bearish 🩸\n"
+                f"📍 Entry: ${entry:.1f}\n"
+                f"🛡️ Dynamic SL: ${sl:.1f} (+{dyn_sl_pts:.0f} pts)\n"
+                f"🎯 TP1 (50%): ${tp1:.1f} (-{dyn_tp1_pts:.0f} pts)\n"
+                f"🎯 TP2 (50%): ${tp2:.1f} (-{dyn_tp2_pts:.0f} pts)\n"
+                f"📦 Qty: {qty} BTC"
+            )
 
     def run(self):
         while True:
@@ -667,10 +672,12 @@ class MasterCommanderEngine:
             closed, live = fetch_binance_klines()
             if closed and live:
                 active = get_db_state("active_trade")
-                if active: self.manage_position(active, live, closed)
-                else: self.evaluate_market_moves(closed, live)
+                if active: 
+                    self.manage_position(active, live, closed)
+                else: 
+                    self.evaluate_market_moves(closed, live)
 
-            time.sleep(1.2)
+            time.sleep(0.5)
 
 # --- 6. OVERSEER WATCHDOG ---
 def run_overseer_watchdog():
@@ -696,7 +703,7 @@ def launch_full_architecture():
     threading.Thread(target=cmd.run, daemon=False).start()
     threading.Thread(target=run_overseer_watchdog, daemon=False).start()
 
-    send_telegram_alert("⚡ [SYSTEM READY] Precision Trend Structure & Dynamic ATR Online!")
+    send_telegram_alert("⚡ [SYSTEM READY] 1M Lead Sniper & Dynamic ATR Online!")
     return cmd
 
 launch_full_architecture()
@@ -801,7 +808,7 @@ def render_live_dashboard():
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">DYNAMIC STRUCTURE</span>
+            ⚡ QUANT RADAR <span class="badge-scan">1M LEAD ACTIVE</span>
         </div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">DYN SL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
