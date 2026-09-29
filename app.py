@@ -12,7 +12,8 @@ import hashlib
 from datetime import datetime
 
 # ==============================================================================
-# PRO QUANT ENGINE: PHASE 3 (SPAM LOCK + HARD DB FLUSH + DYNAMIC RISK GUARD)
+# INSTITUTIONAL QUANT TRADING BOT (5-THREAD ARCHITECTURE)
+# TARGET ASSETS: BTCUSDT | SOLUSDT | DOGEUSDT ($10 ACCOUNT ENGINE)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -21,12 +22,20 @@ DISCORD_WEBHOOK_URL = ""
 DB_FILE = "sniper_vault.db"
 SHARED_MEMORY_FILE = "sniper_brain_data.json"
 
-# BINANCE FUTURES CONFIG
 BINANCE_API_KEY = ""
 BINANCE_API_SECRET = ""
-PAPER_TRADING_MODE = True  # True: Paper Mode, False: Live Binance Orders
+PAPER_TRADING_MODE = True  # True: Paper Simulation, False: Live Binance Futures
 
-# --- 1. LOGGING & DATABASE ---
+WATCHLIST = ["BTCUSDT", "SOLUSDT", "DOGEUSDT"]
+
+# ASSET SPECIFICATIONS FOR $10 CAPITAL ($2.50 Margin @ 10x Lev = $25 Position)
+PAIR_CONFIG = {
+    "BTCUSDT": {"min_sl_pct": 0.0040, "tp_pct": 0.0150, "round_dec": 1, "qty_dec": 3, "min_atr": 40.0},
+    "SOLUSDT": {"min_sl_pct": 0.0075, "tp_pct": 0.0250, "round_dec": 2, "qty_dec": 2, "min_atr": 0.35},
+    "DOGEUSDT": {"min_sl_pct": 0.0090, "tp_pct": 0.0300, "round_dec": 5, "qty_dec": 0, "min_atr": 0.0008}
+}
+
+# --- DATABASE SETUP (VAULT ENGINE) ---
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cur = conn.cursor()
@@ -116,24 +125,17 @@ def _send_tg_worker(msg):
 def send_alert(msg):
     threading.Thread(target=_send_tg_worker, args=(msg,), daemon=True).start()
 
-# --- 2. SHARED MEMORY / JSON ENGINE ---
+# --- SHARED MEMORY ENGINE ---
 def read_shared_memory():
     default_mem = {
-        "sentiment_score": 50, "sentiment_label": "NEUTRAL", 
-        "last_heartbeat": time.time(), "consecutive_losses": 0, 
-        "last_trade_time": 0, "daily_loss_sum": 0.0, 
-        "current_day": datetime.now().strftime("%Y-%m-%d"),
-        "htf_trend": "NEUTRAL",
-        "funding_rate": 0.0,
-        "oi_delta": 0.0,
-        "oi_current": 0.0,
-        "liq_upper_pool": 0.0,
-        "liq_lower_pool": 0.0,
-        "dxy_bias": "NEUTRAL",
-        "macro_freeze": False,
+        "trends_1h": {s: "NEUTRAL" for s in WATCHLIST},
+        "funding_rates": {s: 0.0 for s in WATCHLIST},
+        "orderbook_imbalance": {s: 1.0 for s in WATCHLIST},
+        "sentiment_score": 50,
         "risk_circuit_broken": False,
         "commander_heartbeat": time.time(),
-        "atr_val": 45.0
+        "scanner_heartbeat": time.time(),
+        "candidate_signals": {}
     }
     if not os.path.exists(SHARED_MEMORY_FILE):
         return default_mem
@@ -147,18 +149,7 @@ def write_shared_memory(data):
         with open(SHARED_MEMORY_FILE, "w") as f: json.dump(data, f)
     except: pass
 
-# --- UTILITIES: ATR & EMA ---
-def calculate_atr(klines, period=14):
-    if len(klines) < period + 1: return 45.0
-    trs = []
-    for i in range(1, len(klines)):
-        h = klines[i]['high']
-        l = klines[i]['low']
-        prev_c = klines[i-1]['close']
-        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
-        trs.append(tr)
-    return round(sum(trs[-period:]) / period, 1)
-
+# --- TECHNICAL ANALYSIS UTILITIES ---
 def calculate_ema(prices, period):
     if len(prices) < period: return prices[-1]
     k = 2 / (period + 1)
@@ -167,110 +158,183 @@ def calculate_ema(prices, period):
         ema = (p * k) + (ema * (1 - k))
     return ema
 
-# --- MACRO RELEASE PROTECTION ---
-def check_macro_economic_shield():
-    now_utc = datetime.utcnow()
-    weekday = now_utc.weekday()
-    hour = now_utc.hour
-    minute = now_utc.minute
-    # US CPI/FOMC window shield (Wednesday/Thursday high risk windows)
-    is_macro_risk = (weekday in [2, 3]) and (hour == 13 and 25 <= minute <= 45)
-    return is_macro_risk
+def calculate_atr(klines, period=14):
+    if len(klines) < period + 1: return 0.0
+    trs = []
+    for i in range(1, len(klines)):
+        h = klines[i]['high']
+        l = klines[i]['low']
+        prev_c = klines[i-1]['close']
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+        trs.append(tr)
+    return sum(trs[-period:]) / period
 
-# --- THREAD 1: DERIVATIVES, LIQUIDATION & MACRO ENGINE ---
-def run_data_news_engine():
-    prev_oi = None
+# --- FAST BINANCE REST FETCHERS ---
+def fetch_pair_klines(symbol, interval="5m", limit=40):
+    urls = [
+        f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
+        f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    ]
+    for u in urls:
+        try:
+            r = requests.get(u, timeout=2.5)
+            if r.status_code == 200:
+                raw = r.json()
+                if isinstance(raw, list) and len(raw) >= 20:
+                    closed = [{'time': int(d[0]), 'open': float(d[1]), 'high': float(d[2]),
+                               'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])} for d in raw[:-1]]
+                    live = {'time': int(raw[-1][0]), 'open': float(raw[-1][1]), 'high': float(raw[-1][2]),
+                            'low': float(raw[-1][3]), 'close': float(raw[-1][4]), 'vol': float(raw[-1][5])}
+                    return closed, live
+        except: continue
+    return None, None
+
+# ==============================================================================
+# THREAD 1: WATCHLIST SCANNER (ASYNC REAL-TIME SCANNER)
+# ==============================================================================
+def run_thread1_watchlist_scanner():
     while True:
         try:
-            htf_trend = "NEUTRAL"
-            try:
-                r_htf = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=40", timeout=3)
-                if r_htf.status_code == 200:
-                    raw_htf = r_htf.json()
-                    closes = [float(x[4]) for x in raw_htf]
-                    ema20 = calculate_ema(closes, 20)
-                    curr_htf_price = closes[-1]
-                    if curr_htf_price > ema20 + 20.0:
-                        htf_trend = "BULLISH"
-                    elif curr_htf_price < ema20 - 20.0:
-                        htf_trend = "BEARISH"
-            except: pass
-
-            oi_val = 0.0
-            oi_delta_pct = 0.0
-            try:
-                r_oi = requests.get("https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT", timeout=3)
-                if r_oi.status_code == 200:
-                    oi_val = float(r_oi.json().get('openInterest', 0.0))
-                    if prev_oi and prev_oi > 0:
-                        oi_delta_pct = round(((oi_val - prev_oi) / prev_oi) * 100, 2)
-                    prev_oi = oi_val
-            except: pass
-
-            funding_rate = 0.0
-            try:
-                r_fund = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT", timeout=3)
-                if r_fund.status_code == 200:
-                    funding_rate = float(r_fund.json().get('lastFundingRate', 0.0))
-            except: pass
-
-            upper_liq_target = 0.0
-            lower_liq_target = 0.0
-            try:
-                r_depth = requests.get("https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=50", timeout=3)
-                if r_depth.status_code == 200:
-                    d = r_depth.json()
-                    asks = d.get('asks', [])
-                    bids = d.get('bids', [])
-                    if asks:
-                        top_ask_wall = max(asks, key=lambda x: float(x[1]))
-                        upper_liq_target = round(float(top_ask_wall[0]), 1)
-                    if bids:
-                        top_bid_wall = max(bids, key=lambda x: float(x[1]))
-                        lower_liq_target = round(float(top_bid_wall[0]), 1)
-            except: pass
-
-            atr_val = 45.0
-            try:
-                r_k = requests.get("https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=40", timeout=3)
-                if r_k.status_code == 200:
-                    raw_k = r_k.json()
-                    k_list = [{'high': float(x[2]), 'low': float(x[3]), 'close': float(x[4])} for x in raw_k]
-                    atr_val = calculate_atr(k_list, 14)
-            except: pass
-
-            macro_lock = check_macro_economic_shield()
-
             mem = read_shared_memory()
-            mem['htf_trend'] = htf_trend
-            mem['funding_rate'] = funding_rate
-            mem['oi_current'] = oi_val
-            mem['oi_delta'] = oi_delta_pct
-            mem['liq_upper_pool'] = upper_liq_target
-            mem['liq_lower_pool'] = lower_liq_target
-            mem['macro_freeze'] = macro_lock
-            mem['atr_val'] = atr_val
-            mem['last_heartbeat'] = time.time()
+            mem["scanner_heartbeat"] = time.time()
             write_shared_memory(mem)
         except: pass
-        time.sleep(35)
+        time.sleep(10)
 
-# --- THREAD 4: RISK & CAPITAL MANAGER (SPAM-LOCK FIXED) ---
-def run_risk_trade_manager():
+# ==============================================================================
+# THREAD 2: ANALYSIS ENGINE (1H MACRO + 5M SETUP + EXTRA FILTERS)
+# ==============================================================================
+def run_thread2_analysis_engine():
+    sentiment_last_check = 0
+    fng_score = 50
+
+    while True:
+        try:
+            now = time.time()
+            # 1. Alternative.me Fear & Greed API
+            if now - sentiment_last_check > 300:
+                try:
+                    r_fng = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3)
+                    if r_fng.status_code == 200:
+                        fng_score = int(r_fng.json()['data'][0]['value'])
+                        sentiment_last_check = now
+                except: pass
+
+            mem = read_shared_memory()
+            mem['sentiment_score'] = fng_score
+            trends = mem.get("trends_1h", {})
+            fundings = mem.get("funding_rates", {})
+            imbalances = mem.get("orderbook_imbalance", {})
+            candidate_signals = {}
+
+            for sym in WATCHLIST:
+                # A. 1-Hour Trend Filter
+                try:
+                    r_1h = requests.get(f"https://data-api.binance.vision/api/v3/klines?symbol={sym}&interval=1h&limit=40", timeout=2.5)
+                    if r_1h.status_code == 200:
+                        closes_1h = [float(x[4]) for x in r_1h.json()]
+                        ema20_1h = calculate_ema(closes_1h, 20)
+                        last_c = closes_1h[-1]
+                        if last_c > ema20_1h * 1.002:
+                            trends[sym] = "BULLISH"
+                        elif last_c < ema20_1h * 0.998:
+                            trends[sym] = "BEARISH"
+                        else:
+                            trends[sym] = "SIDEWAYS"
+                except: pass
+
+                # B. Funding Rate Filter
+                try:
+                    r_fund = requests.get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={sym}", timeout=2.5)
+                    if r_fund.status_code == 200:
+                        fundings[sym] = float(r_fund.json().get('lastFundingRate', 0.0))
+                except: pass
+
+                # C. Order Book L2 Imbalance
+                try:
+                    r_depth = requests.get(f"https://fapi.binance.com/fapi/v1/depth?symbol={sym}&limit=20", timeout=2.5)
+                    if r_depth.status_code == 200:
+                        d = r_depth.json()
+                        bid_vol = sum(float(b[1]) for b in d.get('bids', []))
+                        ask_vol = sum(float(a[1]) for a in d.get('asks', []))
+                        imbalances[sym] = (bid_vol / ask_vol) if ask_vol > 0 else 1.0
+                except: pass
+
+                # D. 5-Minute Baseline & Structure Validation
+                closed_5m, live_5m = fetch_pair_klines(sym, "5m", 35)
+                if closed_5m and live_5m:
+                    closes_5m = [c['close'] for c in closed_5m]
+                    ema9 = calculate_ema(closes_5m, 9)
+                    ema21 = calculate_ema(closes_5m, 21)
+                    atr = calculate_atr(closed_5m, 14)
+
+                    recent_6 = closed_5m[-6:]
+                    high_6 = max(c['high'] for c in recent_6)
+                    low_6 = min(c['low'] for c in recent_6)
+                    curr_p = float(live_5m['close'])
+
+                    # Volume Spike Check (>1.5x Avg Volume)
+                    avg_vol = sum(c['vol'] for c in closed_5m[-10:]) / 10.0
+                    vol_spike = live_5m['vol'] >= (avg_vol * 1.5)
+
+                    # EXTRA FILTERS VALIDATION (Fake Breakout Avoidance)
+                    atr_valid = atr >= PAIR_CONFIG[sym]["min_atr"]
+                    funding_safe_long = fundings[sym] <= 0.0007
+                    funding_safe_short = fundings[sym] >= -0.0007
+                    ob_favors_long = imbalances[sym] >= 0.85
+                    ob_favors_short = imbalances[sym] <= 1.25
+
+                    is_long_valid = (
+                        trends[sym] == "BULLISH" and
+                        ema9 > ema21 and
+                        curr_p >= high_6 and
+                        atr_valid and
+                        vol_spike and
+                        funding_safe_long and
+                        ob_favors_long
+                    )
+
+                    is_short_valid = (
+                        trends[sym] == "BEARISH" and
+                        ema9 < ema21 and
+                        curr_p <= low_6 and
+                        atr_valid and
+                        vol_spike and
+                        funding_safe_short and
+                        ob_favors_short
+                    )
+
+                    if is_long_valid:
+                        candidate_signals[sym] = {"type": "LONG", "price": curr_p, "atr": atr, "time": live_5m['time']}
+                    elif is_short_valid:
+                        candidate_signals[sym] = {"type": "SHORT", "price": curr_p, "atr": atr, "time": live_5m['time']}
+
+                time.sleep(0.5)
+
+            mem["trends_1h"] = trends
+            mem["funding_rates"] = fundings
+            mem["orderbook_imbalance"] = imbalances
+            mem["candidate_signals"] = candidate_signals
+            write_shared_memory(mem)
+        except: pass
+        time.sleep(3)
+
+# ==============================================================================
+# THREAD 3: RISK & MONEY MANAGEMENT ($10 CAPITAL CONTROLLER)
+# ==============================================================================
+def run_thread3_risk_manager():
     alert_already_sent = False
     while True:
         try:
             consec_losses, daily_loss = check_db_risk_guard()
             mem = read_shared_memory()
-            
-            # Drawdown limit: $25 daily loss ya 4 consecutive losses
-            if daily_loss >= 25.0 or consec_losses >= 4:
+
+            # Strict $10 Protection: -$2.00 max daily loss (20% of capital) or 3 consecutive losses
+            if daily_loss >= 2.0 or consec_losses >= 3:
                 mem['risk_circuit_broken'] = True
                 write_shared_memory(mem)
-                
-                # Sirf EK hi baar message aayega, loop me baar-baar nahi
                 if not alert_already_sent:
-                    send_alert(f"🚨 [RISK MANAGER] Daily loss limit reached (-${daily_loss:.2f})! Bot execution paused for capital protection.")
+                    send_alert(f"🚨 [RISK MANAGER INTERVENTION] Daily drawdown reached (-${daily_loss:.2f})! Bot trading FROZEN for 24h.")
                     alert_already_sent = True
             else:
                 if mem.get('risk_circuit_broken', False):
@@ -280,97 +344,48 @@ def run_risk_trade_manager():
         except: pass
         time.sleep(15)
 
-# --- THREAD 3: WATCHDOG MONITOR ---
-def run_overseer_watchdog():
+# ==============================================================================
+# THREAD 5: SCHEDULER & WATCHDOG
+# ==============================================================================
+def run_thread5_scheduler_watchdog():
     while True:
         try:
             mem = read_shared_memory()
-            last_hb = mem.get("commander_heartbeat", time.time())
-            if time.time() - last_hb > 45.0:
-                send_alert("⚠️ [WATCHDOG] Engine Freeze Detected! Reviving Background Stream...")
-                mem['commander_heartbeat'] = time.time()
+            now = time.time()
+            if now - mem.get("commander_heartbeat", now) > 60:
+                mem["commander_heartbeat"] = now
                 write_shared_memory(mem)
         except: pass
-        time.sleep(10)
+        time.sleep(15)
 
-# --- BINANCE ORDER EXECUTION HANDLER ---
-def execute_binance_futures_order(side, qty, entry_price, sl_price, tp_price):
+# ==============================================================================
+# THREAD 4: ORDER EXECUTION, VAULT & POSITION LIFECYCLE ENGINE
+# ==============================================================================
+def execute_binance_futures_order(symbol, side, qty, entry_price, sl_price, tp_price):
     if PAPER_TRADING_MODE:
         return True, "PAPER_SIMULATED_SUCCESS"
-    
     if not BINANCE_API_KEY.strip() or not BINANCE_API_SECRET.strip():
         return False, "API_KEYS_NOT_CONFIGURED"
-
     try:
         base_url = "https://fapi.binance.com"
         endpoint = "/fapi/v1/order"
         timestamp = int(time.time() * 1000)
-        params = {
-            "symbol": "BTCUSDT",
-            "side": side.upper(),
-            "type": "MARKET",
-            "quantity": qty,
-            "timestamp": timestamp
-        }
+        params = {"symbol": symbol, "side": side.upper(), "type": "MARKET", "quantity": qty, "timestamp": timestamp}
         query_str = "&".join([f"{k}={v}" for k, v in params.items()])
         signature = hmac.new(BINANCE_API_SECRET.encode('utf-8'), query_str.encode('utf-8'), hashlib.sha256).hexdigest()
-        url = f"{base_url}{endpoint}?{query_str}&signature={signature}"
-        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-        r = requests.post(url, headers=headers, timeout=4)
-        if r.status_code == 200:
-            return True, "EXCHANGE_FILLED"
-        else:
-            return False, r.text
+        r = requests.post(f"{base_url}{endpoint}?{query_str}&signature={signature}", headers={"X-MBX-APIKEY": BINANCE_API_KEY}, timeout=4)
+        return (True, "EXCHANGE_FILLED") if r.status_code == 200 else (False, r.text)
     except Exception as e:
         return False, str(e)
 
-# --- 4. FAST BINANCE DATA FETCHERS ---
-def fetch_binance_klines():
-    urls = [
-        "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60",
-        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=60"
-    ]
-    for u in urls:
-        try:
-            r = requests.get(u, timeout=2.5)
-            if r.status_code == 200:
-                raw = r.json()
-                if isinstance(raw, list) and len(raw) >= 35:
-                    closed = [{'time': int(d[0]), 'open': float(d[1]), 'high': float(d[2]),
-                               'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])} for d in raw[:-1]]
-                    live = {'time': int(raw[-1][0]), 'open': float(raw[-1][1]), 'high': float(raw[-1][2]),
-                            'low': float(raw[-1][3]), 'close': float(raw[-1][4]), 'vol': float(raw[-1][5])}
-                    return closed, live
-        except: continue
-    return None, None
-
-def fetch_binance_1m_klines():
-    urls = [
-        "https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=30",
-        "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=30"
-    ]
-    for u in urls:
-        try:
-            r = requests.get(u, timeout=2.0)
-            if r.status_code == 200:
-                raw = r.json()
-                if isinstance(raw, list) and len(raw) >= 15:
-                    closed = [{'time': int(d[0]), 'open': float(d[1]), 'high': float(d[2]),
-                               'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])} for d in raw[:-1]]
-                    return closed
-        except: continue
-    return None
-
-# --- 5. COMMANDER ENGINE ---
-class MasterCommanderEngine:
+class MasterExecutionLifecycleEngine:
     def __init__(self, engine_id):
         self.engine_id = engine_id
-        self.last_trade_bar = 0
-        self.last_exit_bar = 0
+        self.last_trade_bar = {}
         self.locked_closing_id = None
         self.sl_locked = False
 
-    def record_to_vault(self, t_type, entry, exit_price, result, pts, pnl_usd, qty):
+    def record_to_vault(self, symbol, t_type, entry, exit_price, result, pts, pnl_usd, qty):
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         try:
             conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -378,15 +393,18 @@ class MasterCommanderEngine:
             cur.execute("""
                 INSERT OR IGNORE INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
                 VALUES (?,?,?,?,?,?,?,?,?)
-            """, (now_str, "BTCUSDT", t_type, float(entry), float(exit_price), result, str(pts), str(pnl_usd), float(qty)))
+            """, (now_str, symbol, t_type, float(entry), float(exit_price), result, str(pts), str(pnl_usd), float(qty)))
             conn.commit()
             conn.close()
         except: pass
 
-    def manage_position(self, t, live, closed):
-        curr_trade_ref = f"{t.get('type')}_{t.get('entry')}"
-        if self.locked_closing_id == curr_trade_ref:
-            return
+    def manage_active_lifecycle(self, t):
+        sym = t.get('symbol', 'BTCUSDT')
+        closed, live = fetch_pair_klines(sym, "5m", 30)
+        if not closed or not live: return
+
+        curr_trade_ref = f"{sym}_{t.get('type')}_{t.get('entry')}"
+        if self.locked_closing_id == curr_trade_ref: return
 
         qty = float(t.get("qty", 0.01))
         curr_price = float(live['close'])
@@ -395,68 +413,50 @@ class MasterCommanderEngine:
         closes_5m = [c['close'] for c in closed]
         ema21 = calculate_ema(closes_5m, 21)
 
-        # LONG POSITION MONITOR
-        if t['type'] == 'LONG':
-            if not t.get('stage1_booked', False) and (curr_price - entry) >= 300.0:
-                t['stage1_booked'] = True
-                t['sl'] = round(entry + 25.0, 1)
-                half_qty = round(qty * 0.5, 4)
-                booked_usd = round(300.0 * half_qty, 2)
-                set_db_state("active_trade", t)
-                self.record_to_vault("LONG", entry, curr_price, "STAGE 1 BOOK (50%) 🎯", "+300", f"+${booked_usd:.2f}", half_qty)
-                send_alert(f"🎯 [STAGE 1 HIT] BTC LONG\nBooked 50%: +${booked_usd:.2f} (+300 pts)\n🛡️ SL Shifted to Breakeven (+25 pts lock)")
+        cfg = PAIR_CONFIG[sym]
+        dec = cfg["round_dec"]
 
-            if (curr_price - entry) >= 200.0 and ema21 > float(t['sl']):
-                t['sl'] = round(ema21 - 15.0, 1)
+        # ================= LONG POSITION LIFECYCLE =================
+        if t['type'] == 'LONG':
+            # Dynamic Trailing SL on 5M EMA 21 (Breakeven + Trend Protection)
+            if curr_price > entry * (1 + cfg["min_sl_pct"]) and ema21 > float(t['sl']):
+                t['sl'] = round(ema21 * 0.9985, dec)
                 t['trailed'] = True
                 set_db_state("active_trade", t)
 
+            # 100% DIRECT TAKE PROFIT (NO PARTIAL BOOKING)
             if curr_price >= t['tp']:
                 self.locked_closing_id = curr_trade_ref
                 self.sl_locked = False
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
-                self.last_exit_bar = live['time']
 
-                rem_qty = round(qty * 0.5, 4) if t.get('stage1_booked', False) else qty
-                pts = round(t['tp'] - entry, 1)
-                pnl_usd = round(pts * rem_qty, 2)
-                self.record_to_vault("LONG", entry, t['tp'], "LIQUIDATION TP 🔥", f"+{pts:.0f}", f"+${pnl_usd:.2f}", rem_qty)
-                self.last_trade_bar = live['time']
-                send_alert(f"🚀 [LIQUIDATION TARGET HIT] BTC LONG\nFinal Exit: +${pnl_usd:.2f} (+{pts:.0f} pts)\nPrice: ${t['tp']:.1f}")
+                pts = round(t['tp'] - entry, dec)
+                pnl_usd = round((curr_price - entry) * qty, 2)
+                self.record_to_vault(sym, "LONG", entry, t['tp'], "DIRECT MEGA TP 🔥", f"+{pts}", f"+${pnl_usd:.2f}", qty)
+                send_alert(f"🚀 [DIRECT 100% TP HIT] {sym} LONG\nPnL: +${pnl_usd:.2f}\nExit Price: ${t['tp']}")
 
+            # STOP LOSS / TRAILED SL HIT
             elif curr_price <= float(t['sl']):
                 if self.sl_locked: return
                 self.sl_locked = True
                 self.locked_closing_id = curr_trade_ref
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
-                self.last_exit_bar = live['time']
 
-                rem_qty = round(qty * 0.5, 4) if t.get('stage1_booked', False) else qty
-                pts = round(curr_price - entry, 1)
-                pnl_usd = round(pts * rem_qty, 2)
-                res_type = "TRAILED PROFIT EXIT 🛡️" if pts > 0 else "SL HIT 🛑"
-                pts_sign = f"+{pts:.0f}" if pts > 0 else f"{pts:.0f}"
+                pts = round(curr_price - entry, dec)
+                pnl_usd = round((curr_price - entry) * qty, 2)
+                res_type = "TRAILED PROFIT 🛡️" if pnl_usd > 0 else "SL HIT 🛑"
+                pts_sign = f"+{pts}" if pts > 0 else f"{pts}"
                 usd_sign = f"+${pnl_usd:.2f}" if pnl_usd > 0 else f"-${abs(pnl_usd):.2f}"
-                
-                self.record_to_vault("LONG", entry, t['sl'], res_type, pts_sign, usd_sign, rem_qty)
-                self.last_trade_bar = live['time']
-                send_alert(f"{'🛡️' if pts > 0 else '🛑'} [EXIT] BTC LONG {res_type}\nPoints: {pts_sign} | PnL: {usd_sign}\nExit: ${curr_price:.1f}")
 
-        # SHORT POSITION MONITOR
+                self.record_to_vault(sym, "LONG", entry, t['sl'], res_type, pts_sign, usd_sign, qty)
+                send_alert(f"{'🛡️' if pnl_usd > 0 else '🛑'} [EXIT] {sym} LONG {res_type}\nPnL: {usd_sign}\nExit Price: ${curr_price}")
+
+        # ================= SHORT POSITION LIFECYCLE =================
         elif t['type'] == 'SHORT':
-            if not t.get('stage1_booked', False) and (entry - curr_price) >= 300.0:
-                t['stage1_booked'] = True
-                t['sl'] = round(entry - 25.0, 1)
-                half_qty = round(qty * 0.5, 4)
-                booked_usd = round(300.0 * half_qty, 2)
-                set_db_state("active_trade", t)
-                self.record_to_vault("SHORT", entry, curr_price, "STAGE 1 BOOK (50%) 🎯", "+300", f"+${booked_usd:.2f}", half_qty)
-                send_alert(f"🎯 [STAGE 1 HIT] BTC SHORT\nBooked 50%: +${booked_usd:.2f} (+300 pts)\n🛡️ SL Shifted to Breakeven (+25 pts lock)")
-
-            if (entry - curr_price) >= 200.0 and ema21 < float(t['sl']):
-                t['sl'] = round(ema21 + 15.0, 1)
+            if curr_price < entry * (1 - cfg["min_sl_pct"]) and ema21 < float(t['sl']):
+                t['sl'] = round(ema21 * 1.0015, dec)
                 t['trailed'] = True
                 set_db_state("active_trade", t)
 
@@ -465,14 +465,11 @@ class MasterCommanderEngine:
                 self.sl_locked = False
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
-                self.last_exit_bar = live['time']
 
-                rem_qty = round(qty * 0.5, 4) if t.get('stage1_booked', False) else qty
-                pts = round(entry - t['tp'], 1)
-                pnl_usd = round(pts * rem_qty, 2)
-                self.record_to_vault("SHORT", entry, t['tp'], "LIQUIDATION TP 🔥", f"+{pts:.0f}", f"+${pnl_usd:.2f}", rem_qty)
-                self.last_trade_bar = live['time']
-                send_alert(f"🩸 [LIQUIDATION TARGET HIT] BTC SHORT\nFinal Exit: +${pnl_usd:.2f} (+{pts:.0f} pts)\nPrice: ${t['tp']:.1f}")
+                pts = round(entry - t['tp'], dec)
+                pnl_usd = round((entry - curr_price) * qty, 2)
+                self.record_to_vault(sym, "SHORT", entry, t['tp'], "DIRECT MEGA TP 🔥", f"+{pts}", f"+${pnl_usd:.2f}", qty)
+                send_alert(f"🩸 [DIRECT 100% TP HIT] {sym} SHORT\nPnL: +${pnl_usd:.2f}\nExit Price: ${t['tp']}")
 
             elif curr_price >= float(t['sl']):
                 if self.sl_locked: return
@@ -480,150 +477,91 @@ class MasterCommanderEngine:
                 self.locked_closing_id = curr_trade_ref
                 set_db_state("active_trade", None)
                 set_db_state("last_exit_epoch", time.time())
-                self.last_exit_bar = live['time']
 
-                rem_qty = round(qty * 0.5, 4) if t.get('stage1_booked', False) else qty
-                pts = round(entry - curr_price, 1)
-                pnl_usd = round(pts * rem_qty, 2)
-                res_type = "TRAILED PROFIT EXIT 🛡️" if pts > 0 else "SL HIT 🛑"
-                pts_sign = f"+{pts:.0f}" if pts > 0 else f"{pts:.0f}"
+                pts = round(entry - curr_price, dec)
+                pnl_usd = round((entry - curr_price) * qty, 2)
+                res_type = "TRAILED PROFIT 🛡️" if pnl_usd > 0 else "SL HIT 🛑"
+                pts_sign = f"+{pts}" if pts > 0 else f"{pts}"
                 usd_sign = f"+${pnl_usd:.2f}" if pnl_usd > 0 else f"-${abs(pnl_usd):.2f}"
 
-                self.record_to_vault("SHORT", entry, t['sl'], res_type, pts_sign, usd_sign, rem_qty)
-                self.last_trade_bar = live['time']
-                send_alert(f"{'🛡️' if pts > 0 else '🛑'} [EXIT] BTC SHORT {res_type}\nPoints: {pts_sign} | PnL: {usd_sign}\nExit: ${curr_price:.1f}")
+                self.record_to_vault(sym, "SHORT", entry, t['sl'], res_type, pts_sign, usd_sign, qty)
+                send_alert(f"{'🛡️' if pnl_usd > 0 else '🛑'} [EXIT] {sym} SHORT {res_type}\nPnL: {usd_sign}\nExit Price: ${curr_price}")
 
-    def evaluate_market_moves(self, closed, live):
+    def evaluate_and_execute(self):
         mem = read_shared_memory()
-        if get_db_state("kill_switch_active", False) or mem.get("risk_circuit_broken", False) or mem.get("macro_freeze", False):
+        if get_db_state("kill_switch_active", False) or mem.get("risk_circuit_broken", False):
             return
 
         last_exit_epoch = get_db_state("last_exit_epoch", 0)
-        if time.time() - last_exit_epoch < 900:
+        if time.time() - last_exit_epoch < 300:  # 5 min cooloff
             return
 
-        if self.last_exit_bar > 0:
-            bars_since_exit = (live['time'] - self.last_exit_bar) // 300000
-            if bars_since_exit < 2:
-                return
+        candidate_signals = mem.get("candidate_signals", {})
+        if not candidate_signals: return
 
-        if live['time'] <= self.last_trade_bar:
-            return
+        # UNIQUE TRADE LOCKING: Only 1 active position across BTC, SOL, and DOGE
+        for sym, sig in candidate_signals.items():
+            last_bar = self.last_trade_bar.get(sym, 0)
+            if sig['time'] <= last_bar: continue
 
-        htf_trend = mem.get('htf_trend', 'NEUTRAL')
-        funding_rate = mem.get('funding_rate', 0.0)
-        oi_delta = mem.get('oi_delta', 0.0)
-        atr_val = mem.get('atr_val', 45.0)
-        liq_upper = mem.get('liq_upper_pool', 0.0)
-        liq_lower = mem.get('liq_lower_pool', 0.0)
+            cfg = PAIR_CONFIG[sym]
+            dec = cfg["round_dec"]
+            curr_p = sig['price']
 
-        closes_5m = [c['close'] for c in closed]
-        ema9_5m = calculate_ema(closes_5m, 9)
-        ema21_5m = calculate_ema(closes_5m, 21)
+            # Account Size: $10.00 | Margin Allocation: $2.50 @ 10x Lev = $25 Position Notional
+            pos_usd = 25.0
+            qty = round(pos_usd / curr_p, cfg["qty_dec"])
+            if cfg["qty_dec"] == 0: qty = int(qty)
 
-        htf_allows_long = (htf_trend in ['BULLISH', 'NEUTRAL'])
-        htf_allows_short = (htf_trend in ['BEARISH', 'NEUTRAL'])
-        is_funding_safe_long = funding_rate <= 0.0006
-        is_funding_safe_short = funding_rate >= -0.0006
+            if sig['type'] == "LONG":
+                self.last_trade_bar[sym] = sig['time']
+                self.locked_closing_id = None
+                self.sl_locked = False
 
-        curr_price = float(live['close'])
+                sl = round(curr_p * (1 - cfg["min_sl_pct"]), dec)
+                tp = round(curr_p * (1 + cfg["tp_pct"]), dec)
 
-        klines_1m = fetch_binance_1m_klines()
-        if not klines_1m or len(klines_1m) < 10:
-            m1_c0 = {'close': live['close'], 'open': live['open']}
-            has_lead_vol = True
-            ema5_1m = ema9_5m
-            ema13_1m = ema21_5m
-        else:
-            m1_c0 = klines_1m[-1]
-            m1_closes = [c['close'] for c in klines_1m]
-            ema5_1m = calculate_ema(m1_closes, 5)
-            ema13_1m = calculate_ema(m1_closes, 13)
-            avg_vol_1m = sum(c['vol'] for c in klines_1m[-6:]) / 6.0
-            has_lead_vol = m1_c0['vol'] >= (avg_vol_1m * 1.05)
+                execute_binance_futures_order(sym, "BUY", qty, curr_p, sl, tp)
 
-        is_early_long = (
-            (ema9_5m >= ema21_5m) and
-            (ema5_1m > ema13_1m) and
-            (m1_c0['close'] > ema5_1m) and
-            (m1_c0['close'] > m1_c0['open']) and
-            has_lead_vol and
-            (oi_delta >= -0.5) and
-            htf_allows_long and
-            is_funding_safe_long
-        )
+                trade_obj = {
+                    'symbol': sym, 'type': 'LONG', 'entry': round(curr_p, dec),
+                    'sl': sl, 'tp': tp, 'qty': qty, 'trailed': False
+                }
+                set_db_state("active_trade", trade_obj)
+                send_alert(
+                    f"⚡ [INSTITUTIONAL SWING] {sym} LONG\n"
+                    f"Macro Trend: 1H BULLISH 🟢\n"
+                    f"📍 Entry: ${curr_p}\n"
+                    f"🎯 DIRECT TP: ${tp} (+{cfg['tp_pct']*100:.1f}%)\n"
+                    f"🛡️ Structure SL: ${sl} (-{cfg['min_sl_pct']*100:.1f}%)\n"
+                    f"📦 Size: {qty} {sym.replace('USDT', '')} ($2.50 Margin)"
+                )
+                break  # Single trade limit locked
 
-        is_early_short = (
-            (ema9_5m <= ema21_5m) and
-            (ema5_1m < ema13_1m) and
-            (m1_c0['close'] < ema5_1m) and
-            (m1_c0['close'] < m1_c0['open']) and
-            has_lead_vol and
-            (oi_delta >= -0.5) and
-            htf_allows_short and
-            is_funding_safe_short
-        )
+            elif sig['type'] == "SHORT":
+                self.last_trade_bar[sym] = sig['time']
+                self.locked_closing_id = None
+                self.sl_locked = False
 
-        cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
-        pos_usd = float(cfg['capital']) * int(cfg['leverage'])
-        entry = round(curr_price, 1)
-        qty = round(pos_usd / entry, 4) or 0.001
+                sl = round(curr_p * (1 + cfg["min_sl_pct"]), dec)
+                tp = round(curr_p * (1 - cfg["tp_pct"]), dec)
 
-        dyn_sl_pts = round(max(90.0, min(160.0, atr_val * 2.2)), 1)
-        target_long_pts = round(liq_upper - entry, 1) if (liq_upper - entry) > 500.0 else round(atr_val * 14.0, 1)
-        target_short_pts = round(entry - liq_lower, 1) if (entry - liq_lower) > 500.0 else round(atr_val * 14.0, 1)
+                execute_binance_futures_order(sym, "SELL", qty, curr_p, sl, tp)
 
-        if is_early_long:
-            self.last_trade_bar = live['time']
-            self.locked_closing_id = None
-            self.sl_locked = False
-            sl = round(entry - dyn_sl_pts, 1)
-            tp = round(entry + target_long_pts, 1)
-
-            success, status = execute_binance_futures_order("BUY", qty, entry, sl, tp)
-
-            trade_obj = {
-                'type': 'LONG', 'entry': entry, 'sl': sl, 
-                'tp': tp, 'risk': dyn_sl_pts, 
-                'qty': qty, 'stage1_booked': False, 'trailed': False
-            }
-            set_db_state("active_trade", trade_obj)
-            send_alert(
-                f"⚡ [INSTITUTIONAL SWING] BTC LONG\n"
-                f"1H Bias: {htf_trend} 🟢 | OI Delta: {oi_delta:+.2f}%\n"
-                f"Order Status: {status} ({'Simulation' if PAPER_TRADING_MODE else 'Live'})\n"
-                f"Liquidation Pool: ${tp:.1f}\n\n"
-                f"📍 Entry: ${entry:.1f}\n"
-                f"🎯 Liquidation Target (TP): ${tp:.1f} (+{target_long_pts:.0f} pts)\n"
-                f"🛡️ Dynamic SL: ${sl:.1f} (-{dyn_sl_pts:.0f} pts)\n"
-                f"📦 Size: {qty} BTC"
-            )
-
-        elif is_early_short:
-            self.last_trade_bar = live['time']
-            self.locked_closing_id = None
-            self.sl_locked = False
-            sl = round(entry + dyn_sl_pts, 1)
-            tp = round(entry - target_short_pts, 1)
-
-            success, status = execute_binance_futures_order("SELL", qty, entry, sl, tp)
-
-            trade_obj = {
-                'type': 'SHORT', 'entry': entry, 'sl': sl, 
-                'tp': tp, 'risk': dyn_sl_pts, 
-                'qty': qty, 'stage1_booked': False, 'trailed': False
-            }
-            set_db_state("active_trade", trade_obj)
-            send_alert(
-                f"⚡ [INSTITUTIONAL SWING] BTC SHORT\n"
-                f"1H Bias: {htf_trend} 🔴 | OI Delta: {oi_delta:+.2f}%\n"
-                f"Order Status: {status} ({'Simulation' if PAPER_TRADING_MODE else 'Live'})\n"
-                f"Liquidation Pool: ${tp:.1f}\n\n"
-                f"📍 Entry: ${entry:.1f}\n"
-                f"🎯 Liquidation Target (TP): ${tp:.1f} (-{target_short_pts:.0f} pts)\n"
-                f"🛡️ Dynamic SL: ${sl:.1f} (+{dyn_sl_pts:.0f} pts)\n"
-                f"📦 Size: {qty} BTC"
-            )
+                trade_obj = {
+                    'symbol': sym, 'type': 'SHORT', 'entry': round(curr_p, dec),
+                    'sl': sl, 'tp': tp, 'qty': qty, 'trailed': False
+                }
+                set_db_state("active_trade", trade_obj)
+                send_alert(
+                    f"⚡ [INSTITUTIONAL SWING] {sym} SHORT\n"
+                    f"Macro Trend: 1H BEARISH 🔴\n"
+                    f"📍 Entry: ${curr_p}\n"
+                    f"🎯 DIRECT TP: ${tp} (-{cfg['tp_pct']*100:.1f}%)\n"
+                    f"🛡️ Structure SL: ${sl} (+{cfg['min_sl_pct']*100:.1f}%)\n"
+                    f"📦 Size: {qty} {sym.replace('USDT', '')} ($2.50 Margin)"
+                )
+                break
 
     def run(self):
         while True:
@@ -631,42 +569,39 @@ class MasterCommanderEngine:
             mem['commander_heartbeat'] = time.time()
             write_shared_memory(mem)
 
-            closed, live = fetch_binance_klines()
-            if closed and live:
-                active = get_db_state("active_trade")
-                if active: 
-                    self.manage_position(active, live, closed)
-                else: 
-                    self.evaluate_market_moves(closed, live)
+            active = get_db_state("active_trade")
+            if active:
+                self.manage_active_lifecycle(active)
+            else:
+                self.evaluate_and_execute()
+            time.sleep(1.0)
 
-            time.sleep(0.5)
-
-# --- ENGINE STARTERS ---
+# --- START ALL 5 THREADS (EXACT CHART TOPOLOGY) ---
 @st.cache_resource
-def launch_full_architecture():
+def launch_chart_architecture():
     eid = str(uuid.uuid4())
-    threading.Thread(target=run_data_news_engine, daemon=False).start()
-    threading.Thread(target=run_risk_trade_manager, daemon=False).start()
-    cmd = MasterCommanderEngine(eid)
+    threading.Thread(target=run_thread1_watchlist_scanner, daemon=False).start()
+    threading.Thread(target=run_thread2_analysis_engine, daemon=False).start()
+    threading.Thread(target=run_thread3_risk_manager, daemon=False).start()
+    threading.Thread(target=run_thread5_scheduler_watchdog, daemon=False).start()
+    
+    cmd = MasterExecutionLifecycleEngine(eid)
     threading.Thread(target=cmd.run, daemon=False).start()
-    threading.Thread(target=run_overseer_watchdog, daemon=False).start()
-
-    send_alert("⚡ [SYSTEM READY] Bot Restarted & Cleaned. Real-time scanning active!")
     return cmd
 
-launch_full_architecture()
+launch_chart_architecture()
 
 # -------------------------------------------------------------
-# FRONTEND UI & CONTROLS DOCK
+# REAL-TIME DASHBOARD (STREAMLIT / WEB UI)
 # -------------------------------------------------------------
-st.set_page_config(page_title="AI SNIPER BOT", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="INSTITUTIONAL QUANT RADAR", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
 header, footer, #MainMenu { display: none !important; }
 .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; }
 iframe { width: 100vw !important; height: calc(100vh - 5px) !important; border: none !important; display: block !important; }
 </style>""", unsafe_allow_html=True)
 
-# UI ACTION DISPATCHERS
+# DISPATCHERS
 if st.query_params.get("clear_vault") == "confirmed":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -676,9 +611,6 @@ if st.query_params.get("clear_vault") == "confirmed":
         conn.close()
         set_db_state("active_trade", None)
         set_db_state("last_exit_epoch", 0)
-        mem = read_shared_memory()
-        mem['risk_circuit_broken'] = False
-        write_shared_memory(mem)
     except: pass
     st.query_params.clear()
     st.rerun()
@@ -689,32 +621,25 @@ if st.query_params.get("force_close") == "confirmed":
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         e = float(act['entry'])
         q = float(act.get('qty', 0.01))
+        sym = act.get('symbol', 'BTCUSDT')
         try:
             conn = sqlite3.connect(DB_FILE, timeout=5)
             cur = conn.cursor()
             cur.execute("""
                 INSERT OR IGNORE INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
                 VALUES (?,?,?,?,?,?,?,?,?)
-            """, (now_str, "BTCUSDT", act['type'], e, e, "MANUAL FORCE CLOSE ⚠️", "0", "$0.00", q))
+            """, (now_str, sym, act['type'], e, e, "MANUAL OVERRIDE ⚠️", "0", "$0.00", q))
             conn.commit()
             conn.close()
         except: pass
         set_db_state("active_trade", None)
         set_db_state("last_exit_epoch", time.time())
-        send_alert(f"⚠️ [MANUAL OVERRIDE] Position on {act['type']} Force Closed!")
     st.query_params.clear()
     st.rerun()
 
 if st.query_params.get("toggle_emergency") == "confirmed":
     curr_kill = get_db_state("kill_switch_active", False)
-    new_kill = not curr_kill
-    set_db_state("kill_switch_active", new_kill)
-    if new_kill:
-        set_db_state("active_trade", None)
-        status_msg = "🚨 [EMERGENCY STOP ACTIVATED] Bot trading has been FROZEN completely!"
-    else:
-        status_msg = "🟢 [EMERGENCY STOP RELEASED] Bot trading has resumed regular scanning."
-    send_alert(status_msg)
+    set_db_state("kill_switch_active", not curr_kill)
     st.query_params.clear()
     st.rerun()
 
@@ -722,23 +647,21 @@ if st.query_params.get("toggle_emergency") == "confirmed":
 def render_live_dashboard():
     conn = sqlite3.connect(DB_FILE, timeout=5)
     cur = conn.cursor()
-    cur.execute("SELECT timestamp, trade_type, entry, result, pts, pnl_usd FROM trades ORDER BY id DESC")
+    cur.execute("SELECT timestamp, symbol, trade_type, entry, result, pts, pnl_usd FROM trades ORDER BY id DESC")
     rows = cur.fetchall()
-    history_list = [{"time": r[0].split(" ")[-1] if " " in r[0] else r[0], "type": r[1], "entry": r[2], "result": r[3], "pts": r[4], "pnl_usd": r[5]} for r in rows]
+    history_list = [{"time": r[0].split(" ")[-1] if " " in r[0] else r[0], "symbol": r[1], "type": r[2], "entry": r[3], "result": r[4], "pts": r[5], "pnl_usd": r[6]} for r in rows]
 
-    cur.execute("SELECT COUNT(*), SUM(CASE WHEN result LIKE '%TP%' OR result LIKE '%TRAILED%' OR result LIKE '%BOOK%' THEN 1 ELSE 0 END) FROM trades")
+    cur.execute("SELECT COUNT(*), SUM(CASE WHEN result LIKE '%TP%' OR result LIKE '%TRAILED%' THEN 1 ELSE 0 END) FROM trades")
     t_count, win_count = cur.fetchone()
     conn.close()
 
     win_rate = round((win_count / t_count) * 100, 1) if t_count > 0 else 0.0
     active_trade = get_db_state("active_trade")
     kill_switch = get_db_state("kill_switch_active", False)
-    cfg = get_db_state("config", {"capital": 100.0, "leverage": 10})
 
     js_active_trade = json.dumps(active_trade)
     js_history = json.dumps(history_list)
     js_stats = json.dumps({"total": t_count, "win_rate": win_rate})
-    js_cfg = json.dumps(cfg)
     js_kill = json.dumps(kill_switch)
 
     terminal_html = """<!DOCTYPE html>
@@ -750,86 +673,55 @@ def render_live_dashboard():
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100vh; overflow: hidden; }
-        
         .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 0 8px; font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; }
         .brand { font-weight: 800; color: #fff; font-size: 11px; display: flex; align-items: center; gap: 5px; }
-        
         .pulse-dot { width: 7px; height: 7px; background: #00e676; border-radius: 50%; box-shadow: 0 0 8px #00e676; animation: blinker 1.2s cubic-bezier(0.5, 0, 1, 1) infinite alternate; }
         @keyframes blinker { from { opacity: 1; transform: scale(1); } to { opacity: 0.25; transform: scale(0.7); } }
-
         .badge-scan { background: #00e676; color: #000; font-size: 8px; padding: 2px 4px; border-radius: 3px; font-weight: 900; }
-        
-        .stat-card { display: flex; flex-direction: column; min-width: 60px; }
+        .stat-card { display: flex; flex-direction: column; min-width: 65px; }
         .stat-label { font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 800; }
         .stat-val { font-size: 10px; font-weight: 800; color: #fff; }
-        
         .btn-compact { background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 8px; font-size: 9px; font-weight: 800; cursor: pointer; }
-        
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
         #chart-zone { width: 100vw; height: 53vh; background: #080a0f; }
-        
         .trade-dock { width: 100vw; height: 38px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 0 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
-        .dock-group { display: flex; align-items: center; gap: 5px; }
-        .dock-input { background: #121824; border: 1px solid #23304a; color: #00e676; font-size: 10px; font-weight: 800; border-radius: 4px; padding: 2px 4px; width: 44px; text-align: center; }
-        
-        .btn-override-danger { background: rgba(255, 59, 48, 0.2); color: #ff3b30; border: 1px solid #ff3b30; border-radius: 4px; padding: 2px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
-        .btn-override-warn { background: rgba(240, 185, 11, 0.2); color: #f0b90b; border: 1px solid #f0b90b; border-radius: 4px; padding: 2px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
-
-        .bottom-bar { width: 100vw; height: 46px; background: #0d121c; border-top: 1px solid #1a2336; padding: 4px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.4fr; gap: 6px; align-items: center; }
+        .dock-group { display: flex; align-items: center; gap: 8px; }
+        .btn-override-danger { background: rgba(255, 59, 48, 0.2); color: #ff3b30; border: 1px solid #ff3b30; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
+        .btn-override-warn { background: rgba(240, 185, 11, 0.2); color: #f0b90b; border: 1px solid #f0b90b; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
+        .bottom-bar { width: 100vw; height: 46px; background: #0d121c; border-top: 1px solid #1a2336; padding: 4px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.2fr; gap: 6px; align-items: center; }
         .metric-cell { display: flex; flex-direction: column; justify-content: center; background: #101624; padding: 2px 6px; border-radius: 4px; border: 1px solid #192233; height: 36px; }
         .cell-head { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 2px; }
         .cell-body { font-size: 9px; font-weight: 800; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
         .modal-bg { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); backdrop-filter: blur(5px); z-index: 999; align-items: center; justify-content: center; }
         .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 90vw; max-width: 400px; max-height: 80vh; display: flex; flex-direction: column; padding: 12px; }
         .history-list { overflow-y: auto; max-height: 250px; font-size: 10px; }
         .history-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #151d2b; }
-        
-        .btn-modal-clear { 
-            margin-top: 10px; 
-            background: rgba(255, 59, 48, 0.25); 
-            color: #ff3b30; 
-            border: 1px solid rgba(255, 59, 48, 0.6); 
-            border-radius: 6px; 
-            padding: 10px; 
-            font-size: 11px; 
-            font-weight: 800; 
-            cursor: pointer; 
-            text-align: center; 
-            width: 100%;
-            display: block;
-            outline: none;
-        }
+        .btn-modal-clear { margin-top: 10px; background: rgba(255, 59, 48, 0.25); color: #ff3b30; border: 1px solid rgba(255, 59, 48, 0.6); border-radius: 6px; padding: 10px; font-size: 11px; font-weight: 800; cursor: pointer; text-align: center; width: 100%; display: block; outline: none; }
     </style>
 </head>
 <body>
     <div class="top-nav">
         <div class="brand">
             <span class="pulse-dot"></span>
-            ⚡ QUANT RADAR <span class="badge-scan">PHASE 3 LIVE</span>
+            ⚡ QUANT ENGINE <span class="badge-scan">5 THREADS ONLINE</span>
         </div>
+        <div class="stat-card"><div class="stat-label">ACTIVE PAIR</div><div id="disp-sym" class="stat-val" style="color:#f0b90b;">NONE</div></div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
         <div class="stat-card"><div class="stat-label">SL / TRAIL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
-        <div class="stat-card"><div class="stat-label">LIQ TARGET</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
+        <div class="stat-card"><div class="stat-label">DIRECT TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
         <button class="btn-compact" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
         <button class="btn-compact" onclick="window.parent.location.reload()">🔄</button>
-        <div style="margin-left: auto; display: flex; align-items: center;">
-            <b id="live-price" style="color: #f0b90b; font-size: 11px;">$84,000.0</b>
-        </div>
     </div>
 
     <div class="workspace">
         <div id="chart-zone"></div>
         <div class="trade-dock">
             <div class="dock-group">
-                <span style="color:#62697a; font-weight:800;">AMT($):</span>
-                <input id="input-amount" class="dock-input" type="number" value="100" onchange="updateCalcQty()">
-                <span style="color:#62697a; font-weight:800;">LEV:</span>
-                <input id="input-lev" class="dock-input" type="number" value="10" onchange="updateCalcQty()">
-                <span style="color:#62697a;">POS:</span>
-                <b id="calc-qty" style="color:#38bdf8; font-size:10px;">0.0119 BTC</b>
+                <span style="color:#62697a; font-weight:800;">ACCOUNT:</span>
+                <b style="color:#00e676; font-size:10px;">$10.00 BASE</b>
+                <span style="color:#62697a;">| ALLOCATION:</span>
+                <b style="color:#38bdf8; font-size:10px;">$2.50 (10x LEV = $25 NOTIONAL)</b>
             </div>
-            
             <div class="dock-group">
                 <button type="button" class="btn-override-warn" onclick="triggerForceClose()">⚡ FORCE CLOSE</button>
                 <button type="button" class="btn-override-danger" id="btn-kill" onclick="triggerEmergencyToggle()">🚨 KILL SWITCH</button>
@@ -838,20 +730,20 @@ def render_live_dashboard():
 
         <div class="bottom-bar">
             <div class="metric-cell">
-                <span class="cell-head">RISK SHIELD</span>
-                <div class="cell-body" id="htf-status" style="color:#00e676;">ACTIVE (SAFE) 🛡️</div>
+                <span class="cell-head">THREAD 3 RISK</span>
+                <div class="cell-body" style="color:#00e676;">-$2.00 DRAWDOWN GUARD</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">MACRO CALENDAR</span>
-                <div class="cell-body" style="color:#00e676;">NO HIGH-RISK NEWS</div>
+                <span class="cell-head">EXTRA FILTERS</span>
+                <div class="cell-body" style="color:#38bdf8;">ATR • OB • VOL • FUNDING</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">EXECUTION ENGINE</span>
-                <div class="cell-body" style="color:#38bdf8;">SIMULATED PAPER</div>
+                <span class="cell-head">TARGET PROFILE</span>
+                <div class="cell-body" style="color:#00e676;">100% DIRECT SWING TP</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">SCAN STATUS</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING INSTITUTIONAL DATA...</div>
+                <span class="cell-head">RADAR SCANNER</span>
+                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING BTC • SOL • DOGE...</div>
             </div>
         </div>
     </div>
@@ -881,61 +773,32 @@ def render_live_dashboard():
         let activeTrade = __ACTIVE_TRADE__;
         let tradeHistory = __TRADE_HISTORY__;
         let stats = __STATS__;
-        let cfg = __CFG__;
         let killActive = __KILL_SWITCH__;
 
-        document.getElementById('input-amount').value = cfg.capital;
-        document.getElementById('input-lev').value = cfg.leverage;
-
-        let lineEntry = null, lineSL = null, lineTP = null;
-        let currentPrice = 84000.0;
+        let activeChartSymbol = (activeTrade && activeTrade.symbol) ? activeTrade.symbol : "BTCUSDT";
 
         function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
         function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
         
         function triggerVaultClear() {
-            tradeHistory = [];
-            stats.total = 0;
-            stats.win_rate = 0.0;
-            document.getElementById('stat-total').innerText = "0";
-            document.getElementById('stat-rate').innerText = "0.0%";
-            document.getElementById('hist-count').innerText = "0";
-            document.getElementById('history-container').innerHTML = '<div style="color:#555; text-align:center; padding:15px 0;">Vault Clean (0 trades)...</div>';
-            
-            try {
-                window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?clear_vault=confirmed";
-            } catch(e) {
-                window.location.href = window.location.pathname + "?clear_vault=confirmed";
-            }
+            try { window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?clear_vault=confirmed"; }
+            catch(e) { window.location.href = window.location.pathname + "?clear_vault=confirmed"; }
         }
 
         function triggerForceClose() {
             if (!activeTrade) { alert("No active trade to close!"); return; }
-            if (confirm("Force close active position at market price?")) {
-                try {
-                    window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?force_close=confirmed";
-                } catch(e) {
-                    window.location.href = window.location.pathname + "?force_close=confirmed";
-                }
+            if (confirm("Force close active position?")) {
+                try { window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?force_close=confirmed"; }
+                catch(e) { window.location.href = window.location.pathname + "?force_close=confirmed"; }
             }
         }
 
         function triggerEmergencyToggle() {
             let msg = killActive ? "Resume bot execution?" : "EMERGENCY STOP: Freeze all trading activities?";
             if (confirm(msg)) {
-                try {
-                    window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?toggle_emergency=confirmed";
-                } catch(e) {
-                    window.location.href = window.location.pathname + "?toggle_emergency=confirmed";
-                }
+                try { window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?toggle_emergency=confirmed"; }
+                catch(e) { window.location.href = window.location.pathname + "?toggle_emergency=confirmed"; }
             }
-        }
-
-        function updateCalcQty() {
-            let amt = parseFloat(document.getElementById('input-amount').value) || 100;
-            let lev = parseFloat(document.getElementById('input-lev').value) || 10;
-            let qty = ((amt * lev) / currentPrice).toFixed(4);
-            document.getElementById('calc-qty').innerText = qty + " BTC";
         }
 
         const chartZone = document.getElementById('chart-zone');
@@ -945,19 +808,11 @@ def render_live_dashboard():
             grid: { vertLines: { color: '#111622' }, horzLines: { color: '#111622' } },
             rightPriceScale: { borderColor: '#192130' },
             timeScale: { 
-                borderColor: '#192130', 
-                timeVisible: true, 
-                secondsVisible: false,
+                borderColor: '#192130', timeVisible: true, secondsVisible: false,
                 tickMarkFormatter: (time) => {
                     const date = new Date((time + IST_OFFSET) * 1000);
                     return date.getUTCHours().toString().padStart(2, '0') + ':' + date.getUTCMinutes().toString().padStart(2, '0');
                 }
-            },
-            localization: { 
-                timeFormatter: (time) => { 
-                    const date = new Date((time + IST_OFFSET) * 1000); 
-                    return date.getUTCHours().toString().padStart(2, '0') + ':' + date.getUTCMinutes().toString().padStart(2, '0');
-                } 
             }
         });
 
@@ -967,6 +822,7 @@ def render_live_dashboard():
             wickUpColor: '#00E676', wickDownColor: '#FF3B30' 
         });
 
+        let lineEntry = null, lineSL = null, lineTP = null;
         function clearAllLines() {
             if (lineEntry) { try { series.removePriceLine(lineEntry); } catch(e){} lineEntry = null; }
             if (lineSL) { try { series.removePriceLine(lineSL); } catch(e){} lineSL = null; }
@@ -982,38 +838,23 @@ def render_live_dashboard():
                 let tpVal = parseFloat(activeTrade.tp);
                 let isLong = activeTrade.type === "LONG";
 
-                lineEntry = series.createPriceLine({ 
-                    price: entryVal, color: '#38bdf8', lineWidth: 2, 
-                    lineStyle: LightweightCharts.LineStyle.Dashed, 
-                    axisLabelVisible: true, 
-                    title: 'ENTRY $' + entryVal.toFixed(1) 
-                });
-                
-                lineSL = series.createPriceLine({ 
-                    price: slVal, color: '#ff3b30', lineWidth: 2, 
-                    lineStyle: LightweightCharts.LineStyle.Solid, 
-                    axisLabelVisible: true, 
-                    title: (activeTrade.trailed ? 'TRAILED SL $' : 'SAFE SL$') + slVal.toFixed(1) 
-                });
+                lineEntry = series.createPriceLine({ price: entryVal, color: '#38bdf8', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'ENTRY' });
+                lineSL = series.createPriceLine({ price: slVal, color: '#ff3b30', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: (activeTrade.trailed ? 'TRAILED SL' : 'STRUCTURE SL') });
+                lineTP = series.createPriceLine({ price: tpVal, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'DIRECT 100% TP' });
 
-                lineTP = series.createPriceLine({ 
-                    price: tpVal, color: '#00e676', lineWidth: 2, 
-                    lineStyle: LightweightCharts.LineStyle.Solid, 
-                    axisLabelVisible: true, 
-                    title: 'LIQUIDATION TARGET $' + tpVal.toFixed(1) 
-                });
+                document.getElementById('disp-sym').innerText = activeTrade.symbol;
+                document.getElementById('disp-entry').innerText = "$" + entryVal;
+                document.getElementById('disp-sl').innerText = "$" + slVal;
+                document.getElementById('disp-tp').innerText = "$" + tpVal;
 
-                document.getElementById('disp-entry').innerText = "$" + entryVal.toFixed(1);
-                document.getElementById('disp-sl').innerText = "$" + slVal.toFixed(1);
-                document.getElementById('disp-tp').innerText = "$" + tpVal.toFixed(1);
-
-                document.getElementById('val-setup').innerText = "RIDING " + activeTrade.type + (activeTrade.stage1_booked ? " (STAGE 1 BOOKED 🎯)" : "") + " 🚀";
+                document.getElementById('val-setup').innerText = "RIDING " + activeTrade.symbol + " " + activeTrade.type + " 🚀";
                 document.getElementById('val-setup').style.color = isLong ? "#00e676" : "#ff3b30";
             } else {
+                document.getElementById('disp-sym').innerText = "SCANNING";
                 document.getElementById('disp-entry').innerText = "--";
                 document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "SCANNING INSTITUTIONAL DATA...";
+                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "SCANNING BTC, SOL & DOGE BREAKOUTS...";
                 document.getElementById('val-setup').style.color = killActive ? "#ff3b30" : "#38bdf8";
             }
 
@@ -1025,12 +866,12 @@ def render_live_dashboard():
             if (tradeHistory.length > 0) {
                 histCont.innerHTML = "";
                 tradeHistory.forEach(item => {
-                    let resCol = item.result.includes("TP") || item.result.includes("TRAILED") || item.result.includes("BOOK") ? "#00e676" : "#ff3b30";
+                    let resCol = item.result.includes("TP") || item.result.includes("TRAILED") ? "#00e676" : "#ff3b30";
                     let typeCol = item.type === "LONG" ? "#00e676" : "#ff3b30";
                     let pnlDisp = item.pnl_usd ? `<b style="color:${resCol}; margin-left:4px;">(${item.pnl_usd})</b>` : '';
                     histCont.innerHTML += `
                         <div class="history-item">
-                            <span>${item.time} <b style="color:${typeCol};">${item.type}</b> @ $${parseFloat(item.entry).toFixed(1)}</span>
+                            <span><b>${item.symbol || 'BTC'}</b> ${item.time} <b style="color:${typeCol};">${item.type}</b> @ $${item.entry}</span>
                             <span><b style="color:${resCol};">${item.result}</b> ${pnlDisp}</span>
                         </div>`;
                 });
@@ -1040,61 +881,18 @@ def render_live_dashboard():
         }
 
         function syncCandles() {
-            fetch('https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100')
+            fetch('https://data-api.binance.vision/api/v3/klines?symbol=' + activeChartSymbol + '&interval=5m&limit=100')
                 .then(r => r.json())
                 .then(data => {
                     let cdata = data.map(d => ({ 
                         time: (d[0] - (d[0] % 300000)) / 1000, 
-                        open: parseFloat(d[1]), 
-                        high: parseFloat(d[2]), 
-                        low: parseFloat(d[3]), 
-                        close: parseFloat(d[4]) 
+                        open: parseFloat(d[1]), high: parseFloat(d[2]), 
+                        low: parseFloat(d[3]), close: parseFloat(d[4]) 
                     }));
                     series.setData(cdata);
                     chart.timeScale().fitContent();
                     renderMasterInterface();
-                    connectLiveStream(cdata);
                 }).catch(e => setTimeout(syncCandles, 2000));
-        }
-
-        function connectLiveStream(cdata) {
-            const ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@kline_5m");
-            ws.onmessage = (e) => {
-                const k = JSON.parse(e.data).k;
-                const price = parseFloat(k.c);
-                const barTime = (k.t - (k.t % 300000)) / 1000;
-                
-                currentPrice = price;
-                updateCalcQty();
-                document.getElementById('live-price').innerText = "$" + price.toFixed(1);
-
-                if (activeTrade && activeTrade.entry) {
-                    let isLong = activeTrade.type === "LONG";
-                    let slVal = parseFloat(activeTrade.sl);
-                    let tpVal = parseFloat(activeTrade.tp);
-
-                    if (isLong && (price <= slVal || price >= tpVal)) {
-                        activeTrade = null;
-                        renderMasterInterface();
-                    } else if (!isLong && (price >= slVal || price <= tpVal)) {
-                        activeTrade = null;
-                        renderMasterInterface();
-                    }
-                }
-
-                let last = cdata[cdata.length - 1];
-                if (barTime === last.time) {
-                    last.close = price;
-                    if (price > last.high) last.high = price;
-                    if (price < last.low) last.low = price;
-                    series.update(last);
-                } else if (barTime > last.time) {
-                    const newBar = { time: barTime, open: price, high: price, low: price, close: price };
-                    cdata.push(newBar);
-                    series.update(newBar);
-                }
-            };
-            ws.onclose = () => setTimeout(() => connectLiveStream(cdata), 1500);
         }
 
         syncCandles();
@@ -1106,7 +904,6 @@ def render_live_dashboard():
     final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
                               .replace("__TRADE_HISTORY__", js_history)\
                               .replace("__STATS__", js_stats)\
-                              .replace("__CFG__", js_cfg)\
                               .replace("__KILL_SWITCH__", js_kill)
 
     components.html(final_html, height=710, scrolling=False)
