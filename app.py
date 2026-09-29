@@ -12,8 +12,7 @@ import hashlib
 from datetime import datetime
 
 # ==============================================================================
-# INSTITUTIONAL QUANT TRADING BOT (MULTI-PAIR UI SWITCHER)
-# TARGET ASSETS: BTCUSDT | SOLUSDT | DOGEUSDT ($10 ACCOUNT ENGINE)
+# MULTI-ASSET QUANT RADAR: BTCUSDT | SOLUSDT | DOGEUSDT ($10 ACCOUNT ENGINE)
 # ==============================================================================
 
 BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
@@ -34,7 +33,7 @@ PAIR_CONFIG = {
     "DOGEUSDT": {"min_sl_pct": 0.0090, "tp_pct": 0.0300, "round_dec": 5, "qty_dec": 0, "min_atr": 0.0008}
 }
 
-# --- DATABASE SETUP ---
+# --- 1. LOGGING & DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cur = conn.cursor()
@@ -113,18 +112,18 @@ def _send_tg_worker(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": str(CHAT_ID).strip(), "text": msg}
     try:
-        requests.post(url, json=payload, timeout=3)
+        requests.post(url, json=payload, timeout=4)
     except: pass
 
     if DISCORD_WEBHOOK_URL.strip():
         try:
-            requests.post(DISCORD_WEBHOOK_URL.strip(), json={"content": msg}, timeout=3)
+            requests.post(DISCORD_WEBHOOK_URL.strip(), json={"content": msg}, timeout=4)
         except: pass
 
 def send_alert(msg):
     threading.Thread(target=_send_tg_worker, args=(msg,), daemon=True).start()
 
-# --- SHARED MEMORY ---
+# --- 2. SHARED MEMORY ENGINE ---
 def read_shared_memory():
     default_mem = {
         "trends_1h": {s: "NEUTRAL" for s in WATCHLIST},
@@ -147,7 +146,7 @@ def write_shared_memory(data):
         with open(SHARED_MEMORY_FILE, "w") as f: json.dump(data, f)
     except: pass
 
-# --- TECHNICAL ANALYSIS UTILITIES ---
+# --- TECHNICAL UTILITIES ---
 def calculate_ema(prices, period):
     if len(prices) < period: return prices[-1]
     k = 2 / (period + 1)
@@ -167,7 +166,6 @@ def calculate_atr(klines, period=14):
         trs.append(tr)
     return sum(trs[-period:]) / period
 
-# --- FAST BINANCE REST FETCHERS ---
 def fetch_pair_klines(symbol, interval="5m", limit=40):
     urls = [
         f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
@@ -187,7 +185,7 @@ def fetch_pair_klines(symbol, interval="5m", limit=40):
         except: continue
     return None, None
 
-# --- THREAD 2: ANALYSIS ENGINE (BTC + SOL + DOGE) ---
+# --- THREAD 2: MULTI-PAIR ANALYSIS ENGINE ---
 def run_thread2_analysis_engine():
     while True:
         try:
@@ -198,7 +196,7 @@ def run_thread2_analysis_engine():
             candidate_signals = {}
 
             for sym in WATCHLIST:
-                # 1. 1-Hour Trend
+                # 1. 1-Hour Trend Scan
                 try:
                     r_1h = requests.get(f"https://data-api.binance.vision/api/v3/klines?symbol={sym}&interval=1h&limit=40", timeout=2.5)
                     if r_1h.status_code == 200:
@@ -213,7 +211,7 @@ def run_thread2_analysis_engine():
                             trends[sym] = "SIDEWAYS"
                 except: pass
 
-                # 2. 5M Structure & Setup
+                # 2. 5M Structure & Breakout Check
                 closed_5m, live_5m = fetch_pair_klines(sym, "5m", 35)
                 if closed_5m and live_5m:
                     closes_5m = [c['close'] for c in closed_5m]
@@ -243,7 +241,7 @@ def run_thread2_analysis_engine():
         except: pass
         time.sleep(3)
 
-# --- THREAD 3: RISK MANAGER ---
+# --- THREAD 3: HARD RISK & MONEY MANAGEMENT ---
 def run_thread3_risk_manager():
     alert_already_sent = False
     while True:
@@ -254,7 +252,7 @@ def run_thread3_risk_manager():
                 mem['risk_circuit_broken'] = True
                 write_shared_memory(mem)
                 if not alert_already_sent:
-                    send_alert(f"🚨 [RISK MANAGER] Drawdown Reached (-${daily_loss:.2f})! Bot paused for today.")
+                    send_alert(f"🚨 [RISK MANAGER ALERT] Daily Drawdown Hit (-${daily_loss:.2f})! Bot paused for today.")
                     alert_already_sent = True
             else:
                 if mem.get('risk_circuit_broken', False):
@@ -264,7 +262,7 @@ def run_thread3_risk_manager():
         except: pass
         time.sleep(15)
 
-# --- THREAD 4: EXECUTION & LIFECYCLE ---
+# --- THREAD 4: EXECUTION & POSITION LIFECYCLE ---
 def execute_binance_futures_order(symbol, side, qty, entry_price, sl_price, tp_price):
     if PAPER_TRADING_MODE:
         return True, "PAPER_SIMULATED_SUCCESS"
@@ -321,11 +319,13 @@ class MasterExecutionLifecycleEngine:
         dec = cfg["round_dec"]
 
         if t['type'] == 'LONG':
+            # Dynamic Trailing SL
             if curr_price > entry * (1 + cfg["min_sl_pct"]) and ema21 > float(t['sl']):
                 t['sl'] = round(ema21 * 0.9985, dec)
                 t['trailed'] = True
                 set_db_state("active_trade", t)
 
+            # 100% DIRECT TP HIT
             if curr_price >= t['tp']:
                 self.locked_closing_id = curr_trade_ref
                 self.sl_locked = False
@@ -335,7 +335,7 @@ class MasterExecutionLifecycleEngine:
                 pts = round(t['tp'] - entry, dec)
                 pnl_usd = round((curr_price - entry) * qty, 2)
                 self.record_to_vault(sym, "LONG", entry, t['tp'], "DIRECT MEGA TP 🔥", f"+{pts}", f"+${pnl_usd:.2f}", qty)
-                send_alert(f"🚀 [DIRECT TP HIT] {sym} LONG\nPnL: +${pnl_usd:.2f}\nExit: ${t['tp']}")
+                send_alert(f"🚀 [DIRECT 100% TP HIT] {sym} LONG!\nProfit: +${pnl_usd:.2f} (+{pts} pts)\nExit: ${t['tp']}")
 
             elif curr_price <= float(t['sl']):
                 if self.sl_locked: return
@@ -368,7 +368,7 @@ class MasterExecutionLifecycleEngine:
                 pts = round(entry - t['tp'], dec)
                 pnl_usd = round((entry - curr_price) * qty, 2)
                 self.record_to_vault(sym, "SHORT", entry, t['tp'], "DIRECT MEGA TP 🔥", f"+{pts}", f"+${pnl_usd:.2f}", qty)
-                send_alert(f"🩸 [DIRECT TP HIT] {sym} SHORT\nPnL: +${pnl_usd:.2f}\nExit: ${t['tp']}")
+                send_alert(f"🩸 [DIRECT 100% TP HIT] {sym} SHORT!\nProfit: +${pnl_usd:.2f} (+{pts} pts)\nExit: ${t['tp']}")
 
             elif curr_price >= float(t['sl']):
                 if self.sl_locked: return
@@ -398,7 +398,7 @@ class MasterExecutionLifecycleEngine:
         candidate_signals = mem.get("candidate_signals", {})
         if not candidate_signals: return
 
-        # 1 Active Trade Lock across BTC, SOL, DOGE
+        # 1 Active Trade Lock across BTC, SOL, and DOGE
         for sym, sig in candidate_signals.items():
             last_bar = self.last_trade_bar.get(sym, 0)
             if sig['time'] <= last_bar: continue
@@ -407,7 +407,6 @@ class MasterExecutionLifecycleEngine:
             dec = cfg["round_dec"]
             curr_p = sig['price']
 
-            # $10 Base Account: $2.50 Margin @ 10x Lev = $25 Notional Position
             pos_usd = 25.0
             qty = round(pos_usd / curr_p, cfg["qty_dec"])
             if cfg["qty_dec"] == 0: qty = int(qty)
@@ -428,8 +427,8 @@ class MasterExecutionLifecycleEngine:
                 }
                 set_db_state("active_trade", trade_obj)
                 send_alert(
-                    f"⚡ [MULTI-SWING] {sym} LONG\n"
-                    f"1H Trend: BULLISH 🟢\n"
+                    f"⚡ [2-3 HR SWING BREAKOUT] {sym} LONG\n"
+                    f"1H Trend: BULLISH 🟢\n\n"
                     f"📍 Entry: ${curr_p}\n"
                     f"🎯 DIRECT TP: ${tp} (+{cfg['tp_pct']*100:.1f}%)\n"
                     f"🛡️ Safe Structure SL: ${sl} (-{cfg['min_sl_pct']*100:.1f}%)\n"
@@ -453,8 +452,8 @@ class MasterExecutionLifecycleEngine:
                 }
                 set_db_state("active_trade", trade_obj)
                 send_alert(
-                    f"⚡ [MULTI-SWING] {sym} SHORT\n"
-                    f"1H Trend: BEARISH 🔴\n"
+                    f"⚡ [2-3 HR SWING BREAKOUT] {sym} SHORT\n"
+                    f"1H Trend: BEARISH 🔴\n\n"
                     f"📍 Entry: ${curr_p}\n"
                     f"🎯 DIRECT TP: ${tp} (-{cfg['tp_pct']*100:.1f}%)\n"
                     f"🛡️ Safe Structure SL: ${sl} (+{cfg['min_sl_pct']*100:.1f}%)\n"
@@ -475,7 +474,7 @@ class MasterExecutionLifecycleEngine:
                 self.evaluate_and_execute()
             time.sleep(1.0)
 
-# --- START ALL 4 CORE THREADS ---
+# --- START ALL CORE BACKGROUND THREADS ---
 @st.cache_resource
 def launch_chart_architecture():
     eid = str(uuid.uuid4())
@@ -483,12 +482,15 @@ def launch_chart_architecture():
     threading.Thread(target=run_thread3_risk_manager, daemon=False).start()
     cmd = MasterExecutionLifecycleEngine(eid)
     threading.Thread(target=cmd.run, daemon=False).start()
+    
+    # Instant Startup Ping to Telegram
+    send_alert("🟢 [QUANT RADAR ONLINE] Multi-Asset Engine Connected!\nScanning Live Breakouts on BTC, SOL & DOGE...")
     return cmd
 
 launch_chart_architecture()
 
 # -------------------------------------------------------------
-# FRONTEND UI WITH PAIR SELECTOR TABS
+# FRONTEND UI (LIVE WEBSOCKET STREAM + PAIR SELECTOR)
 # -------------------------------------------------------------
 st.set_page_config(page_title="QUANT RADAR PRO", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -497,7 +499,6 @@ header, footer, #MainMenu { display: none !important; }
 iframe { width: 100vw !important; height: calc(100vh - 5px) !important; border: none !important; display: block !important; }
 </style>""", unsafe_allow_html=True)
 
-# URL PARAMETER DISPATCHERS
 if st.query_params.get("clear_vault") == "confirmed":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -605,7 +606,6 @@ def render_live_dashboard():
     <div class="top-nav">
         <div class="brand"><span class="pulse-dot"></span> ⚡ QUANT</div>
         
-        <!-- PAIR SELECTOR TABS -->
         <button class="pair-btn active" id="tab-BTC" onclick="switchPair('BTCUSDT')">BTC</button>
         <button class="pair-btn" id="tab-SOL" onclick="switchPair('SOLUSDT')">SOL</button>
         <button class="pair-btn" id="tab-DOGE" onclick="switchPair('DOGEUSDT')">DOGE</button>
@@ -639,7 +639,7 @@ def render_live_dashboard():
             </div>
             <div class="metric-cell">
                 <span class="cell-head">VIEWING ASSET</span>
-                <div class="cell-body" id="val-viewing" style="color:#38bdf8;">BTCUSDT (5M)</div>
+                <div class="cell-body" id="val-viewing" style="color:#38bdf8;">BTCUSDT (5M LIVE)</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TARGET PROFILE</span>
@@ -652,7 +652,6 @@ def render_live_dashboard():
         </div>
     </div>
 
-    <!-- VAULT POPUP MODAL -->
     <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
         <div class="modal-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
@@ -680,6 +679,8 @@ def render_live_dashboard():
         let killActive = __KILL_SWITCH__;
 
         let activeChartSymbol = (activeTrade && activeTrade.symbol) ? activeTrade.symbol : "BTCUSDT";
+        let liveSocket = null;
+        let cdata = [];
 
         function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
         function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
@@ -711,7 +712,12 @@ def render_live_dashboard():
             if (sym === 'BTCUSDT') document.getElementById('tab-BTC').classList.add('active');
             if (sym === 'SOLUSDT') document.getElementById('tab-SOL').classList.add('active');
             if (sym === 'DOGEUSDT') document.getElementById('tab-DOGE').classList.add('active');
-            document.getElementById('val-viewing').innerText = sym + " (5M)";
+            document.getElementById('val-viewing').innerText = sym + " (5M LIVE)";
+            
+            if (liveSocket) {
+                liveSocket.close();
+                liveSocket = null;
+            }
             syncCandles();
         }
 
@@ -795,11 +801,40 @@ def render_live_dashboard():
             }
         }
 
+        function connectLiveStream() {
+            if (liveSocket) { liveSocket.close(); }
+            const streamSymbol = activeChartSymbol.toLowerCase();
+            liveSocket = new WebSocket(`wss://stream.binance.com:9443/ws/${streamSymbol}@kline_5m`);
+
+            liveSocket.onmessage = (e) => {
+                const data = JSON.parse(e.data);
+                const k = data.k;
+                const price = parseFloat(k.c);
+                const barTime = (k.t - (k.t % 300000)) / 1000;
+
+                if (cdata.length > 0) {
+                    let last = cdata[cdata.length - 1];
+                    if (barTime === last.time) {
+                        last.close = price;
+                        if (price > last.high) last.high = price;
+                        if (price < last.low) last.low = price;
+                        series.update(last);
+                    } else if (barTime > last.time) {
+                        const newBar = { time: barTime, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: price };
+                        cdata.push(newBar);
+                        series.update(newBar);
+                    }
+                }
+            };
+
+            liveSocket.onerror = () => { setTimeout(connectLiveStream, 2000); };
+        }
+
         function syncCandles() {
             fetch('https://data-api.binance.vision/api/v3/klines?symbol=' + activeChartSymbol + '&interval=5m&limit=100')
                 .then(r => r.json())
                 .then(data => {
-                    let cdata = data.map(d => ({ 
+                    cdata = data.map(d => ({ 
                         time: (d[0] - (d[0] % 300000)) / 1000, 
                         open: parseFloat(d[1]), high: parseFloat(d[2]), 
                         low: parseFloat(d[3]), close: parseFloat(d[4]) 
@@ -807,6 +842,7 @@ def render_live_dashboard():
                     series.setData(cdata);
                     chart.timeScale().fitContent();
                     renderMasterInterface();
+                    connectLiveStream();
                 }).catch(e => setTimeout(syncCandles, 2000));
         }
 
