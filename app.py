@@ -12,7 +12,7 @@ import hashlib
 from datetime import datetime
 
 # ==============================================================================
-# INSTITUTIONAL QUANT TRADING BOT (5-THREAD ARCHITECTURE)
+# INSTITUTIONAL QUANT TRADING BOT (MULTI-PAIR UI SWITCHER)
 # TARGET ASSETS: BTCUSDT | SOLUSDT | DOGEUSDT ($10 ACCOUNT ENGINE)
 # ==============================================================================
 
@@ -24,18 +24,17 @@ SHARED_MEMORY_FILE = "sniper_brain_data.json"
 
 BINANCE_API_KEY = ""
 BINANCE_API_SECRET = ""
-PAPER_TRADING_MODE = True  # True: Paper Simulation, False: Live Binance Futures
+PAPER_TRADING_MODE = True
 
 WATCHLIST = ["BTCUSDT", "SOLUSDT", "DOGEUSDT"]
 
-# ASSET SPECIFICATIONS FOR $10 CAPITAL ($2.50 Margin @ 10x Lev = $25 Position)
 PAIR_CONFIG = {
     "BTCUSDT": {"min_sl_pct": 0.0040, "tp_pct": 0.0150, "round_dec": 1, "qty_dec": 3, "min_atr": 40.0},
     "SOLUSDT": {"min_sl_pct": 0.0075, "tp_pct": 0.0250, "round_dec": 2, "qty_dec": 2, "min_atr": 0.35},
     "DOGEUSDT": {"min_sl_pct": 0.0090, "tp_pct": 0.0300, "round_dec": 5, "qty_dec": 0, "min_atr": 0.0008}
 }
 
-# --- DATABASE SETUP (VAULT ENGINE) ---
+# --- DATABASE SETUP ---
 def init_db():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     cur = conn.cursor()
@@ -125,7 +124,7 @@ def _send_tg_worker(msg):
 def send_alert(msg):
     threading.Thread(target=_send_tg_worker, args=(msg,), daemon=True).start()
 
-# --- SHARED MEMORY ENGINE ---
+# --- SHARED MEMORY ---
 def read_shared_memory():
     default_mem = {
         "trends_1h": {s: "NEUTRAL" for s in WATCHLIST},
@@ -134,7 +133,6 @@ def read_shared_memory():
         "sentiment_score": 50,
         "risk_circuit_broken": False,
         "commander_heartbeat": time.time(),
-        "scanner_heartbeat": time.time(),
         "candidate_signals": {}
     }
     if not os.path.exists(SHARED_MEMORY_FILE):
@@ -189,46 +187,18 @@ def fetch_pair_klines(symbol, interval="5m", limit=40):
         except: continue
     return None, None
 
-# ==============================================================================
-# THREAD 1: WATCHLIST SCANNER (ASYNC REAL-TIME SCANNER)
-# ==============================================================================
-def run_thread1_watchlist_scanner():
-    while True:
-        try:
-            mem = read_shared_memory()
-            mem["scanner_heartbeat"] = time.time()
-            write_shared_memory(mem)
-        except: pass
-        time.sleep(10)
-
-# ==============================================================================
-# THREAD 2: ANALYSIS ENGINE (1H MACRO + 5M SETUP + EXTRA FILTERS)
-# ==============================================================================
+# --- THREAD 2: ANALYSIS ENGINE (BTC + SOL + DOGE) ---
 def run_thread2_analysis_engine():
-    sentiment_last_check = 0
-    fng_score = 50
-
     while True:
         try:
-            now = time.time()
-            # 1. Alternative.me Fear & Greed API
-            if now - sentiment_last_check > 300:
-                try:
-                    r_fng = requests.get("https://api.alternative.me/fng/?limit=1", timeout=3)
-                    if r_fng.status_code == 200:
-                        fng_score = int(r_fng.json()['data'][0]['value'])
-                        sentiment_last_check = now
-                except: pass
-
             mem = read_shared_memory()
-            mem['sentiment_score'] = fng_score
             trends = mem.get("trends_1h", {})
             fundings = mem.get("funding_rates", {})
             imbalances = mem.get("orderbook_imbalance", {})
             candidate_signals = {}
 
             for sym in WATCHLIST:
-                # A. 1-Hour Trend Filter
+                # 1. 1-Hour Trend
                 try:
                     r_1h = requests.get(f"https://data-api.binance.vision/api/v3/klines?symbol={sym}&interval=1h&limit=40", timeout=2.5)
                     if r_1h.status_code == 200:
@@ -243,24 +213,7 @@ def run_thread2_analysis_engine():
                             trends[sym] = "SIDEWAYS"
                 except: pass
 
-                # B. Funding Rate Filter
-                try:
-                    r_fund = requests.get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={sym}", timeout=2.5)
-                    if r_fund.status_code == 200:
-                        fundings[sym] = float(r_fund.json().get('lastFundingRate', 0.0))
-                except: pass
-
-                # C. Order Book L2 Imbalance
-                try:
-                    r_depth = requests.get(f"https://fapi.binance.com/fapi/v1/depth?symbol={sym}&limit=20", timeout=2.5)
-                    if r_depth.status_code == 200:
-                        d = r_depth.json()
-                        bid_vol = sum(float(b[1]) for b in d.get('bids', []))
-                        ask_vol = sum(float(a[1]) for a in d.get('asks', []))
-                        imbalances[sym] = (bid_vol / ask_vol) if ask_vol > 0 else 1.0
-                except: pass
-
-                # D. 5-Minute Baseline & Structure Validation
+                # 2. 5M Structure & Setup
                 closed_5m, live_5m = fetch_pair_klines(sym, "5m", 35)
                 if closed_5m and live_5m:
                     closes_5m = [c['close'] for c in closed_5m]
@@ -273,68 +226,35 @@ def run_thread2_analysis_engine():
                     low_6 = min(c['low'] for c in recent_6)
                     curr_p = float(live_5m['close'])
 
-                    # Volume Spike Check (>1.5x Avg Volume)
                     avg_vol = sum(c['vol'] for c in closed_5m[-10:]) / 10.0
-                    vol_spike = live_5m['vol'] >= (avg_vol * 1.5)
-
-                    # EXTRA FILTERS VALIDATION (Fake Breakout Avoidance)
+                    vol_spike = live_5m['vol'] >= (avg_vol * 1.3)
                     atr_valid = atr >= PAIR_CONFIG[sym]["min_atr"]
-                    funding_safe_long = fundings[sym] <= 0.0007
-                    funding_safe_short = fundings[sym] >= -0.0007
-                    ob_favors_long = imbalances[sym] >= 0.85
-                    ob_favors_short = imbalances[sym] <= 1.25
 
-                    is_long_valid = (
-                        trends[sym] == "BULLISH" and
-                        ema9 > ema21 and
-                        curr_p >= high_6 and
-                        atr_valid and
-                        vol_spike and
-                        funding_safe_long and
-                        ob_favors_long
-                    )
-
-                    is_short_valid = (
-                        trends[sym] == "BEARISH" and
-                        ema9 < ema21 and
-                        curr_p <= low_6 and
-                        atr_valid and
-                        vol_spike and
-                        funding_safe_short and
-                        ob_favors_short
-                    )
-
-                    if is_long_valid:
+                    if trends.get(sym) == "BULLISH" and ema9 > ema21 and curr_p >= high_6 and atr_valid and vol_spike:
                         candidate_signals[sym] = {"type": "LONG", "price": curr_p, "atr": atr, "time": live_5m['time']}
-                    elif is_short_valid:
+                    elif trends.get(sym) == "BEARISH" and ema9 < ema21 and curr_p <= low_6 and atr_valid and vol_spike:
                         candidate_signals[sym] = {"type": "SHORT", "price": curr_p, "atr": atr, "time": live_5m['time']}
 
                 time.sleep(0.5)
 
             mem["trends_1h"] = trends
-            mem["funding_rates"] = fundings
-            mem["orderbook_imbalance"] = imbalances
             mem["candidate_signals"] = candidate_signals
             write_shared_memory(mem)
         except: pass
         time.sleep(3)
 
-# ==============================================================================
-# THREAD 3: RISK & MONEY MANAGEMENT ($10 CAPITAL CONTROLLER)
-# ==============================================================================
+# --- THREAD 3: RISK MANAGER ---
 def run_thread3_risk_manager():
     alert_already_sent = False
     while True:
         try:
             consec_losses, daily_loss = check_db_risk_guard()
             mem = read_shared_memory()
-
-            # Strict $10 Protection: -$2.00 max daily loss (20% of capital) or 3 consecutive losses
             if daily_loss >= 2.0 or consec_losses >= 3:
                 mem['risk_circuit_broken'] = True
                 write_shared_memory(mem)
                 if not alert_already_sent:
-                    send_alert(f"🚨 [RISK MANAGER INTERVENTION] Daily drawdown reached (-${daily_loss:.2f})! Bot trading FROZEN for 24h.")
+                    send_alert(f"🚨 [RISK MANAGER] Drawdown Reached (-${daily_loss:.2f})! Bot paused for today.")
                     alert_already_sent = True
             else:
                 if mem.get('risk_circuit_broken', False):
@@ -344,23 +264,7 @@ def run_thread3_risk_manager():
         except: pass
         time.sleep(15)
 
-# ==============================================================================
-# THREAD 5: SCHEDULER & WATCHDOG
-# ==============================================================================
-def run_thread5_scheduler_watchdog():
-    while True:
-        try:
-            mem = read_shared_memory()
-            now = time.time()
-            if now - mem.get("commander_heartbeat", now) > 60:
-                mem["commander_heartbeat"] = now
-                write_shared_memory(mem)
-        except: pass
-        time.sleep(15)
-
-# ==============================================================================
-# THREAD 4: ORDER EXECUTION, VAULT & POSITION LIFECYCLE ENGINE
-# ==============================================================================
+# --- THREAD 4: EXECUTION & LIFECYCLE ---
 def execute_binance_futures_order(symbol, side, qty, entry_price, sl_price, tp_price):
     if PAPER_TRADING_MODE:
         return True, "PAPER_SIMULATED_SUCCESS"
@@ -416,15 +320,12 @@ class MasterExecutionLifecycleEngine:
         cfg = PAIR_CONFIG[sym]
         dec = cfg["round_dec"]
 
-        # ================= LONG POSITION LIFECYCLE =================
         if t['type'] == 'LONG':
-            # Dynamic Trailing SL on 5M EMA 21 (Breakeven + Trend Protection)
             if curr_price > entry * (1 + cfg["min_sl_pct"]) and ema21 > float(t['sl']):
                 t['sl'] = round(ema21 * 0.9985, dec)
                 t['trailed'] = True
                 set_db_state("active_trade", t)
 
-            # 100% DIRECT TAKE PROFIT (NO PARTIAL BOOKING)
             if curr_price >= t['tp']:
                 self.locked_closing_id = curr_trade_ref
                 self.sl_locked = False
@@ -434,9 +335,8 @@ class MasterExecutionLifecycleEngine:
                 pts = round(t['tp'] - entry, dec)
                 pnl_usd = round((curr_price - entry) * qty, 2)
                 self.record_to_vault(sym, "LONG", entry, t['tp'], "DIRECT MEGA TP 🔥", f"+{pts}", f"+${pnl_usd:.2f}", qty)
-                send_alert(f"🚀 [DIRECT 100% TP HIT] {sym} LONG\nPnL: +${pnl_usd:.2f}\nExit Price: ${t['tp']}")
+                send_alert(f"🚀 [DIRECT TP HIT] {sym} LONG\nPnL: +${pnl_usd:.2f}\nExit: ${t['tp']}")
 
-            # STOP LOSS / TRAILED SL HIT
             elif curr_price <= float(t['sl']):
                 if self.sl_locked: return
                 self.sl_locked = True
@@ -451,9 +351,8 @@ class MasterExecutionLifecycleEngine:
                 usd_sign = f"+${pnl_usd:.2f}" if pnl_usd > 0 else f"-${abs(pnl_usd):.2f}"
 
                 self.record_to_vault(sym, "LONG", entry, t['sl'], res_type, pts_sign, usd_sign, qty)
-                send_alert(f"{'🛡️' if pnl_usd > 0 else '🛑'} [EXIT] {sym} LONG {res_type}\nPnL: {usd_sign}\nExit Price: ${curr_price}")
+                send_alert(f"{'🛡️' if pnl_usd > 0 else '🛑'} [EXIT] {sym} LONG {res_type}\nPnL: {usd_sign}\nExit: ${curr_price}")
 
-        # ================= SHORT POSITION LIFECYCLE =================
         elif t['type'] == 'SHORT':
             if curr_price < entry * (1 - cfg["min_sl_pct"]) and ema21 < float(t['sl']):
                 t['sl'] = round(ema21 * 1.0015, dec)
@@ -469,7 +368,7 @@ class MasterExecutionLifecycleEngine:
                 pts = round(entry - t['tp'], dec)
                 pnl_usd = round((entry - curr_price) * qty, 2)
                 self.record_to_vault(sym, "SHORT", entry, t['tp'], "DIRECT MEGA TP 🔥", f"+{pts}", f"+${pnl_usd:.2f}", qty)
-                send_alert(f"🩸 [DIRECT 100% TP HIT] {sym} SHORT\nPnL: +${pnl_usd:.2f}\nExit Price: ${t['tp']}")
+                send_alert(f"🩸 [DIRECT TP HIT] {sym} SHORT\nPnL: +${pnl_usd:.2f}\nExit: ${t['tp']}")
 
             elif curr_price >= float(t['sl']):
                 if self.sl_locked: return
@@ -485,7 +384,7 @@ class MasterExecutionLifecycleEngine:
                 usd_sign = f"+${pnl_usd:.2f}" if pnl_usd > 0 else f"-${abs(pnl_usd):.2f}"
 
                 self.record_to_vault(sym, "SHORT", entry, t['sl'], res_type, pts_sign, usd_sign, qty)
-                send_alert(f"{'🛡️' if pnl_usd > 0 else '🛑'} [EXIT] {sym} SHORT {res_type}\nPnL: {usd_sign}\nExit Price: ${curr_price}")
+                send_alert(f"{'🛡️' if pnl_usd > 0 else '🛑'} [EXIT] {sym} SHORT {res_type}\nPnL: {usd_sign}\nExit: ${curr_price}")
 
     def evaluate_and_execute(self):
         mem = read_shared_memory()
@@ -493,13 +392,13 @@ class MasterExecutionLifecycleEngine:
             return
 
         last_exit_epoch = get_db_state("last_exit_epoch", 0)
-        if time.time() - last_exit_epoch < 300:  # 5 min cooloff
+        if time.time() - last_exit_epoch < 300:
             return
 
         candidate_signals = mem.get("candidate_signals", {})
         if not candidate_signals: return
 
-        # UNIQUE TRADE LOCKING: Only 1 active position across BTC, SOL, and DOGE
+        # 1 Active Trade Lock across BTC, SOL, DOGE
         for sym, sig in candidate_signals.items():
             last_bar = self.last_trade_bar.get(sym, 0)
             if sig['time'] <= last_bar: continue
@@ -508,7 +407,7 @@ class MasterExecutionLifecycleEngine:
             dec = cfg["round_dec"]
             curr_p = sig['price']
 
-            # Account Size: $10.00 | Margin Allocation: $2.50 @ 10x Lev = $25 Position Notional
+            # $10 Base Account: $2.50 Margin @ 10x Lev = $25 Notional Position
             pos_usd = 25.0
             qty = round(pos_usd / curr_p, cfg["qty_dec"])
             if cfg["qty_dec"] == 0: qty = int(qty)
@@ -529,14 +428,14 @@ class MasterExecutionLifecycleEngine:
                 }
                 set_db_state("active_trade", trade_obj)
                 send_alert(
-                    f"⚡ [INSTITUTIONAL SWING] {sym} LONG\n"
-                    f"Macro Trend: 1H BULLISH 🟢\n"
+                    f"⚡ [MULTI-SWING] {sym} LONG\n"
+                    f"1H Trend: BULLISH 🟢\n"
                     f"📍 Entry: ${curr_p}\n"
                     f"🎯 DIRECT TP: ${tp} (+{cfg['tp_pct']*100:.1f}%)\n"
-                    f"🛡️ Structure SL: ${sl} (-{cfg['min_sl_pct']*100:.1f}%)\n"
+                    f"🛡️ Safe Structure SL: ${sl} (-{cfg['min_sl_pct']*100:.1f}%)\n"
                     f"📦 Size: {qty} {sym.replace('USDT', '')} ($2.50 Margin)"
                 )
-                break  # Single trade limit locked
+                break
 
             elif sig['type'] == "SHORT":
                 self.last_trade_bar[sym] = sig['time']
@@ -554,11 +453,11 @@ class MasterExecutionLifecycleEngine:
                 }
                 set_db_state("active_trade", trade_obj)
                 send_alert(
-                    f"⚡ [INSTITUTIONAL SWING] {sym} SHORT\n"
-                    f"Macro Trend: 1H BEARISH 🔴\n"
+                    f"⚡ [MULTI-SWING] {sym} SHORT\n"
+                    f"1H Trend: BEARISH 🔴\n"
                     f"📍 Entry: ${curr_p}\n"
                     f"🎯 DIRECT TP: ${tp} (-{cfg['tp_pct']*100:.1f}%)\n"
-                    f"🛡️ Structure SL: ${sl} (+{cfg['min_sl_pct']*100:.1f}%)\n"
+                    f"🛡️ Safe Structure SL: ${sl} (+{cfg['min_sl_pct']*100:.1f}%)\n"
                     f"📦 Size: {qty} {sym.replace('USDT', '')} ($2.50 Margin)"
                 )
                 break
@@ -576,15 +475,12 @@ class MasterExecutionLifecycleEngine:
                 self.evaluate_and_execute()
             time.sleep(1.0)
 
-# --- START ALL 5 THREADS (EXACT CHART TOPOLOGY) ---
+# --- START ALL 4 CORE THREADS ---
 @st.cache_resource
 def launch_chart_architecture():
     eid = str(uuid.uuid4())
-    threading.Thread(target=run_thread1_watchlist_scanner, daemon=False).start()
     threading.Thread(target=run_thread2_analysis_engine, daemon=False).start()
     threading.Thread(target=run_thread3_risk_manager, daemon=False).start()
-    threading.Thread(target=run_thread5_scheduler_watchdog, daemon=False).start()
-    
     cmd = MasterExecutionLifecycleEngine(eid)
     threading.Thread(target=cmd.run, daemon=False).start()
     return cmd
@@ -592,16 +488,16 @@ def launch_chart_architecture():
 launch_chart_architecture()
 
 # -------------------------------------------------------------
-# REAL-TIME DASHBOARD (STREAMLIT / WEB UI)
+# FRONTEND UI WITH PAIR SELECTOR TABS
 # -------------------------------------------------------------
-st.set_page_config(page_title="INSTITUTIONAL QUANT RADAR", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="QUANT RADAR PRO", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
 header, footer, #MainMenu { display: none !important; }
 .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; }
 iframe { width: 100vw !important; height: calc(100vh - 5px) !important; border: none !important; display: block !important; }
 </style>""", unsafe_allow_html=True)
 
-# DISPATCHERS
+# URL PARAMETER DISPATCHERS
 if st.query_params.get("clear_vault") == "confirmed":
     try:
         conn = sqlite3.connect(DB_FILE, timeout=5)
@@ -677,21 +573,27 @@ def render_live_dashboard():
         .brand { font-weight: 800; color: #fff; font-size: 11px; display: flex; align-items: center; gap: 5px; }
         .pulse-dot { width: 7px; height: 7px; background: #00e676; border-radius: 50%; box-shadow: 0 0 8px #00e676; animation: blinker 1.2s cubic-bezier(0.5, 0, 1, 1) infinite alternate; }
         @keyframes blinker { from { opacity: 1; transform: scale(1); } to { opacity: 0.25; transform: scale(0.7); } }
-        .badge-scan { background: #00e676; color: #000; font-size: 8px; padding: 2px 4px; border-radius: 3px; font-weight: 900; }
-        .stat-card { display: flex; flex-direction: column; min-width: 65px; }
+        
+        .pair-btn { background: #141c2c; border: 1px solid #1f2a40; color: #8892b0; border-radius: 4px; padding: 2px 7px; font-size: 9px; font-weight: 800; cursor: pointer; }
+        .pair-btn.active { background: #00e676; color: #000; border-color: #00e676; }
+
+        .stat-card { display: flex; flex-direction: column; min-width: 60px; }
         .stat-label { font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 800; }
         .stat-val { font-size: 10px; font-weight: 800; color: #fff; }
         .btn-compact { background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 8px; font-size: 9px; font-weight: 800; cursor: pointer; }
+        
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
         #chart-zone { width: 100vw; height: 53vh; background: #080a0f; }
         .trade-dock { width: 100vw; height: 38px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 0 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
         .dock-group { display: flex; align-items: center; gap: 8px; }
         .btn-override-danger { background: rgba(255, 59, 48, 0.2); color: #ff3b30; border: 1px solid #ff3b30; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
         .btn-override-warn { background: rgba(240, 185, 11, 0.2); color: #f0b90b; border: 1px solid #f0b90b; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
+        
         .bottom-bar { width: 100vw; height: 46px; background: #0d121c; border-top: 1px solid #1a2336; padding: 4px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.2fr; gap: 6px; align-items: center; }
         .metric-cell { display: flex; flex-direction: column; justify-content: center; background: #101624; padding: 2px 6px; border-radius: 4px; border: 1px solid #192233; height: 36px; }
         .cell-head { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 2px; }
         .cell-body { font-size: 9px; font-weight: 800; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        
         .modal-bg { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); backdrop-filter: blur(5px); z-index: 999; align-items: center; justify-content: center; }
         .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 90vw; max-width: 400px; max-height: 80vh; display: flex; flex-direction: column; padding: 12px; }
         .history-list { overflow-y: auto; max-height: 250px; font-size: 10px; }
@@ -701,13 +603,15 @@ def render_live_dashboard():
 </head>
 <body>
     <div class="top-nav">
-        <div class="brand">
-            <span class="pulse-dot"></span>
-            ⚡ QUANT ENGINE <span class="badge-scan">5 THREADS ONLINE</span>
-        </div>
-        <div class="stat-card"><div class="stat-label">ACTIVE PAIR</div><div id="disp-sym" class="stat-val" style="color:#f0b90b;">NONE</div></div>
+        <div class="brand"><span class="pulse-dot"></span> ⚡ QUANT</div>
+        
+        <!-- PAIR SELECTOR TABS -->
+        <button class="pair-btn active" id="tab-BTC" onclick="switchPair('BTCUSDT')">BTC</button>
+        <button class="pair-btn" id="tab-SOL" onclick="switchPair('SOLUSDT')">SOL</button>
+        <button class="pair-btn" id="tab-DOGE" onclick="switchPair('DOGEUSDT')">DOGE</button>
+
+        <div class="stat-card"><div class="stat-label">ACTIVE</div><div id="disp-sym" class="stat-val" style="color:#f0b90b;">NONE</div></div>
         <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
-        <div class="stat-card"><div class="stat-label">SL / TRAIL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
         <div class="stat-card"><div class="stat-label">DIRECT TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
         <button class="btn-compact" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
         <button class="btn-compact" onclick="window.parent.location.reload()">🔄</button>
@@ -719,8 +623,8 @@ def render_live_dashboard():
             <div class="dock-group">
                 <span style="color:#62697a; font-weight:800;">ACCOUNT:</span>
                 <b style="color:#00e676; font-size:10px;">$10.00 BASE</b>
-                <span style="color:#62697a;">| ALLOCATION:</span>
-                <b style="color:#38bdf8; font-size:10px;">$2.50 (10x LEV = $25 NOTIONAL)</b>
+                <span style="color:#62697a;">| MARGIN:</span>
+                <b style="color:#38bdf8; font-size:10px;">$2.50 (10x)</b>
             </div>
             <div class="dock-group">
                 <button type="button" class="btn-override-warn" onclick="triggerForceClose()">⚡ FORCE CLOSE</button>
@@ -734,8 +638,8 @@ def render_live_dashboard():
                 <div class="cell-body" style="color:#00e676;">-$2.00 DRAWDOWN GUARD</div>
             </div>
             <div class="metric-cell">
-                <span class="cell-head">EXTRA FILTERS</span>
-                <div class="cell-body" style="color:#38bdf8;">ATR • OB • VOL • FUNDING</div>
+                <span class="cell-head">VIEWING ASSET</span>
+                <div class="cell-body" id="val-viewing" style="color:#38bdf8;">BTCUSDT (5M)</div>
             </div>
             <div class="metric-cell">
                 <span class="cell-head">TARGET PROFILE</span>
@@ -752,7 +656,7 @@ def render_live_dashboard():
     <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
         <div class="modal-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <b style="color:#fff; font-size:11px;">SQLITE VAULT (PROTECTED TRADES)</b>
+                <b style="color:#fff; font-size:11px;">MULTI-ASSET VAULT</b>
                 <button onclick="toggleModal(false)" style="background:transparent; border:none; color:#888; font-size:16px; cursor:pointer;">✕</button>
             </div>
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-bottom:10px;">
@@ -801,6 +705,16 @@ def render_live_dashboard():
             }
         }
 
+        function switchPair(sym) {
+            activeChartSymbol = sym;
+            document.querySelectorAll('.pair-btn').forEach(b => b.classList.remove('active'));
+            if (sym === 'BTCUSDT') document.getElementById('tab-BTC').classList.add('active');
+            if (sym === 'SOLUSDT') document.getElementById('tab-SOL').classList.add('active');
+            if (sym === 'DOGEUSDT') document.getElementById('tab-DOGE').classList.add('active');
+            document.getElementById('val-viewing').innerText = sym + " (5M)";
+            syncCandles();
+        }
+
         const chartZone = document.getElementById('chart-zone');
         const chart = LightweightCharts.createChart(chartZone, {
             width: chartZone.clientWidth, height: chartZone.clientHeight,
@@ -833,26 +747,27 @@ def render_live_dashboard():
             clearAllLines();
 
             if (activeTrade && activeTrade.entry) {
-                let entryVal = parseFloat(activeTrade.entry);
-                let slVal = parseFloat(activeTrade.sl);
-                let tpVal = parseFloat(activeTrade.tp);
-                let isLong = activeTrade.type === "LONG";
+                let isCurrentChart = (activeTrade.symbol === activeChartSymbol);
 
-                lineEntry = series.createPriceLine({ price: entryVal, color: '#38bdf8', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'ENTRY' });
-                lineSL = series.createPriceLine({ price: slVal, color: '#ff3b30', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: (activeTrade.trailed ? 'TRAILED SL' : 'STRUCTURE SL') });
-                lineTP = series.createPriceLine({ price: tpVal, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'DIRECT 100% TP' });
+                if (isCurrentChart) {
+                    let entryVal = parseFloat(activeTrade.entry);
+                    let slVal = parseFloat(activeTrade.sl);
+                    let tpVal = parseFloat(activeTrade.tp);
+
+                    lineEntry = series.createPriceLine({ price: entryVal, color: '#38bdf8', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'ENTRY' });
+                    lineSL = series.createPriceLine({ price: slVal, color: '#ff3b30', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: (activeTrade.trailed ? 'TRAILED SL' : 'SL') });
+                    lineTP = series.createPriceLine({ price: tpVal, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'DIRECT TP' });
+                }
 
                 document.getElementById('disp-sym').innerText = activeTrade.symbol;
-                document.getElementById('disp-entry').innerText = "$" + entryVal;
-                document.getElementById('disp-sl').innerText = "$" + slVal;
-                document.getElementById('disp-tp').innerText = "$" + tpVal;
+                document.getElementById('disp-entry').innerText = "$" + activeTrade.entry;
+                document.getElementById('disp-tp').innerText = "$" + activeTrade.tp;
 
                 document.getElementById('val-setup').innerText = "RIDING " + activeTrade.symbol + " " + activeTrade.type + " 🚀";
-                document.getElementById('val-setup').style.color = isLong ? "#00e676" : "#ff3b30";
+                document.getElementById('val-setup').style.color = (activeTrade.type === "LONG") ? "#00e676" : "#ff3b30";
             } else {
                 document.getElementById('disp-sym').innerText = "SCANNING";
                 document.getElementById('disp-entry').innerText = "--";
-                document.getElementById('disp-sl').innerText = "--";
                 document.getElementById('disp-tp').innerText = "--";
                 document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "SCANNING BTC, SOL & DOGE BREAKOUTS...";
                 document.getElementById('val-setup').style.color = killActive ? "#ff3b30" : "#38bdf8";
