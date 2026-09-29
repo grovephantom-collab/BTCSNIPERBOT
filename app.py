@@ -28,9 +28,9 @@ PAPER_TRADING_MODE = True
 WATCHLIST = ["BTCUSDT", "SOLUSDT", "DOGEUSDT"]
 
 PAIR_CONFIG = {
-    "BTCUSDT": {"min_sl_pct": 0.0040, "tp_pct": 0.0150, "round_dec": 1, "qty_dec": 3, "min_atr": 40.0},
-    "SOLUSDT": {"min_sl_pct": 0.0075, "tp_pct": 0.0250, "round_dec": 2, "qty_dec": 2, "min_atr": 0.35},
-    "DOGEUSDT": {"min_sl_pct": 0.0090, "tp_pct": 0.0300, "round_dec": 5, "qty_dec": 0, "min_atr": 0.0008}
+    "BTCUSDT": {"min_sl_pct": 0.0040, "tp_pct": 0.0150, "round_dec": 1, "qty_dec": 3, "min_atr": 30.0},
+    "SOLUSDT": {"min_sl_pct": 0.0075, "tp_pct": 0.0250, "round_dec": 2, "qty_dec": 2, "min_atr": 0.25},
+    "DOGEUSDT": {"min_sl_pct": 0.0090, "tp_pct": 0.0300, "round_dec": 5, "qty_dec": 0, "min_atr": 0.0005}
 }
 
 # --- 1. LOGGING & DATABASE ---
@@ -127,9 +127,6 @@ def send_alert(msg):
 def read_shared_memory():
     default_mem = {
         "trends_1h": {s: "NEUTRAL" for s in WATCHLIST},
-        "funding_rates": {s: 0.0 for s in WATCHLIST},
-        "orderbook_imbalance": {s: 1.0 for s in WATCHLIST},
-        "sentiment_score": 50,
         "risk_circuit_broken": False,
         "commander_heartbeat": time.time(),
         "candidate_signals": {}
@@ -185,52 +182,54 @@ def fetch_pair_klines(symbol, interval="5m", limit=40):
         except: continue
     return None, None
 
-# --- THREAD 2: MULTI-PAIR ANALYSIS ENGINE ---
+# --- THREAD 2: RESPONSIVE ANALYSIS ENGINE ---
 def run_thread2_analysis_engine():
     while True:
         try:
             mem = read_shared_memory()
             trends = mem.get("trends_1h", {})
-            fundings = mem.get("funding_rates", {})
-            imbalances = mem.get("orderbook_imbalance", {})
             candidate_signals = {}
 
             for sym in WATCHLIST:
-                # 1. 1-Hour Trend Scan
+                # 1. 1-Hour Macro Direction
                 try:
                     r_1h = requests.get(f"https://data-api.binance.vision/api/v3/klines?symbol={sym}&interval=1h&limit=40", timeout=2.5)
                     if r_1h.status_code == 200:
                         closes_1h = [float(x[4]) for x in r_1h.json()]
                         ema20_1h = calculate_ema(closes_1h, 20)
                         last_c = closes_1h[-1]
-                        if last_c > ema20_1h * 1.002:
+                        if last_c > ema20_1h * 1.001:
                             trends[sym] = "BULLISH"
-                        elif last_c < ema20_1h * 0.998:
+                        elif last_c < ema20_1h * 0.999:
                             trends[sym] = "BEARISH"
                         else:
                             trends[sym] = "SIDEWAYS"
                 except: pass
 
-                # 2. 5M Structure & Breakout Check
+                # 2. 5M Structure & Responsive Trigger
                 closed_5m, live_5m = fetch_pair_klines(sym, "5m", 35)
                 if closed_5m and live_5m:
                     closes_5m = [c['close'] for c in closed_5m]
                     ema9 = calculate_ema(closes_5m, 9)
                     ema21 = calculate_ema(closes_5m, 21)
                     atr = calculate_atr(closed_5m, 14)
-
-                    recent_6 = closed_5m[-6:]
-                    high_6 = max(c['high'] for c in recent_6)
-                    low_6 = min(c['low'] for c in recent_6)
                     curr_p = float(live_5m['close'])
+                    prev_close = closed_5m[-1]['close']
 
-                    avg_vol = sum(c['vol'] for c in closed_5m[-10:]) / 10.0
-                    vol_spike = live_5m['vol'] >= (avg_vol * 1.3)
                     atr_valid = atr >= PAIR_CONFIG[sym]["min_atr"]
+                    htf_trend = trends.get(sym, "SIDEWAYS")
 
-                    if trends.get(sym) == "BULLISH" and ema9 > ema21 and curr_p >= high_6 and atr_valid and vol_spike:
+                    # Allow trades on trend alignment and sideways breakdown/breakout
+                    allows_long = htf_trend in ["BULLISH", "SIDEWAYS"]
+                    allows_short = htf_trend in ["BEARISH", "SIDEWAYS"]
+
+                    # Body & EMA Confirmations (Avoids extreme wick locks)
+                    is_breakout_long = (curr_p > ema21) and (ema9 >= ema21) and (curr_p > prev_close)
+                    is_breakdown_short = (curr_p < ema21) and (ema9 <= ema21) and (curr_p < prev_close)
+
+                    if allows_long and is_breakout_long and atr_valid:
                         candidate_signals[sym] = {"type": "LONG", "price": curr_p, "atr": atr, "time": live_5m['time']}
-                    elif trends.get(sym) == "BEARISH" and ema9 < ema21 and curr_p <= low_6 and atr_valid and vol_spike:
+                    elif allows_short and is_breakdown_short and atr_valid:
                         candidate_signals[sym] = {"type": "SHORT", "price": curr_p, "atr": atr, "time": live_5m['time']}
 
                 time.sleep(0.5)
@@ -239,7 +238,7 @@ def run_thread2_analysis_engine():
             mem["candidate_signals"] = candidate_signals
             write_shared_memory(mem)
         except: pass
-        time.sleep(3)
+        time.sleep(2)
 
 # --- THREAD 3: HARD RISK & MONEY MANAGEMENT ---
 def run_thread3_risk_manager():
@@ -318,14 +317,13 @@ class MasterExecutionLifecycleEngine:
         cfg = PAIR_CONFIG[sym]
         dec = cfg["round_dec"]
 
+        # LONG POSITION LIFECYCLE
         if t['type'] == 'LONG':
-            # Dynamic Trailing SL
             if curr_price > entry * (1 + cfg["min_sl_pct"]) and ema21 > float(t['sl']):
                 t['sl'] = round(ema21 * 0.9985, dec)
                 t['trailed'] = True
                 set_db_state("active_trade", t)
 
-            # 100% DIRECT TP HIT
             if curr_price >= t['tp']:
                 self.locked_closing_id = curr_trade_ref
                 self.sl_locked = False
@@ -353,6 +351,7 @@ class MasterExecutionLifecycleEngine:
                 self.record_to_vault(sym, "LONG", entry, t['sl'], res_type, pts_sign, usd_sign, qty)
                 send_alert(f"{'🛡️' if pnl_usd > 0 else '🛑'} [EXIT] {sym} LONG {res_type}\nPnL: {usd_sign}\nExit: ${curr_price}")
 
+        # SHORT POSITION LIFECYCLE
         elif t['type'] == 'SHORT':
             if curr_price < entry * (1 - cfg["min_sl_pct"]) and ema21 < float(t['sl']):
                 t['sl'] = round(ema21 * 1.0015, dec)
@@ -427,8 +426,7 @@ class MasterExecutionLifecycleEngine:
                 }
                 set_db_state("active_trade", trade_obj)
                 send_alert(
-                    f"⚡ [2-3 HR SWING BREAKOUT] {sym} LONG\n"
-                    f"1H Trend: BULLISH 🟢\n\n"
+                    f"⚡ [2-3 HR SWING BREAKOUT] {sym} LONG\n\n"
                     f"📍 Entry: ${curr_p}\n"
                     f"🎯 DIRECT TP: ${tp} (+{cfg['tp_pct']*100:.1f}%)\n"
                     f"🛡️ Safe Structure SL: ${sl} (-{cfg['min_sl_pct']*100:.1f}%)\n"
@@ -452,8 +450,7 @@ class MasterExecutionLifecycleEngine:
                 }
                 set_db_state("active_trade", trade_obj)
                 send_alert(
-                    f"⚡ [2-3 HR SWING BREAKOUT] {sym} SHORT\n"
-                    f"1H Trend: BEARISH 🔴\n\n"
+                    f"⚡ [2-3 HR SWING BREAKDOWN] {sym} SHORT\n\n"
                     f"📍 Entry: ${curr_p}\n"
                     f"🎯 DIRECT TP: ${tp} (-{cfg['tp_pct']*100:.1f}%)\n"
                     f"🛡️ Safe Structure SL: ${sl} (+{cfg['min_sl_pct']*100:.1f}%)\n"
@@ -483,8 +480,7 @@ def launch_chart_architecture():
     cmd = MasterExecutionLifecycleEngine(eid)
     threading.Thread(target=cmd.run, daemon=False).start()
     
-    # Instant Startup Ping to Telegram
-    send_alert("🟢 [QUANT RADAR ONLINE] Multi-Asset Engine Connected!\nScanning Live Breakouts on BTC, SOL & DOGE...")
+    send_alert("🟢 [QUANT RADAR ONLINE] Multi-Asset Engine Connected!\nScanning Live Breakouts/Breakdowns on BTC, SOL & DOGE...")
     return cmd
 
 launch_chart_architecture()
