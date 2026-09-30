@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# DEDICATED BTCUSDT QUANT RADAR (100% ERROR-FREE SYNTAX ENGINE)
+# DEDICATED BTCUSDT QUANT RADAR (ZERO-FLICKER ENGINE)
 # ==============================================================================
 
 BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM")
@@ -25,7 +25,6 @@ SL_PCT = 0.0080
 TP_PCT = 0.0240
 MIN_ATR_PTS = 35.0
 
-# --- DATABASE SETUP ---
 DB_LOCK = threading.Lock()
 
 def db(q, p=(), fetch=None):
@@ -56,7 +55,6 @@ def get_state(k, default=None):
 def set_state(k, v):
     db("INSERT OR REPLACE INTO state (key,value) VALUES (?,?)", (k, json.dumps(v)))
 
-# --- TELEGRAM ALERTS ---
 def send_alert(msg):
     def _worker():
         if not BOT_TOKEN or not CHAT_ID: return
@@ -67,7 +65,6 @@ def send_alert(msg):
         except Exception: pass
     threading.Thread(target=_worker, daemon=True).start()
 
-# --- UTILITIES ---
 def ema_series(v, p):
     if len(v) < p: return v[-1] if v else 0.0
     k = 2 / (p + 1)
@@ -241,12 +238,12 @@ def run_execution_engine():
 def launch():
     threading.Thread(target=run_analysis_engine, daemon=True).start()
     threading.Thread(target=run_execution_engine, daemon=True).start()
-    send_alert("🟢 [BTC QUANT RADAR] Engine Online (Half-Screen UI Mode).")
+    send_alert("🟢 [BTC QUANT RADAR] Engine Online (Zero-Flicker Mode).")
     return True
 launch()
 
 # ==============================================================================
-# STREAMLIT UI: HALF SCREEN CHART + LOWER DOCKS
+# ZERO-FLICKER UI (ONE-TIME MOUNT + LIVE INTERNAL WEBSOCKET)
 # ==============================================================================
 st.set_page_config(page_title="BTC QUANT RADAR", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -275,20 +272,18 @@ if st.query_params.get("clear_vault") == "1":
     st.query_params.clear()
     st.rerun()
 
-@st.fragment(run_every=2)
-def render_ui():
-    active_trade = get_state("active_trade")
-    btc_radar = get_state("btc_radar")
-    kill_active = get_state("kill_switch", False)
+active_trade = get_state("active_trade")
+btc_radar = get_state("btc_radar")
+kill_active = get_state("kill_switch", False)
 
-    history = db("SELECT ts, side, entry, exit_price, result, pnl FROM trades ORDER BY id DESC LIMIT 15", fetch="all") or []
-    hist_json = [{"time": r[0].split(" ")[-1], "type": r[1], "entry": r[2], "exit": r[3], "result": r[4], "pnl": r[5]} for r in history]
+history = db("SELECT ts, side, entry, exit_price, result, pnl FROM trades ORDER BY id DESC LIMIT 15", fetch="all") or []
+hist_json = [{"time": r[0].split(" ")[-1], "type": r[1], "entry": r[2], "exit": r[3], "result": r[4], "pnl": r[5]} for r in history]
 
-    stats = db("SELECT COUNT(*), COALESCE(SUM(pnl),0), COALESCE(SUM(pnl>0),0) FROM trades", fetch="one")
-    n, pnl_sum, wins = stats if stats else (0, 0.0, 0)
-    wr = round((wins / n) * 100, 1) if n else 0.0
+stats = db("SELECT COUNT(*), COALESCE(SUM(pnl),0), COALESCE(SUM(pnl>0),0) FROM trades", fetch="one")
+n, pnl_sum, wins = stats if stats else (0, 0.0, 0)
+wr = round((wins / n) * 100, 1) if n else 0.0
 
-    raw_html = """<!DOCTYPE html>
+raw_html = """<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -552,12 +547,10 @@ def render_ui():
 </body>
 </html>"""
 
-    final_html = raw_html.replace("__ACTIVE_TRADE__", json.dumps(active_trade))\
-                         .replace("__RADAR_DATA__", json.dumps(btc_radar))\
-                         .replace("__HISTORY__", json.dumps(hist_json))\
-                         .replace("__STATS__", json.dumps({"total": n, "win_rate": wr}))\
-                         .replace("__KILL__", json.dumps(kill_active))
+final_html = raw_html.replace("__ACTIVE_TRADE__", json.dumps(active_trade))\
+                     .replace("__RADAR_DATA__", json.dumps(btc_radar))\
+                     .replace("__HISTORY__", json.dumps(hist_json))\
+                     .replace("__STATS__", json.dumps({"total": n, "win_rate": wr}))\
+                     .replace("__KILL__", json.dumps(kill_active))
 
-    components.html(final_html, height=710, scrolling=False)
-
-render_ui()
+components.html(final_html, height=710, scrolling=False)
