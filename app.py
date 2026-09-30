@@ -1,739 +1,425 @@
 import streamlit as st
-import streamlit.components.v1 as components
-import sqlite3
-import threading
-import time
-import requests
-import json
-import os
-import uuid
-import hmac
-import hashlib
+import sqlite3, threading, time, requests, json, os, shutil, logging
 from datetime import datetime
 
-# ==============================================================================
-# MULTI-ASSET QUANT ENGINE ($10 CAPITAL ARCHITECTURE)
-# ==============================================================================
+st.set_page_config(page_title="QUANT RADAR PRO", layout="wide")
 
-BOT_TOKEN = "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM"
-CHAT_ID = "7886716805"
-DISCORD_WEBHOOK_URL = ""
-DB_FILE = "sniper_vault.db"
-SHARED_MEMORY_FILE = "sniper_brain_data.json"
+# ============================ CONFIG ============================
+# Aapke hardcoded credentials fallback me set hain taaki env missing hone par bhi alert aaye
+BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM")
+CHAT_ID = os.getenv("TG_CHAT_ID", "7886716805")
+DB_FILE = "sniper_vault_v2.db"
 
-BINANCE_API_KEY = ""
-BINANCE_API_SECRET = ""
-PAPER_TRADING_MODE = True
+ACCOUNT_USD = 10.0
+MARGIN_USD = 2.5
+LEVERAGE = 10                      # notional = 25 USD
+DAILY_DD_LIMIT = 2.0               # -2 USD => 24h freeze
+MAX_CONSEC_LOSS = 3
+COOLDOWN_SEC = 180
+FEE_RATE = 0.0004                  # taker fee per side
+RR = 2.5                           # reward : risk
+ATR_SL_MULT = 1.5
+MIN_ATR_PCT = 0.0012               # min 0.12% ATR on 5m
+VOL_SPIKE_MULT = 1.3               # 1.5x ki jagah 1.3x safe rakha hai taaki valid moves miss na ho
+OB_LONG_MIN, OB_SHORT_MAX = 0.95, 1.05
+FUNDING_LIMIT = 0.0005
+FNG_LONG_MAX, FNG_SHORT_MIN = 85, 15
 
-WATCHLIST = ["SOLUSDT", "BTCUSDT", "DOGEUSDT"]
-
-PAIR_CONFIG = {
-    "BTCUSDT": {"sl_pct": 0.0080, "tp_pct": 0.0220, "round_dec": 1, "qty_dec": 3, "min_qty": 0.001},
-    "SOLUSDT": {"sl_pct": 0.0120, "tp_pct": 0.0320, "round_dec": 2, "qty_dec": 2, "min_qty": 0.15},
-    "DOGEUSDT": {"sl_pct": 0.0150, "tp_pct": 0.0400, "round_dec": 5, "qty_dec": 0, "min_qty": 100}
+WATCHLIST = ["SOLUSDT", "DOGEUSDT", "BTCUSDT"]
+PAIRS = {  # min_qty, qty_dec, price_dec
+    "BTCUSDT": (0.001, 3, 1),
+    "SOLUSDT": (0.01, 2, 2),
+    "DOGEUSDT": (1, 0, 5),
 }
+BASE = "https://data-api.binance.vision/api/v3"
 
-# --- DATABASE SETUP ---
+logging.basicConfig(filename="bot_errors.log", level=logging.ERROR)
+
+# ============================ DB ============================
+DB_LOCK = threading.Lock()
+
+def db(q, p=(), fetch=None):
+    with DB_LOCK:
+        conn = sqlite3.connect(DB_FILE, timeout=15)
+        try:
+            cur = conn.execute(q, p)
+            res = cur.fetchall() if fetch == "all" else cur.fetchone() if fetch == "one" else None
+            conn.commit()
+            return res
+        finally:
+            conn.close()
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            symbol TEXT,
-            trade_type TEXT,
-            entry REAL,
-            exit_price REAL,
-            result TEXT,
-            pts TEXT,
-            pnl_usd TEXT,
-            qty REAL,
-            UNIQUE(timestamp, symbol, trade_type, entry, result)
-        )
-    """)
-    cur.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
-    conn.commit()
-    conn.close()
-
+    db("""CREATE TABLE IF NOT EXISTS trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, epoch REAL, symbol TEXT,
+        side TEXT, entry REAL, exit_price REAL, qty REAL, result TEXT, pnl REAL)""")
+    db("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
+    db("CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, msg TEXT)")
 init_db()
 
-def get_db_state(key, default=None):
+def get_state(k, default=None):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=5)
-        cur = conn.cursor()
-        cur.execute("SELECT value FROM state WHERE key=?", (key,))
-        row = cur.fetchone()
-        conn.close()
-        if row and row[0]: return json.loads(row[0])
-    except: pass
-    return default
+        r = db("SELECT value FROM state WHERE key=?", (k,), "one")
+        return json.loads(r[0]) if r else default
+    except Exception:
+        return default
 
-def set_db_state(key, value):
+def set_state(k, v):
+    db("INSERT OR REPLACE INTO state (key,value) VALUES (?,?)", (k, json.dumps(v)))
+
+def log(msg):
     try:
-        conn = sqlite3.connect(DB_FILE, timeout=5)
-        cur = conn.cursor()
-        cur.execute("INSERT OR REPLACE INTO state (key, value) VALUES (?, ?)", (key, json.dumps(value)))
-        conn.commit()
-        conn.close()
-    except: pass
+        db("INSERT INTO logs (ts,msg) VALUES (?,?)", (datetime.now().strftime("%m-%d %H:%M:%S"), msg))
+    except Exception:
+        pass
 
-def check_db_risk_guard():
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=5)
-        cur = conn.cursor()
-        today_date = datetime.now().strftime("%Y-%m-%d")
-        cur.execute("SELECT pnl_usd, result FROM trades WHERE timestamp LIKE ? ORDER BY id DESC", (f"{today_date}%",))
-        rows = cur.fetchall()
-        daily_loss_sum = 0.0
-        consec_losses = 0
-        counted_streak = True
-        
-        for pnl, res in rows:
-            if "SL HIT" in str(res).upper():
-                try:
-                    val = float(str(pnl).replace("$", "").replace("(", "").replace(")", "").replace("-", "").strip())
-                    daily_loss_sum += val
-                except: pass
-                if counted_streak:
-                    consec_losses += 1
-            else:
-                counted_streak = False
-
-        conn.close()
-        return consec_losses, daily_loss_sum
-    except:
-        return 0, 0.0
-
-# --- ALERTS ENGINE ---
-def _send_tg_worker(msg):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": str(CHAT_ID).strip(), "text": msg}
-    try:
-        requests.post(url, json=payload, timeout=4)
-    except: pass
-
+# ============================ ALERTS ============================
 def send_alert(msg):
-    threading.Thread(target=_send_tg_worker, args=(msg,), daemon=True).start()
+    def w():
+        if not BOT_TOKEN or not CHAT_ID:
+            return
+        try:
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                          json={"chat_id": str(CHAT_ID).strip(), "text": msg}, timeout=5)
+        except Exception:
+            pass
+    threading.Thread(target=w, daemon=True).start()
 
-# --- SHARED MEMORY ---
-def read_shared_memory():
-    default_mem = {
-        "trends_1h": {s: "NEUTRAL" for s in WATCHLIST},
-        "risk_circuit_broken": False,
-        "commander_heartbeat": time.time(),
-        "candidate_signals": {}
-    }
-    if not os.path.exists(SHARED_MEMORY_FILE):
-        return default_mem
+# ============================ INDICATORS ============================
+def ema_series(v, p):
+    k = 2 / (p + 1)
+    out = [v[0]]
+    for x in v[1:]:
+        out.append(x * k + out[-1] * (1 - k))
+    return out
+
+def atr(c, p=14):
+    trs = [max(c[i]["high"] - c[i]["low"], abs(c[i]["high"] - c[i - 1]["close"]),
+               abs(c[i]["low"] - c[i - 1]["close"])) for i in range(1, len(c))]
+    return sum(trs[-p:]) / max(1, min(p, len(trs)))
+
+# ============================ DATA ============================
+def klines(sym, interval, limit):
     try:
-        with open(SHARED_MEMORY_FILE, "r") as f: return json.load(f)
-    except:
-        return default_mem
+        r = requests.get(f"{BASE}/klines?symbol={sym}&interval={interval}&limit={limit}", timeout=3)
+        raw = r.json()
+        rows = [{"time": int(d[0]), "open": float(d[1]), "high": float(d[2]),
+                 "low": float(d[3]), "close": float(d[4]), "vol": float(d[5])} for d in raw]
+        return rows[:-1], rows[-1]
+    except Exception:
+        return None, None
 
-def write_shared_memory(data):
+def last_price(sym):
     try:
-        with open(SHARED_MEMORY_FILE, "w") as f: json.dump(data, f)
-    except: pass
+        return float(requests.get(f"{BASE}/ticker/price?symbol={sym}", timeout=2).json()["price"])
+    except Exception:
+        return None
 
-def calculate_ema(prices, period):
-    if len(prices) < period: return prices[-1]
-    k = 2 / (period + 1)
-    ema = prices[0]
-    for p in prices[1:]:
-        ema = (p * k) + (ema * (1 - k))
-    return ema
-
-def fetch_pair_klines(symbol, interval="5m", limit=35):
+def orderbook_imbalance(sym):
     try:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        r = requests.get(url, timeout=2.5)
-        if r.status_code == 200:
-            raw = r.json()
-            if isinstance(raw, list) and len(raw) >= 15:
-                closed = [{'time': int(d[0]), 'open': float(d[1]), 'high': float(d[2]),
-                           'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])} for d in raw[:-1]]
-                live = {'time': int(raw[-1][0]), 'open': float(raw[-1][1]), 'high': float(raw[-1][2]),
-                        'low': float(raw[-1][3]), 'close': float(raw[-1][4]), 'vol': float(raw[-1][5])}
-                return closed, live
-    except: pass
-    return None, None
+        d = requests.get(f"{BASE}/depth?symbol={sym}&limit=20", timeout=2.5).json()
+        bids = sum(float(x[1]) for x in d["bids"])
+        asks = sum(float(x[1]) for x in d["asks"])
+        return bids / asks if asks else None
+    except Exception:
+        return None
 
-# --- THREAD 2: HIGH-PROBABILITY ANALYSIS ENGINE ---
-def run_thread2_analysis_engine():
+def funding_rate(sym):
+    try:
+        r = requests.get(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={sym}", timeout=2.5).json()
+        return float(r["lastFundingRate"])
+    except Exception:
+        return None
+
+_fng = {"v": None, "t": 0}
+def fear_greed():
+    if time.time() - _fng["t"] < 300:
+        return _fng["v"]
+    try:
+        _fng["v"] = int(requests.get("https://api.alternative.me/fng/", timeout=3).json()["data"][0]["value"])
+        _fng["t"] = time.time()
+    except Exception:
+        pass
+    return _fng["v"]
+
+# ============================ THREAD 2: ANALYSIS ============================
+def analyze(sym):
+    c1h, _ = klines(sym, "1h", 60)
+    if not c1h:
+        return "NEUTRAL", None
+    e20 = ema_series([x["close"] for x in c1h], 20)
+    if c1h[-1]["close"] > e20[-1] and e20[-1] >= e20[-3]:
+        trend = "BULLISH"
+    elif c1h[-1]["close"] < e20[-1] and e20[-1] <= e20[-3]:
+        trend = "BEARISH"
+    else:
+        trend = "SIDEWAYS"
+
+    c5, live = klines(sym, "5m", 60)
+    if not c5 or len(c5) < 30:
+        return trend, None
+    closes = [x["close"] for x in c5]
+    e9, e21 = ema_series(closes, 9), ema_series(closes, 21)
+    last = c5[-1]
+    a = atr(c5)
+    price = live["close"]
+
+    if a / price < MIN_ATR_PCT:
+        return trend, None
+    avg_vol = sum(x["vol"] for x in c5[-21:-1]) / 20
+    if last["vol"] < VOL_SPIKE_MULT * avg_vol:
+        return trend, None
+
+    lows, highs = [x["low"] for x in c5], [x["high"] for x in c5]
+    higher_low = min(lows[-6:]) >= min(lows[-12:-6])
+    lower_high = max(highs[-6:]) <= max(highs[-12:-6])
+
+    side = None
+    if (trend in ["BULLISH", "SIDEWAYS"] and e9[-1] > e21[-1] and last["low"] <= e21[-1] * 1.002
+            and last["close"] > last["open"] and higher_low and price > last["high"]):
+        side = "LONG"
+    elif (trend in ["BEARISH", "SIDEWAYS"] and e9[-1] < e21[-1] and last["high"] >= e21[-1] * 0.998
+            and last["close"] < last["open"] and lower_high and price < last["low"]):
+        side = "SHORT"
+    if not side:
+        return trend, None
+
+    imb = orderbook_imbalance(sym)
+    # Fail-open guard: sirf tab block kare jab extreme orderbook opposite ho
+    if imb is not None:
+        if (side == "LONG" and imb < OB_LONG_MIN) or (side == "SHORT" and imb > OB_SHORT_MAX):
+            return trend, None
+
+    fr = funding_rate(sym)
+    if fr is not None and ((side == "LONG" and fr > FUNDING_LIMIT) or (side == "SHORT" and fr < -FUNDING_LIMIT)):
+        return trend, None
+
+    fg = fear_greed()
+    if fg is not None and ((side == "LONG" and fg > FNG_LONG_MAX) or (side == "SHORT" and fg < FNG_SHORT_MIN)):
+        return trend, None
+
+    return trend, {"type": side, "price": price, "atr": a, "bar": last["time"]}
+
+def thread_analysis():
     while True:
         try:
-            mem = read_shared_memory()
-            trends = mem.get("trends_1h", {})
-            candidate_signals = {}
-
+            trends, signals = {}, {}
             for sym in WATCHLIST:
-                # 1. 1-Hour Trend
-                try:
-                    r_1h = requests.get(f"https://data-api.binance.vision/api/v3/klines?symbol={sym}&interval=1h&limit=25", timeout=2.5)
-                    if r_1h.status_code == 200:
-                        c_1h = [float(x[4]) for x in r_1h.json()]
-                        ema20_1h = calculate_ema(c_1h, 20)
-                        trends[sym] = "BULLISH" if c_1h[-1] > ema20_1h else "BEARISH"
-                except: pass
+                t, sig = analyze(sym)
+                trends[sym] = t
+                if sig:
+                    signals[sym] = sig
+                time.sleep(0.4)
+            set_state("trends", trends)
+            set_state("signals", signals)
+            set_state("hb_analysis", time.time())
+        except Exception as e:
+            logging.exception("analysis")
+            log(f"analysis err: {e}")
+        time.sleep(3)
 
-                # 2. 5-Minute Pullback Confirmation
-                closed_5m, live_5m = fetch_pair_klines(sym, "5m", 30)
-                if closed_5m and live_5m:
-                    closes_5m = [c['close'] for c in closed_5m]
-                    ema9 = calculate_ema(closes_5m, 9)
-                    ema21 = calculate_ema(closes_5m, 21)
-                    curr_p = float(live_5m['close'])
-                    
-                    last_c = closed_5m[-1]
-                    htf = trends.get(sym, "NEUTRAL")
+# ============================ THREAD 3: RISK ============================
+def midnight_epoch():
+    n = datetime.now()
+    return datetime(n.year, n.month, n.day).timestamp()
 
-                    # SHORT: EMA 9 < 21, Rejection candle formed at EMA 21, low broken
-                    is_short_setup = (
-                        htf == "BEARISH" and
-                        ema9 < ema21 and
-                        last_c['high'] >= ema21 * 0.999 and
-                        last_c['close'] < last_c['open'] and
-                        curr_p < last_c['low']
-                    )
-
-                    # LONG: EMA 9 > 21, Bounce candle formed at EMA 21, high broken
-                    is_long_setup = (
-                        htf == "BULLISH" and
-                        ema9 > ema21 and
-                        last_c['low'] <= ema21 * 1.001 and
-                        last_c['close'] > last_c['open'] and
-                        curr_p > last_c['high']
-                    )
-
-                    if is_short_setup:
-                        candidate_signals[sym] = {"type": "SHORT", "price": curr_p, "time": live_5m['time']}
-                    elif is_long_setup:
-                        candidate_signals[sym] = {"type": "LONG", "price": curr_p, "time": live_5m['time']}
-
-                time.sleep(0.5)
-
-            mem["trends_1h"] = trends
-            mem["candidate_signals"] = candidate_signals
-            write_shared_memory(mem)
-        except: pass
-        time.sleep(2)
-
-# --- THREAD 3: HARD DRAWDOWN SHIELD ---
-def run_thread3_risk_manager():
-    alert_already_sent = False
+def thread_risk():
     while True:
         try:
-            consec_losses, daily_loss = check_db_risk_guard()
-            mem = read_shared_memory()
-            if daily_loss >= 2.50 or consec_losses >= 3:
-                mem['risk_circuit_broken'] = True
-                write_shared_memory(mem)
-                if not alert_already_sent:
-                    send_alert(f"🚨 [RISK MANAGER ALERT] Max Daily Drawdown (-${daily_loss:.2f}) reached! Bot frozen for today.")
-                    alert_already_sent = True
-            else:
-                if mem.get('risk_circuit_broken', False):
-                    mem['risk_circuit_broken'] = False
-                    write_shared_memory(mem)
-                alert_already_sent = False
-        except: pass
-        time.sleep(15)
+            now = time.time()
+            if now >= get_state("freeze_until", 0):
+                ref = max(midnight_epoch(), get_state("risk_ref", 0))
+                rows = db("SELECT pnl FROM trades WHERE epoch>? ORDER BY id DESC", (ref,), "all")
+                pnls = [r[0] for r in rows] if rows else []
+                day_pnl = sum(pnls)
+                streak = len(pnls) >= MAX_CONSEC_LOSS and all(p <= 0 for p in pnls[:MAX_CONSEC_LOSS])
+                if day_pnl <= -DAILY_DD_LIMIT or streak:
+                    set_state("freeze_until", now + 86400)
+                    set_state("risk_ref", now + 86400)
+                    send_alert(f"🚨 RISK SHIELD: drawdown {day_pnl:.2f}$ / loss streak. Bot 24h frozen.")
+                    log("risk freeze triggered")
+            set_state("hb_risk", now)
+        except Exception as e:
+            logging.exception("risk")
+        time.sleep(10)
 
-# --- THREAD 4: EXECUTION & POSITION LIFECYCLE ---
-class MasterExecutionLifecycleEngine:
-    def __init__(self, engine_id):
-        self.engine_id = engine_id
-        self.last_trade_bar = {}
-        self.locked_closing_id = None
+# ============================ THREAD 4: EXECUTION ============================
+def close_trade(t, exit_price, result):
+    if get_state("active_trade") is None:
+        return
+    set_state("active_trade", None)
+    d = 1 if t["type"] == "LONG" else -1
+    gross = (exit_price - t["entry"]) * t["qty"] * d
+    fees = t["entry"] * t["qty"] * FEE_RATE * 2
+    net = round(gross - fees, 4)
+    now = datetime.now()
+    db("INSERT INTO trades (ts,epoch,symbol,side,entry,exit_price,qty,result,pnl) VALUES (?,?,?,?,?,?,?,?,?)",
+       (now.strftime("%Y-%m-%d %H:%M"), time.time(), t["symbol"], t["type"], t["entry"],
+        exit_price, t["qty"], result, net))
+    set_state("last_exit", time.time())
+    send_alert(f"{'✅' if net > 0 else '🛑'} {t['symbol']} {t['type']} {result}\nNet PnL: {net:+.3f}$ (fees incl.)")
 
-    def record_to_vault(self, symbol, t_type, entry, exit_price, result, pts, pnl_usd, qty):
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+def manage_trade(t):
+    sym = t["symbol"]
+    p = last_price(sym)
+    if p is None:
+        return
+    long_ = t["type"] == "LONG"
+    risk = abs(t["entry"] - t["init_sl"])
+    moved = (p - t["entry"]) if long_ else (t["entry"] - p)
+
+    # Move SL to Breakeven after +1R Move
+    if moved >= risk and not t.get("be"):
+        buf = t["entry"] * FEE_RATE * 3
+        t["sl"] = round(t["entry"] + buf if long_ else t["entry"] - buf, PAIRS[sym][2])
+        t["be"] = True
+        set_state("active_trade", t)
+        send_alert(f"🛡️ {sym} SL moved to break-even")
+
+    if (long_ and p >= t["tp"]) or (not long_ and p <= t["tp"]):
+        return close_trade(t, t["tp"], "TP HIT 🔥")
+    if (long_ and p <= t["sl"]) or (not long_ and p >= t["sl"]):
+        return close_trade(t, p, "TRAILED EXIT 🛡️" if t.get("be") else "SL HIT 🛑")
+
+    if t.get("be") and time.time() - t.get("last_trail", 0) > 10:
+        t["last_trail"] = time.time()
+        c5, _ = klines(sym, "5m", 40)
+        if c5:
+            e21 = ema_series([x["close"] for x in c5], 21)[-1]
+            if (long_ and c5[-1]["close"] < e21) or (not long_ and c5[-1]["close"] > e21):
+                close_trade(t, p, "EMA21 TRAIL EXIT 🛡️")
+
+def try_entry():
+    if get_state("kill_switch", False) or time.time() < get_state("freeze_until", 0):
+        return
+    if time.time() - get_state("last_exit", 0) < COOLDOWN_SEC:
+        return
+    if time.time() - get_state("hb_analysis", 0) > 30:
+        return
+    signals = get_state("signals", {}) or {}
+    done = get_state("last_bar", {}) or {}
+    for sym in WATCHLIST:
+        s = signals.get(sym)
+        if not s or s["bar"] <= done.get(sym, 0):
+            continue
+        min_qty, qdec, pdec = PAIRS[sym]
+        notional = MARGIN_USD * LEVERAGE
+        qty = round(notional / s["price"], qdec)
+        if qdec == 0:
+            qty = int(qty)
+        if qty < min_qty:
+            done[sym] = s["bar"]
+            set_state("last_bar", done)
+            continue
+        dist = min(max(ATR_SL_MULT * s["atr"], s["price"] * 0.005), s["price"] * 0.015)
+        long_ = s["type"] == "LONG"
+        sl = round(s["price"] - dist if long_ else s["price"] + dist, pdec)
+        tp = round(s["price"] + dist * RR if long_ else s["price"] - dist * RR, pdec)
+        trade = {"symbol": sym, "type": s["type"], "entry": round(s["price"], pdec),
+                 "sl": sl, "init_sl": sl, "tp": tp, "qty": qty, "be": False}
+        set_state("active_trade", trade)
+        done[sym] = s["bar"]
+        set_state("last_bar", done)
+        send_alert(f"⚡ {sym} {s['type']} (PAPER)\nEntry: {trade['entry']}\nSL: {sl}\nTP: {tp}\nQty: {qty}")
+        return
+
+def thread_execution():
+    while True:
         try:
-            conn = sqlite3.connect(DB_FILE, timeout=5)
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT OR IGNORE INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
-                VALUES (?,?,?,?,?,?,?,?,?)
-            """, (now_str, symbol, t_type, float(entry), float(exit_price), result, str(pts), str(pnl_usd), float(qty)))
-            conn.commit()
-            conn.close()
-        except: pass
+            t = get_state("active_trade")
+            manage_trade(t) if t else try_entry()
+            set_state("hb_exec", time.time())
+        except Exception as e:
+            logging.exception("exec")
+            log(f"exec err: {e}")
+        time.sleep(1)
 
-    def manage_active_lifecycle(self, t):
-        sym = t.get('symbol', 'SOLUSDT')
-        closed, live = fetch_pair_klines(sym, "5m", 25)
-        if not closed or not live: return
+# ============================ THREAD 5: WATCHDOG ============================
+THREADS = {}
+def start(name, fn):
+    th = threading.Thread(target=fn, daemon=True, name=name)
+    th.start()
+    THREADS[name] = (th, fn)
 
-        curr_trade_ref = f"{sym}_{t.get('type')}_{t.get('entry')}"
-        if self.locked_closing_id == curr_trade_ref: return
+def thread_watchdog():
+    last_backup, last_day = 0, datetime.now().day
+    while True:
+        try:
+            for name, (th, fn) in list(THREADS.items()):
+                if not th.is_alive():
+                    log(f"restarting {name}")
+                    send_alert(f"♻️ Watchdog restarted {name}")
+                    start(name, fn)
+            if time.time() - last_backup > 3600:
+                shutil.copy(DB_FILE, DB_FILE + ".bak")
+                last_backup = time.time()
+            if datetime.now().day != last_day:
+                last_day = datetime.now().day
+                rows = db("SELECT COUNT(*), COALESCE(SUM(pnl),0) FROM trades WHERE epoch>?",
+                          (time.time() - 86400,), "one")
+                send_alert(f"📊 Daily summary: {rows[0]} trades, PnL {rows[1]:+.2f}$")
+            set_state("hb_watchdog", time.time())
+        except Exception:
+            logging.exception("watchdog")
+        time.sleep(30)
 
-        qty = float(t.get("qty", 0.1))
-        curr_price = float(live['close'])
-        entry = float(t['entry'])
-
-        cfg = PAIR_CONFIG[sym]
-        dec = cfg["round_dec"]
-
-        # Trailing Breakeven Trigger
-        if t['type'] == 'LONG':
-            if curr_price > entry * 1.012 and float(t['sl']) < entry:
-                t['sl'] = round(entry * 1.002, dec)
-                t['trailed'] = True
-                set_db_state("active_trade", t)
-
-            if curr_price >= t['tp']:
-                self.locked_closing_id = curr_trade_ref
-                set_db_state("active_trade", None)
-                set_db_state("last_exit_epoch", time.time())
-                pnl_usd = round((curr_price - entry) * qty, 2)
-                self.record_to_vault(sym, "LONG", entry, t['tp'], "DIRECT MEGA TP 🔥", f"+{round(t['tp']-entry, dec)}", f"+${pnl_usd:.2f}", qty)
-                send_alert(f"🚀 [DIRECT TP HIT] {sym} LONG!\nProfit: +${pnl_usd:.2f}\nExit: ${t['tp']}")
-
-            elif curr_price <= float(t['sl']):
-                self.locked_closing_id = curr_trade_ref
-                set_db_state("active_trade", None)
-                set_db_state("last_exit_epoch", time.time())
-                pnl_usd = round((curr_price - entry) * qty, 2)
-                res_type = "TRAILED PROFIT 🛡️" if pnl_usd > 0 else "SL HIT 🛑"
-                usd_disp = f"+${pnl_usd:.2f}" if pnl_usd > 0 else f"-${abs(pnl_usd):.2f}"
-                self.record_to_vault(sym, "LONG", entry, t['sl'], res_type, f"{round(curr_price-entry, dec)}", usd_disp, qty)
-                send_alert(f"{'🛡️' if pnl_usd > 0 else '🛑'} [EXIT] {sym} LONG {res_type}\nPnL: {usd_disp}\nExit: ${curr_price}")
-
-        elif t['type'] == 'SHORT':
-            if curr_price < entry * 0.988 and float(t['sl']) > entry:
-                t['sl'] = round(entry * 0.998, dec)
-                t['trailed'] = True
-                set_db_state("active_trade", t)
-
-            if curr_price <= t['tp']:
-                self.locked_closing_id = curr_trade_ref
-                set_db_state("active_trade", None)
-                set_db_state("last_exit_epoch", time.time())
-                pnl_usd = round((entry - curr_price) * qty, 2)
-                self.record_to_vault(sym, "SHORT", entry, t['tp'], "DIRECT MEGA TP 🔥", f"+{round(entry-t['tp'], dec)}", f"+${pnl_usd:.2f}", qty)
-                send_alert(f"🩸 [DIRECT TP HIT] {sym} SHORT!\nProfit: +${pnl_usd:.2f}\nExit:${t['tp']}")
-
-            elif curr_price >= float(t['sl']):
-                self.locked_closing_id = curr_trade_ref
-                set_db_state("active_trade", None)
-                set_db_state("last_exit_epoch", time.time())
-                pnl_usd = round((entry - curr_price) * qty, 2)
-                res_type = "TRAILED PROFIT 🛡️" if pnl_usd > 0 else "SL HIT 🛑"
-                usd_disp = f"+${pnl_usd:.2f}" if pnl_usd > 0 else f"-${abs(pnl_usd):.2f}"
-                self.record_to_vault(sym, "SHORT", entry, t['sl'], res_type, f"{round(entry-curr_price, dec)}", usd_disp, qty)
-                send_alert(f"{'🛡️' if pnl_usd > 0 else '🛑'} [EXIT] {sym} SHORT {res_type}\nPnL: {usd_disp}\nExit: ${curr_price}")
-
-    def evaluate_and_execute(self):
-        mem = read_shared_memory()
-        if get_db_state("kill_switch_active", False) or mem.get("risk_circuit_broken", False):
-            return
-
-        last_exit_epoch = get_db_state("last_exit_epoch", 0)
-        if time.time() - last_exit_epoch < 180:
-            return
-
-        candidate_signals = mem.get("candidate_signals", {})
-        if not candidate_signals: return
-
-        for sym in WATCHLIST:
-            sig = candidate_signals.get(sym)
-            if not sig: continue
-
-            last_bar = self.last_trade_bar.get(sym, 0)
-            if sig['time'] <= last_bar: continue
-
-            cfg = PAIR_CONFIG[sym]
-            dec = cfg["round_dec"]
-            curr_p = sig['price']
-
-            # Fixed Margin Allocation: $2.50 @ 10x Lev = $25 Position
-            raw_qty = 25.0 / curr_p
-            qty = max(cfg["min_qty"], round(raw_qty, cfg["qty_dec"]))
-            if cfg["qty_dec"] == 0: qty = int(qty)
-
-            if sig['type'] == "LONG":
-                self.last_trade_bar[sym] = sig['time']
-                sl = round(curr_p * (1 - cfg["sl_pct"]), dec)
-                tp = round(curr_p * (1 + cfg["tp_pct"]), dec)
-
-                trade_obj = {'symbol': sym, 'type': 'LONG', 'entry': round(curr_p, dec), 'sl': sl, 'tp': tp, 'qty': qty, 'trailed': False}
-                set_db_state("active_trade", trade_obj)
-                send_alert(f"⚡ [CLEAN SWING] {sym} LONG 🟢\n📍 Entry: ${curr_p}\n🎯 TP: ${tp}\n🛡️ Structure SL: ${sl}\n📦 Qty: {qty}")
-                break
-
-            elif sig['type'] == "SHORT":
-                self.last_trade_bar[sym] = sig['time']
-                sl = round(curr_p * (1 + cfg["sl_pct"]), dec)
-                tp = round(curr_p * (1 - cfg["tp_pct"]), dec)
-
-                trade_obj = {'symbol': sym, 'type': 'SHORT', 'entry': round(curr_p, dec), 'sl': sl, 'tp': tp, 'qty': qty, 'trailed': False}
-                set_db_state("active_trade", trade_obj)
-                send_alert(f"⚡ [CLEAN SWING] {sym} SHORT 🔴\n📍 Entry: ${curr_p}\n🎯 TP: ${tp}\n🛡️ Structure SL: ${sl}\n📦 Qty: {qty}")
-                break
-
-    def run(self):
-        while True:
-            mem = read_shared_memory()
-            mem['commander_heartbeat'] = time.time()
-            write_shared_memory(mem)
-
-            active = get_db_state("active_trade")
-            if active:
-                self.manage_active_lifecycle(active)
-            else:
-                self.evaluate_and_execute()
-            time.sleep(1.0)
-
-# --- START BOT ---
 @st.cache_resource
-def launch_chart_architecture():
-    eid = str(uuid.uuid4())
-    threading.Thread(target=run_thread2_analysis_engine, daemon=False).start()
-    threading.Thread(target=run_thread3_risk_manager, daemon=False).start()
-    cmd = MasterExecutionLifecycleEngine(eid)
-    threading.Thread(target=cmd.run, daemon=False).start()
-    send_alert("🟢 [QUANT RADAR REBOOT] Clean Chart Engine Online! Monitoring SOL, DOGE & BTC...")
-    return cmd
+def launch():
+    start("analysis", thread_analysis)
+    start("risk", thread_risk)
+    start("execution", thread_execution)
+    threading.Thread(target=thread_watchdog, daemon=True, name="watchdog").start()
+    send_alert("🟢 Quant Radar online (CLEAN PAPER mode).")
+    return True
+launch()
 
-launch_chart_architecture()
-
-# -------------------------------------------------------------
-# FRONTEND UI (CLEAN WEBSOCKET SYNC)
-# -------------------------------------------------------------
-st.set_page_config(page_title="QUANT RADAR PRO", layout="wide", initial_sidebar_state="collapsed")
-st.markdown("""<style>
-header, footer, #MainMenu { display: none !important; }
-.block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; }
-iframe { width: 100vw !important; height: calc(100vh - 5px) !important; border: none !important; display: block !important; }
-</style>""", unsafe_allow_html=True)
-
-if st.query_params.get("clear_vault") == "confirmed":
-    try:
-        conn = sqlite3.connect(DB_FILE, timeout=5)
-        cur = conn.cursor()
-        cur.execute("DELETE FROM trades")
-        conn.commit()
-        conn.close()
-        set_db_state("active_trade", None)
-        set_db_state("last_exit_epoch", 0)
-    except: pass
-    st.query_params.clear()
-    st.rerun()
-
-if st.query_params.get("force_close") == "confirmed":
-    act = get_db_state("active_trade")
-    if act and isinstance(act, dict) and 'entry' in act:
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        e = float(act['entry'])
-        q = float(act.get('qty', 0.1))
-        sym = act.get('symbol', 'SOLUSDT')
-        try:
-            conn = sqlite3.connect(DB_FILE, timeout=5)
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT OR IGNORE INTO trades (timestamp, symbol, trade_type, entry, exit_price, result, pts, pnl_usd, qty) 
-                VALUES (?,?,?,?,?,?,?,?,?)
-            """, (now_str, sym, act['type'], e, e, "MANUAL OVERRIDE ⚠️", "0", "$0.00", q))
-            conn.commit()
-            conn.close()
-        except: pass
-        set_db_state("active_trade", None)
-        set_db_state("last_exit_epoch", time.time())
-    st.query_params.clear()
-    st.rerun()
+# ============================ DASHBOARD ============================
+st.markdown("<style>.block-container{padding-top:1rem}</style>", unsafe_allow_html=True)
+st.title("📡 QUANT RADAR PRO")
 
 @st.fragment(run_every=2)
-def render_live_dashboard():
-    conn = sqlite3.connect(DB_FILE, timeout=5)
-    cur = conn.cursor()
-    cur.execute("SELECT timestamp, symbol, trade_type, entry, result, pts, pnl_usd FROM trades ORDER BY id DESC")
-    rows = cur.fetchall()
-    history_list = [{"time": r[0].split(" ")[-1] if " " in r[0] else r[0], "symbol": r[1], "type": r[2], "entry": r[3], "result": r[4], "pts": r[5], "pnl_usd": r[6]} for r in rows]
+def dashboard():
+    rows = db("SELECT ts,symbol,side,entry,exit_price,result,pnl FROM trades ORDER BY id DESC LIMIT 50", fetch="all")
+    total = db("SELECT COUNT(*), COALESCE(SUM(pnl),0), COALESCE(SUM(pnl>0),0) FROM trades", fetch="one")
+    n = total[0] if total else 0
+    pnl_sum = total[1] if total else 0.0
+    wins = total[2] if total else 0
+    wr = round(wins / n * 100, 1) if n else 0.0
+    freeze = get_state("freeze_until", 0)
+    killed = get_state("kill_switch", False)
 
-    cur.execute("SELECT COUNT(*), SUM(CASE WHEN result LIKE '%TP%' OR result LIKE '%TRAILED%' THEN 1 ELSE 0 END) FROM trades")
-    t_count, win_count = cur.fetchone()
-    conn.close()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Balance (paper)", f"${ACCOUNT_USD + pnl_sum:.2f}")
+    c2.metric("Trades", n)
+    c3.metric("Win rate", f"{wr}%")
+    status = "FROZEN" if time.time() < freeze else "KILLED" if killed else "RUNNING"
+    c4.metric("Status", status)
 
-    win_rate = round((win_count / t_count) * 100, 1) if t_count > 0 else 0.0
-    active_trade = get_db_state("active_trade")
+    trends = get_state("trends", {}) or {}
+    st.caption("1H trend: " + " | ".join(f"{k}: {v}" for k, v in trends.items()))
 
-    js_active_trade = json.dumps(active_trade)
-    js_history = json.dumps(history_list)
-    js_stats = json.dumps({"total": t_count, "win_rate": win_rate})
+    t = get_state("active_trade")
+    if t:
+        p = last_price(t["symbol"]) or t["entry"]
+        d = 1 if t["type"] == "LONG" else -1
+        live = (p - t["entry"]) * t["qty"] * d
+        st.success(f"{t['symbol']} {t['type']} | Entry {t['entry']} | Now {p} | SL {t['sl']} | "
+                   f"TP {t['tp']} | Live PnL {live:+.3f}$")
+    else:
+        st.info("No active trade (Scanning Watchlist...)")
 
-    terminal_html = """<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100vh; overflow: hidden; }
-        .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 0 8px; font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; }
-        .brand { font-weight: 800; color: #fff; font-size: 11px; display: flex; align-items: center; gap: 5px; }
-        .pulse-dot { width: 7px; height: 7px; background: #00e676; border-radius: 50%; box-shadow: 0 0 8px #00e676; animation: blinker 1.2s cubic-bezier(0.5, 0, 1, 1) infinite alternate; }
-        @keyframes blinker { from { opacity: 1; transform: scale(1); } to { opacity: 0.25; transform: scale(0.7); } }
-        .pair-btn { background: #141c2c; border: 1px solid #1f2a40; color: #8892b0; border-radius: 4px; padding: 2px 7px; font-size: 9px; font-weight: 800; cursor: pointer; }
-        .pair-btn.active { background: #00e676; color: #000; border-color: #00e676; }
-        .stat-card { display: flex; flex-direction: column; min-width: 60px; }
-        .stat-label { font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 800; }
-        .stat-val { font-size: 10px; font-weight: 800; color: #fff; }
-        .btn-compact { background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 8px; font-size: 9px; font-weight: 800; cursor: pointer; }
-        .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
-        #chart-zone { width: 100vw; height: 53vh; background: #080a0f; }
-        .trade-dock { width: 100vw; height: 38px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 0 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
-        .dock-group { display: flex; align-items: center; gap: 8px; }
-        .btn-override-warn { background: rgba(240, 185, 11, 0.2); color: #f0b90b; border: 1px solid #f0b90b; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
-        .bottom-bar { width: 100vw; height: 46px; background: #0d121c; border-top: 1px solid #1a2336; padding: 4px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.2fr; gap: 6px; align-items: center; }
-        .metric-cell { display: flex; flex-direction: column; justify-content: center; background: #101624; padding: 2px 6px; border-radius: 4px; border: 1px solid #192233; height: 36px; }
-        .cell-head { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 2px; }
-        .cell-body { font-size: 9px; font-weight: 800; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .modal-bg { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); backdrop-filter: blur(5px); z-index: 999; align-items: center; justify-content: center; }
-        .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 90vw; max-width: 400px; max-height: 80vh; display: flex; flex-direction: column; padding: 12px; }
-        .history-list { overflow-y: auto; max-height: 250px; font-size: 10px; }
-        .history-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #151d2b; }
-        .btn-modal-clear { margin-top: 10px; background: rgba(255, 59, 48, 0.25); color: #ff3b30; border: 1px solid rgba(255, 59, 48, 0.6); border-radius: 6px; padding: 10px; font-size: 11px; font-weight: 800; cursor: pointer; text-align: center; width: 100%; }
-    </style>
-</head>
-<body>
-    <div class="top-nav">
-        <div class="brand"><span class="pulse-dot"></span> ⚡ QUANT</div>
-        <button class="pair-btn active" id="tab-SOL" onclick="switchPair('SOLUSDT')">SOL</button>
-        <button class="pair-btn" id="tab-DOGE" onclick="switchPair('DOGEUSDT')">DOGE</button>
-        <button class="pair-btn" id="tab-BTC" onclick="switchPair('BTCUSDT')">BTC</button>
-        <div class="stat-card"><div class="stat-label">ACTIVE</div><div id="disp-sym" class="stat-val" style="color:#f0b90b;">NONE</div></div>
-        <div class="stat-card"><div class="stat-label">ENTRY</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
-        <div class="stat-card"><div class="stat-label">DIRECT TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
-        <button class="btn-compact" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
-        <button class="btn-compact" onclick="window.parent.location.reload()">🔄</button>
-    </div>
+    b1, b2 = st.columns(2)
+    if b1.button("🛑 Kill switch OFF" if killed else "🛑 Kill switch ON", key="ks"):
+        set_state("kill_switch", not killed)
+    if b2.button("⚠️ Force close", key="fc") and t:
+        close_trade(t, last_price(t["symbol"]) or t["entry"], "MANUAL ⚠️")
 
-    <div class="workspace">
-        <div id="chart-zone"></div>
-        <div class="trade-dock">
-            <div class="dock-group">
-                <span style="color:#62697a; font-weight:800;">ACCOUNT:</span>
-                <b style="color:#00e676; font-size:10px;">$10.00 BASE</b>
-                <span style="color:#62697a;">| MARGIN:</span>
-                <b style="color:#38bdf8; font-size:10px;">$2.50 (10x)</b>
-            </div>
-            <div class="dock-group">
-                <button type="button" class="btn-override-warn" onclick="triggerForceClose()">⚡ FORCE CLOSE</button>
-            </div>
-        </div>
-        <div class="bottom-bar">
-            <div class="metric-cell"><span class="cell-head">THREAD 3 RISK</span><div class="cell-body" style="color:#00e676;">-$2.50 GUARD</div></div>
-            <div class="metric-cell"><span class="cell-head">VIEWING</span><div class="cell-body" id="val-viewing" style="color:#38bdf8;">SOLUSDT (5M LIVE)</div></div>
-            <div class="metric-cell"><span class="cell-head">TARGET PROFILE</span><div class="cell-body" style="color:#00e676;">100% DIRECT TP</div></div>
-            <div class="metric-cell"><span class="cell-head">SETUP</span><div class="cell-body" id="val-setup" style="color:#38bdf8;">MONITORING LIVE SETUP...</div></div>
-        </div>
-    </div>
-
-    <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
-        <div class="modal-box">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <b style="color:#fff; font-size:11px;">MULTI-ASSET VAULT</b>
-                <button onclick="toggleModal(false)" style="background:transparent; border:none; color:#888; font-size:16px; cursor:pointer;">✕</button>
-            </div>
-            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-bottom:10px;">
-                <div style="background:#131a26; padding:5px 8px; border-radius:4px; font-size:10px; display:flex; justify-content:space-between;">
-                    <span>Total Trades</span><b id="stat-total" style="color:#fff;">0</b>
-                </div>
-                <div style="background:#131a26; padding:5px 8px; border-radius:4px; font-size:10px; display:flex; justify-content:space-between;">
-                    <span>Win Rate</span><b id="stat-rate" style="color:#00e676;">0.0%</b>
-                </div>
-            </div>
-            <div id="history-container" class="history-list"></div>
-            <button type="button" class="btn-modal-clear" onclick="triggerVaultClear()">🗑️ CLEAR VAULT</button>
-        </div>
-    </div>
-
-    <script>
-        const IST_OFFSET = 5.5 * 3600;
-        let activeTrade = __ACTIVE_TRADE__;
-        let tradeHistory = __TRADE_HISTORY__;
-        let stats = __STATS__;
-
-        let activeChartSymbol = (activeTrade && activeTrade.symbol) ? activeTrade.symbol : "SOLUSDT";
-        let liveSocket = null;
-        let currentCandles = [];
-
-        function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
-        function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
-        
-        function triggerVaultClear() {
-            try { window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?clear_vault=confirmed"; }
-            catch(e) { window.location.href = window.location.pathname + "?clear_vault=confirmed"; }
-        }
-
-        function triggerForceClose() {
-            if (!activeTrade) { alert("No active trade to close!"); return; }
-            if (confirm("Force close active position?")) {
-                try { window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?force_close=confirmed"; }
-                catch(e) { window.location.href = window.location.pathname + "?force_close=confirmed"; }
-            }
-        }
-
-        const chartZone = document.getElementById('chart-zone');
-        const chart = LightweightCharts.createChart(chartZone, {
-            width: chartZone.clientWidth, height: chartZone.clientHeight,
-            layout: { background: { color: '#080a0f' }, textColor: '#787b86' },
-            grid: { vertLines: { color: '#111622' }, horzLines: { color: '#111622' } },
-            rightPriceScale: { borderColor: '#192130', autoScale: true },
-            timeScale: { 
-                borderColor: '#192130', timeVisible: true, secondsVisible: false,
-                tickMarkFormatter: (time) => {
-                    const date = new Date((time + IST_OFFSET) * 1000);
-                    return date.getUTCHours().toString().padStart(2, '0') + ':' + date.getUTCMinutes().toString().padStart(2, '0');
-                }
-            }
-        });
-
-        const series = chart.addCandlestickSeries({ 
-            upColor: '#00E676', downColor: '#FF3B30', 
-            borderUpColor: '#00E676', borderDownColor: '#FF3B30', 
-            wickUpColor: '#00E676', wickDownColor: '#FF3B30' 
-        });
-
-        let lineEntry = null, lineSL = null, lineTP = null;
-        function clearAllLines() {
-            if (lineEntry) { try { series.removePriceLine(lineEntry); } catch(e){} lineEntry = null; }
-            if (lineSL) { try { series.removePriceLine(lineSL); } catch(e){} lineSL = null; }
-            if (lineTP) { try { series.removePriceLine(lineTP); } catch(e){} lineTP = null; }
-        }
-
-        function switchPair(sym) {
-            if (activeChartSymbol === sym && currentCandles.length > 0) return;
-            activeChartSymbol = sym;
-            
-            // Critical: Disconnect WebSocket immediately to prevent cross-contamination
-            if (liveSocket) {
-                liveSocket.onclose = null;
-                liveSocket.close();
-                liveSocket = null;
-            }
-            currentCandles = []; // Completely wipe old memory buffer
-
-            document.querySelectorAll('.pair-btn').forEach(b => b.classList.remove('active'));
-            if (sym === 'SOLUSDT') document.getElementById('tab-SOL').classList.add('active');
-            if (sym === 'DOGEUSDT') document.getElementById('tab-DOGE').classList.add('active');
-            if (sym === 'BTCUSDT') document.getElementById('tab-BTC').classList.add('active');
-            document.getElementById('val-viewing').innerText = sym + " (5M LIVE)";
-
-            loadCleanHistoricalData(sym);
-        }
-
-        function renderMasterInterface() {
-            clearAllLines();
-            if (activeTrade && activeTrade.entry) {
-                let isCurrentChart = (activeTrade.symbol === activeChartSymbol);
-                if (isCurrentChart) {
-                    let entryVal = parseFloat(activeTrade.entry);
-                    let slVal = parseFloat(activeTrade.sl);
-                    let tpVal = parseFloat(activeTrade.tp);
-
-                    lineEntry = series.createPriceLine({ price: entryVal, color: '#38bdf8', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: 'ENTRY' });
-                    lineSL = series.createPriceLine({ price: slVal, color: '#ff3b30', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'SL' });
-                    lineTP = series.createPriceLine({ price: tpVal, color: '#00e676', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: 'DIRECT TP' });
-                }
-
-                document.getElementById('disp-sym').innerText = activeTrade.symbol;
-                document.getElementById('disp-entry').innerText = "$" + activeTrade.entry;
-                document.getElementById('disp-tp').innerText = "$" + activeTrade.tp;
-                document.getElementById('val-setup').innerText = "RIDING " + activeTrade.symbol + " " + activeTrade.type + " 🚀";
-                document.getElementById('val-setup').style.color = (activeTrade.type === "LONG") ? "#00e676" : "#ff3b30";
-            } else {
-                document.getElementById('disp-sym').innerText = "SCANNING";
-                document.getElementById('disp-entry').innerText = "--";
-                document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = "MONITORING SETUP ON SOL, DOGE & BTC...";
-                document.getElementById('val-setup').style.color = "#38bdf8";
-            }
-
-            document.getElementById('hist-count').innerText = stats.total;
-            document.getElementById('stat-total').innerText = stats.total;
-            document.getElementById('stat-rate').innerText = stats.win_rate + "%";
-
-            const histCont = document.getElementById('history-container');
-            if (tradeHistory.length > 0) {
-                histCont.innerHTML = "";
-                tradeHistory.forEach(item => {
-                    let resCol = item.result.includes("TP") || item.result.includes("TRAILED") ? "#00e676" : "#ff3b30";
-                    let typeCol = item.type === "LONG" ? "#00e676" : "#ff3b30";
-                    let pnlDisp = item.pnl_usd ? `<b style="color:${resCol}; margin-left:4px;">(${item.pnl_usd})</b>` : '';
-                    histCont.innerHTML += `
-                        <div class="history-item">
-                            <span><b>${item.symbol || 'SOL'}</b> ${item.time} <b style="color:${typeCol};">${item.type}</b> @ $${item.entry}</span>
-                            <span><b style="color:${resCol};">${item.result}</b> ${pnlDisp}</span>
-                        </div>`;
-                });
-            } else {
-                histCont.innerHTML = '<div style="color:#555; text-align:center; padding:15px 0;">Vault Clean (0 trades)...</div>';
-            }
-        }
-
-        function loadCleanHistoricalData(targetSymbol) {
-            fetch(`https://data-api.binance.vision/api/v3/klines?symbol=${targetSymbol}&interval=5m&limit=90`)
-                .then(r => r.json())
-                .then(data => {
-                    if (targetSymbol !== activeChartSymbol) return; // Prevent async race conditions
-                    currentCandles = data.map(d => ({ 
-                        time: (d[0] - (d[0] % 300000)) / 1000, 
-                        open: parseFloat(d[1]), high: parseFloat(d[2]), 
-                        low: parseFloat(d[3]), close: parseFloat(d[4]) 
-                    }));
-                    series.setData(currentCandles);
-                    chart.timeScale().fitContent();
-                    renderMasterInterface();
-                    openIsolatedStream(targetSymbol);
-                }).catch(e => setTimeout(() => loadCleanHistoricalData(targetSymbol), 2000));
-        }
-
-        function openIsolatedStream(targetSymbol) {
-            const stream = targetSymbol.toLowerCase();
-            const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${stream}@kline_5m`);
-            liveSocket = ws;
-
-            ws.onmessage = (e) => {
-                if (targetSymbol !== activeChartSymbol) {
-                    ws.close();
-                    return;
-                }
-                const data = JSON.parse(e.data);
-                const k = data.k;
-                const price = parseFloat(k.c);
-                const barTime = (k.t - (k.t % 300000)) / 1000;
-
-                if (currentCandles.length > 0) {
-                    let last = currentCandles[currentCandles.length - 1];
-                    if (barTime === last.time) {
-                        last.close = price;
-                        if (price > last.high) last.high = price;
-                        if (price < last.low) last.low = price;
-                        series.update(last);
-                    } else if (barTime > last.time) {
-                        const newBar = { time: barTime, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: price };
-                        currentCandles.push(newBar);
-                        series.update(newBar);
-                    }
-                }
-            };
-
-            ws.onerror = () => { if (targetSymbol === activeChartSymbol) setTimeout(() => openIsolatedStream(targetSymbol), 3000); };
-        }
-
-        switchPair(activeChartSymbol);
-        window.onresize = () => chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
-    </script>
-</body>
-</html>"""
-
-    final_html = terminal_html.replace("__ACTIVE_TRADE__", js_active_trade)\
-                              .replace("__TRADE_HISTORY__", js_history)\
-                              .replace("__STATS__", js_stats)
-
-    components.html(final_html, height=710, scrolling=False)
-
-render_live_dashboard()
+    if rows:
+        st.dataframe([{"time": r[0], "symbol": r[1], "side": r[2], "entry": r[3],
+                       "exit": r[4], "result": r[5], "net pnl $": r[6]} for r in rows],
+                     use_container_width=True, hide_index=True)
+    with st.expander("System logs"):
+        logs = db("SELECT ts,msg FROM logs ORDER BY id DESC LIMIT 15", fetch="all") or []
+        for r in logs:
+            st.text(f"{r[0]}  {r[1]}")
+dashboard()
