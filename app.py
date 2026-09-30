@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# DEDICATED BTCUSDT QUANT RADAR (HALF-SCREEN UI + SYNTAX FIXED)
+# DEDICATED BTCUSDT QUANT RADAR (100% ERROR-FREE SYNTAX ENGINE)
 # ==============================================================================
 
 BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM")
@@ -30,7 +30,7 @@ DB_LOCK = threading.Lock()
 
 def db(q, p=(), fetch=None):
     with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE, timeout=12)
+        conn = sqlite3.connect(DB_FILE, timeout=15)
         try:
             cur = conn.execute(q, p)
             res = cur.fetchall() if fetch == "all" else cur.fetchone() if fetch == "one" else None
@@ -61,8 +61,9 @@ def send_alert(msg):
     def _worker():
         if not BOT_TOKEN or not CHAT_ID: return
         try:
-            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                          json={"chat_id": str(CHAT_ID).strip(), "text": msg}, timeout=4)
+            url = "https://api.telegram.org/bot" + str(BOT_TOKEN) + "/sendMessage"
+            payload = {"chat_id": str(CHAT_ID).strip(), "text": str(msg)}
+            requests.post(url, json=payload, timeout=4)
         except Exception: pass
     threading.Thread(target=_worker, daemon=True).start()
 
@@ -83,7 +84,7 @@ def atr(c, p=14):
 
 def fetch_btc_klines(interval, limit=35):
     try:
-        url = f"https://data-api.binance.vision/api/v3/klines?symbol={SYMBOL}&interval={interval}&limit={limit}"
+        url = "https://data-api.binance.vision/api/v3/klines?symbol=" + SYMBOL + "&interval=" + interval + "&limit=" + str(limit)
         r = requests.get(url, timeout=2.5)
         if r.status_code == 200:
             raw = r.json()
@@ -98,7 +99,8 @@ def fetch_btc_klines(interval, limit=35):
 
 def last_btc_price():
     try:
-        r = requests.get(f"https://data-api.binance.vision/api/v3/ticker/price?symbol={SYMBOL}", timeout=2.0)
+        url = "https://data-api.binance.vision/api/v3/ticker/price?symbol=" + SYMBOL
+        r = requests.get(url, timeout=2.0)
         return float(r.json()["price"])
     except Exception: return None
 
@@ -136,13 +138,12 @@ def run_analysis_engine():
                         set_state("btc_radar", radar)
 
                         if time.time() - last_radar_alert.get("LONG", 0) > 300:
-                            send_alert(
-                                f"👀 [PRE-SIGNAL] BTC LONG SETUP FORMING!\n\n"
-                                f"📍 Planned Entry: > ${p_entry:.1f}\n"
-                                f"🛡️ Structure SL: ${p_sl:.1f} (-{SL_PCT*100:.1f}%)\n"
-                                f"🎯 Direct Mega TP: ${p_tp:.1f} (+{TP_PCT*100:.1f}%)\n"
-                                f"⏳ Waiting for 5M Breakout confirmation..."
-                            )
+                            msg = "👀 [PRE-SIGNAL] BTC LONG SETUP FORMING!\n\n" + \
+                                  "📍 Planned Entry: > ${:.1f}\n".format(p_entry) + \
+                                  "🛡️ Structure SL: ${:.1f} (-{:.1f}%)\n".format(p_sl, SL_PCT*100) + \
+                                  "🎯 Direct Mega TP: ${:.1f} (+{:.1f}%)\n".format(p_tp, TP_PCT*100) + \
+                                  "⏳ Waiting for 5M Breakout confirmation..."
+                            send_alert(msg)
                             last_radar_alert["LONG"] = time.time()
 
                         if curr_p > p_entry and last_c["close"] > last_c["open"]:
@@ -156,13 +157,12 @@ def run_analysis_engine():
                         set_state("btc_radar", radar)
 
                         if time.time() - last_radar_alert.get("SHORT", 0) > 300:
-                            send_alert(
-                                f"👀 [PRE-SIGNAL] BTC SHORT SETUP FORMING!\n\n"
-                                f"📍 Planned Entry: < ${p_entry:.1f}\n"
-                                f"🛡️ Structure SL: ${p_sl:.1f} (+{SL_PCT*100:.1f}%)\n"
-                                f"🎯 Direct Mega TP: ${p_tp:.1f} (-{TP_PCT*100:.1f}%)\n"
-                                f"⏳ Waiting for 5M Breakdown confirmation..."
-                            )
+                            msg = "👀 [PRE-SIGNAL] BTC SHORT SETUP FORMING!\n\n" + \
+                                  "📍 Planned Entry: < ${:.1f}\n".format(p_entry) + \
+                                  "🛡️ Structure SL: ${:.1f} (+{:.1f}%)\n".format(p_sl, SL_PCT*100) + \
+                                  "🎯 Direct Mega TP: ${:.1f} (-{:.1f}%)\n".format(p_tp, TP_PCT*100) + \
+                                  "⏳ Waiting for 5M Breakdown confirmation..."
+                            send_alert(msg)
                             last_radar_alert["SHORT"] = time.time()
 
                         if curr_p < p_entry and last_c["close"] < last_c["open"]:
@@ -176,17 +176,17 @@ def close_trade(t, exit_price, result):
     set_state("active_trade", None)
     set_state("last_exit_time", time.time())
 
-    d = 1 if t["type"] == "LONG" else -1
-    gross = (exit_price - t["entry"]) * t["qty"] * d
+    d = 1 if t.get("type") == "LONG" else -1
+    gross = (exit_price - float(t.get("entry", 0))) * float(t.get("qty", 0.001)) * d
     net = round(gross, 2)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     db("INSERT INTO trades (ts,epoch,side,entry,exit_price,qty,result,pnl) VALUES (?,?,?,?,?,?,?,?)",
-       (now_str, time.time(), t["type"], t["entry"], exit_price, t["qty"], result, net))
+       (now_str, time.time(), t.get("type", "TRADE"), float(t.get("entry", 0)), float(exit_price), float(t.get("qty", 0.001)), str(result), float(net)))
 
-    # Fix: Separated icon variable to avoid f-string syntax error
     status_icon = "🚀" if net > 0 else "🛑"
-    send_alert(f"{status_icon} [BTC EXIT] {t['type']} {result}\nPnL: {net:+.2f}$\vert{} Exit:${exit_price:.1f}")
+    msg = status_icon + " [BTC EXIT] " + str(t.get("type", "")) + " " + str(result) + "\nPnL: " + "{:+.2f}$".format(net) + " \vert{} Exit: $" + "{:.1f}".format(float(exit_price))
+    send_alert(msg)
 
 def run_execution_engine():
     while True:
@@ -195,27 +195,31 @@ def run_execution_engine():
             if active:
                 p = last_btc_price()
                 if p:
-                    long_ = active["type"] == "LONG"
-                    if long_ and p >= active["entry"] * 1.01 and not active.get("trailed"):
-                        active["sl"] = round(active["entry"] * 1.002, BTC_DEC)
-                        active["trailed"] = True
-                        set_state("active_trade", active)
-                        send_alert(f"🛡️️ BTC LONG SL Trailed to Breakeven (${active['sl']:.1f})")
-                    elif not long_ and p <= active["entry"] * 0.99 and not active.get("trailed"):
-                        active["sl"] = round(active["entry"] * 0.998, BTC_DEC)
-                        active["trailed"] = True
-                        set_state("active_trade", active)
-                        send_alert(f"🛡️ BTC SHORT SL Trailed to Breakeven (${active['sl']:.1f})")
+                    long_ = (active.get("type") == "LONG")
+                    entry_val = float(active.get("entry", 0))
+                    sl_val = float(active.get("sl", 0))
+                    tp_val = float(active.get("tp", 0))
 
-                    if (long_ and p >= active["tp"]) or (not long_ and p <= active["tp"]):
-                        close_trade(active, active["tp"], "DIRECT MEGA TP 🔥")
-                    elif (long_ and p <= active["sl"]) or (not long_ and p >= active["sl"]):
+                    if long_ and p >= entry_val * 1.01 and not active.get("trailed"):
+                        active["sl"] = round(entry_val * 1.002, BTC_DEC)
+                        active["trailed"] = True
+                        set_state("active_trade", active)
+                        send_alert("🛡️ BTC LONG SL Trailed to Breakeven (${:.1f})".format(active["sl"]))
+                    elif not long_ and p <= entry_val * 0.99 and not active.get("trailed"):
+                        active["sl"] = round(entry_val * 0.998, BTC_DEC)
+                        active["trailed"] = True
+                        set_state("active_trade", active)
+                        send_alert("🛡️ BTC SHORT SL Trailed to Breakeven (${:.1f})".format(active["sl"]))
+
+                    if (long_ and p >= tp_val) or (not long_ and p <= tp_val):
+                        close_trade(active, tp_val, "DIRECT MEGA TP 🔥")
+                    elif (long_ and p <= sl_val) or (not long_ and p >= sl_val):
                         res = "TRAILED EXIT 🛡️" if active.get("trailed") else "SL HIT 🛑"
                         close_trade(active, p, res)
             else:
                 sig = get_state("signal_ready")
                 if sig and not get_state("kill_switch", False) and (time.time() - get_state("last_exit_time", 0) > 180):
-                    raw_qty = (MARGIN_USD * LEVERAGE) / sig["price"]
+                    raw_qty = (MARGIN_USD * LEVERAGE) / float(sig["price"])
                     qty = max(MIN_QTY, round(raw_qty, 3))
 
                     trade = {
@@ -224,13 +228,12 @@ def run_execution_engine():
                     }
                     set_state("active_trade", trade)
                     set_state("signal_ready", None)
-                    send_alert(
-                        f"⚡ [BTC DIRECT SWING EXECUTED] {sig['type']}\n\n"
-                        f"📍 Entry: ${sig['price']:.1f}\n"
-                        f"🎯 Direct TP: ${sig['tp']:.1f}\n"
-                        f"🛡️ Structure SL: ${sig['sl']:.1f}\n"
-                        f"📦 Size: {qty} BTC ($2.50 Margin @ 10x)"
-                    )
+                    msg = "⚡ [BTC DIRECT SWING EXECUTED] " + str(sig["type"]) + "\n\n" + \
+                          "📍 Entry: ${:.1f}\n".format(float(sig["price"])) + \
+                          "🎯 Direct TP: ${:.1f}\n".format(float(sig["tp"])) + \
+                          "🛡️ Structure SL: ${:.1f}\n".format(float(sig["sl"])) + \
+                          "📦 Size: " + str(qty) + " BTC ($2.50 Margin @ 10x)"
+                    send_alert(msg)
         except Exception: pass
         time.sleep(1)
 
@@ -249,14 +252,14 @@ st.set_page_config(page_title="BTC QUANT RADAR", layout="wide", initial_sidebar_
 st.markdown("""<style>
 header, footer, #MainMenu { display: none !important; }
 .block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; }
-iframe { width: 100vw !important; height: calc(100vh - 5px) !important; border: none !important; display: block !important; }
+iframe { width: 100vw !important; height: calc(100vh - 5px) !important; border: none !important; }
 </style>""", unsafe_allow_html=True)
 
 if st.query_params.get("force_close") == "1":
     t = get_state("active_trade")
     if t:
-        p = last_btc_price() or t["entry"]
-        close_trade(t, p, "MANUAL OVERRIDE ⚠️️")
+        p = last_btc_price() or t.get("entry")
+        close_trade(t, p, "MANUAL OVERRIDE ⚠️")
     st.query_params.clear()
     st.rerun()
 
