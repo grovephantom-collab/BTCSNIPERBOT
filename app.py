@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# DEDICATED BTCUSDT QUANT RADAR (HALF-SCREEN UI + PRE-SIGNAL OVERLAYS)
+# DEDICATED BTCUSDT QUANT RADAR (HALF-SCREEN UI + SYNTAX FIXED)
 # ==============================================================================
 
 BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM")
@@ -17,13 +17,12 @@ CHAT_ID = os.getenv("TG_CHAT_ID", "7886716805")
 DB_FILE = "sniper_btc_vault.db"
 SYMBOL = "BTCUSDT"
 
-# Sizing & Structure for $10 Account ($2.50 Margin @ 10x Lev = $25 Notional)
 MARGIN_USD = 2.5
 LEVERAGE = 10
 BTC_DEC = 1
 MIN_QTY = 0.001
-SL_PCT = 0.0080    # Safe Structure SL (~$650-$700 breathing space on BTC)
-TP_PCT = 0.0240    # 100% Direct Mega TP (1:3 RR)
+SL_PCT = 0.0080
+TP_PCT = 0.0240
 MIN_ATR_PTS = 35.0
 
 # --- DATABASE SETUP ---
@@ -185,7 +184,9 @@ def close_trade(t, exit_price, result):
     db("INSERT INTO trades (ts,epoch,side,entry,exit_price,qty,result,pnl) VALUES (?,?,?,?,?,?,?,?)",
        (now_str, time.time(), t["type"], t["entry"], exit_price, t["qty"], result, net))
 
-    send_alert(f"{'🚀' if net > 0 else '🛑'} [BTC EXIT] {t['type']} {result}\nPnL: {net:+.2f}$\vert{} Exit:${exit_price:.1f}")
+    # Fix: Separated icon variable to avoid f-string syntax error
+    status_icon = "🚀" if net > 0 else "🛑"
+    send_alert(f"{status_icon} [BTC EXIT] {t['type']} {result}\nPnL: {net:+.2f}$\vert{} Exit:${exit_price:.1f}")
 
 def run_execution_engine():
     while True:
@@ -195,12 +196,11 @@ def run_execution_engine():
                 p = last_btc_price()
                 if p:
                     long_ = active["type"] == "LONG"
-                    # Breakeven Lock after +1%
                     if long_ and p >= active["entry"] * 1.01 and not active.get("trailed"):
                         active["sl"] = round(active["entry"] * 1.002, BTC_DEC)
                         active["trailed"] = True
                         set_state("active_trade", active)
-                        send_alert(f"🛡️ BTC LONG SL Trailed to Breakeven (${active['sl']:.1f})")
+                        send_alert(f"🛡️️ BTC LONG SL Trailed to Breakeven (${active['sl']:.1f})")
                     elif not long_ and p <= active["entry"] * 0.99 and not active.get("trailed"):
                         active["sl"] = round(active["entry"] * 0.998, BTC_DEC)
                         active["trailed"] = True
@@ -243,7 +243,7 @@ def launch():
 launch()
 
 # ==============================================================================
-# STREAMLIT UI: HALF SCREEN CHART + LOWER DOCKS (EXACT IMAGE 2 REPLICA)
+# STREAMLIT UI: HALF SCREEN CHART + LOWER DOCKS
 # ==============================================================================
 st.set_page_config(page_title="BTC QUANT RADAR", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -256,7 +256,7 @@ if st.query_params.get("force_close") == "1":
     t = get_state("active_trade")
     if t:
         p = last_btc_price() or t["entry"]
-        close_trade(t, p, "MANUAL OVERRIDE ⚠️")
+        close_trade(t, p, "MANUAL OVERRIDE ⚠️️")
     st.query_params.clear()
     st.rerun()
 
@@ -295,7 +295,6 @@ def render_ui():
         * { box-sizing: border-box; margin: 0; padding: 0; }
         html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100vh; overflow: hidden; }
         
-        /* TOP NAV (Exactly as in Image 2) */
         .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 0 8px; font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; }
         .brand { font-weight: 800; color: #fff; font-size: 11px; display: flex; align-items: center; gap: 5px; }
         .badge-live { background: #00e676; color: #000; font-size: 8px; padding: 2px 4px; border-radius: 3px; font-weight: 900; }
@@ -304,23 +303,19 @@ def render_ui():
         .stat-val { font-size: 10px; font-weight: 800; color: #fff; }
         .btn-compact { background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 8px; font-size: 9px; font-weight: 800; cursor: pointer; }
 
-        /* WORKSPACE & HALF SCREEN CHART */
         .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
         #chart-zone { width: 100vw; height: 53vh; background: #080a0f; }
 
-        /* TRADE DOCK */
         .trade-dock { width: 100vw; height: 38px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 0 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
         .dock-group { display: flex; align-items: center; gap: 8px; }
         .btn-override-danger { background: rgba(255, 59, 48, 0.2); color: #ff3b30; border: 1px solid #ff3b30; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
         .btn-override-warn { background: rgba(240, 185, 11, 0.2); color: #f0b90b; border: 1px solid #f0b90b; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
 
-        /* BOTTOM 4-CELL METRIC BAR */
         .bottom-bar { width: 100vw; height: 46px; background: #0d121c; border-top: 1px solid #1a2336; padding: 4px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.2fr; gap: 6px; align-items: center; }
         .metric-cell { display: flex; flex-direction: column; justify-content: center; background: #101624; padding: 2px 6px; border-radius: 4px; border: 1px solid #192233; height: 36px; }
         .cell-head { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 2px; }
         .cell-body { font-size: 9px; font-weight: 800; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-        /* MODAL */
         .modal-bg { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); backdrop-filter: blur(5px); z-index: 999; align-items: center; justify-content: center; }
         .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 90vw; max-width: 400px; max-height: 80vh; display: flex; flex-direction: column; padding: 12px; }
         .history-list { overflow-y: auto; max-height: 250px; font-size: 10px; }
@@ -375,7 +370,6 @@ def render_ui():
         </div>
     </div>
 
-    <!-- VAULT POPUP MODAL -->
     <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
         <div class="modal-box">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
