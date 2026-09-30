@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 
 # ==============================================================================
-# DEDICATED BTCUSDT QUANT RADAR (ZERO-FLICKER ENGINE)
+# DEDICATED BTCUSDT QUANT RADAR (ANTI-SPAM TELEGRAM + ZERO-FLICKER UI)
 # ==============================================================================
 
 BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM")
@@ -102,12 +102,17 @@ def last_btc_price():
     except Exception: return None
 
 # ==============================================================================
-# BACKGROUND THREADS: ANALYSIS & EXECUTION
+# ANALYSIS ENGINE (WITH ACTIVE-TRADE LOCK & DEDUPLICATION)
 # ==============================================================================
 def run_analysis_engine():
-    last_radar_alert = {}
+    last_alerted_bar = None
     while True:
         try:
+            # RULE 1: Agar trade pehle se active hai, to PRE-SIGNAL bilkul mat bhejo
+            if get_state("active_trade") is not None:
+                time.sleep(3)
+                continue
+
             c1h, _ = fetch_btc_klines("1h", 25)
             htf_trend = "NEUTRAL"
             if c1h and len(c1h) >= 20:
@@ -121,6 +126,7 @@ def run_analysis_engine():
                 e21 = ema_series(closes, 21)[-1]
                 curr_p = live["close"]
                 last_c = c5[-1]
+                current_bar_time = last_c["time"]
                 a_val = atr(c5, 14)
 
                 if a_val >= MIN_ATR_PTS:
@@ -134,14 +140,15 @@ def run_analysis_engine():
                         radar = {"type": "LONG", "entry": p_entry, "sl": p_sl, "tp": p_tp, "time": time.time()}
                         set_state("btc_radar", radar)
 
-                        if time.time() - last_radar_alert.get("LONG", 0) > 300:
+                        # RULE 2: Ek candle par sirf 1 pre-signal alert
+                        if last_alerted_bar != current_bar_time:
                             msg = "👀 [PRE-SIGNAL] BTC LONG SETUP FORMING!\n\n" + \
                                   "📍 Planned Entry: > ${:.1f}\n".format(p_entry) + \
                                   "🛡️ Structure SL: ${:.1f} (-{:.1f}%)\n".format(p_sl, SL_PCT*100) + \
                                   "🎯 Direct Mega TP: ${:.1f} (+{:.1f}%)\n".format(p_tp, TP_PCT*100) + \
                                   "⏳ Waiting for 5M Breakout confirmation..."
                             send_alert(msg)
-                            last_radar_alert["LONG"] = time.time()
+                            last_alerted_bar = current_bar_time
 
                         if curr_p > p_entry and last_c["close"] > last_c["open"]:
                             set_state("signal_ready", {"type": "LONG", "price": curr_p, "sl": p_sl, "tp": p_tp, "bar": live["time"]})
@@ -153,14 +160,14 @@ def run_analysis_engine():
                         radar = {"type": "SHORT", "entry": p_entry, "sl": p_sl, "tp": p_tp, "time": time.time()}
                         set_state("btc_radar", radar)
 
-                        if time.time() - last_radar_alert.get("SHORT", 0) > 300:
+                        if last_alerted_bar != current_bar_time:
                             msg = "👀 [PRE-SIGNAL] BTC SHORT SETUP FORMING!\n\n" + \
                                   "📍 Planned Entry: < ${:.1f}\n".format(p_entry) + \
                                   "🛡️ Structure SL: ${:.1f} (+{:.1f}%)\n".format(p_sl, SL_PCT*100) + \
                                   "🎯 Direct Mega TP: ${:.1f} (-{:.1f}%)\n".format(p_tp, TP_PCT*100) + \
                                   "⏳ Waiting for 5M Breakdown confirmation..."
                             send_alert(msg)
-                            last_radar_alert["SHORT"] = time.time()
+                            last_alerted_bar = current_bar_time
 
                         if curr_p < p_entry and last_c["close"] < last_c["open"]:
                             set_state("signal_ready", {"type": "SHORT", "price": curr_p, "sl": p_sl, "tp": p_tp, "bar": live["time"]})
@@ -168,9 +175,13 @@ def run_analysis_engine():
         except Exception: pass
         time.sleep(2)
 
+# ==============================================================================
+# EXECUTION ENGINE
+# ==============================================================================
 def close_trade(t, exit_price, result):
     if get_state("active_trade") is None: return
     set_state("active_trade", None)
+    set_state("btc_radar", None)  # Clear pre-signal radar on close
     set_state("last_exit_time", time.time())
 
     d = 1 if t.get("type") == "LONG" else -1
@@ -225,6 +236,8 @@ def run_execution_engine():
                     }
                     set_state("active_trade", trade)
                     set_state("signal_ready", None)
+                    set_state("btc_radar", None)  # Pre-signal levels clear karo
+
                     msg = "⚡ [BTC DIRECT SWING EXECUTED] " + str(sig["type"]) + "\n\n" + \
                           "📍 Entry: ${:.1f}\n".format(float(sig["price"])) + \
                           "🎯 Direct TP: ${:.1f}\n".format(float(sig["tp"])) + \
@@ -238,12 +251,11 @@ def run_execution_engine():
 def launch():
     threading.Thread(target=run_analysis_engine, daemon=True).start()
     threading.Thread(target=run_execution_engine, daemon=True).start()
-    send_alert("🟢 [BTC QUANT RADAR] Engine Online (Zero-Flicker Mode).")
     return True
 launch()
 
 # ==============================================================================
-# ZERO-FLICKER UI (ONE-TIME MOUNT + LIVE INTERNAL WEBSOCKET)
+# UI INTERFACE
 # ==============================================================================
 st.set_page_config(page_title="BTC QUANT RADAR", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -269,6 +281,7 @@ if st.query_params.get("toggle_kill") == "1":
 if st.query_params.get("clear_vault") == "1":
     db("DELETE FROM trades")
     set_state("active_trade", None)
+    set_state("btc_radar", None)
     st.query_params.clear()
     st.rerun()
 
