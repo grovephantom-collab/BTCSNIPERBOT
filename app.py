@@ -1,569 +1,244 @@
-import streamlit as st
-import streamlit.components.v1 as components
-import sqlite3
-import threading
-import time
-import requests
-import json
 import os
-from datetime import datetime
+import time
+import hmac
+import hashlib
+import json
+import threading
+import requests
+import pandas as pd
+import pandas_ta as ta
+from flask import Flask, jsonify
 
-# ==============================================================================
-# DEDICATED BTCUSDT QUANT RADAR (ANTI-SPAM TELEGRAM + ZERO-FLICKER UI)
-# ==============================================================================
+app = Flask(__name__)
 
-BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "8941403990:AAHMOdpVVeh3wPwmxweroAi0XfNFPJAVXaM")
-CHAT_ID = os.getenv("TG_CHAT_ID", "7886716805")
-DB_FILE = "sniper_btc_vault.db"
-SYMBOL = "BTCUSDT"
+# --- CONFIGURATIONS ---
+BASE_URL = os.environ.get("DELTA_BASE_URL", "https://cdn.india.delta.exchange")
+API_KEY = os.environ.get("DELTA_API_KEY", "YOUR_API_KEY")
+API_SECRET = os.environ.get("DELTA_API_SECRET", "YOUR_API_SECRET")
+SYMBOL = os.environ.get("SYMBOL", "BTCUSD")
+SIZE = int(os.environ.get("CONTRACT_SIZE", 1))
 
-MARGIN_USD = 2.5
-LEVERAGE = 10
-BTC_DEC = 1
-MIN_QTY = 0.001
-SL_PCT = 0.0080
-TP_PCT = 0.0240
-MIN_ATR_PTS = 35.0
+# Live state tracker
+bot_status = {
+    "status": "Initializing Engine...",
+    "last_price": 0,
+    "last_trade": "None",
+    "active_position": False,
+    "last_error": "None",
+    "total_trades": 0
+}
 
-DB_LOCK = threading.Lock()
+last_trade_time = None  # Ek candle me double trade na ho uske liye
 
-def db(q, p=(), fetch=None):
-    with DB_LOCK:
-        conn = sqlite3.connect(DB_FILE, timeout=15)
-        try:
-            cur = conn.execute(q, p)
-            res = cur.fetchall() if fetch == "all" else cur.fetchone() if fetch == "one" else None
-            conn.commit()
-            return res
-        finally:
-            conn.close()
+def generate_signature(secret, method, path, query="", payload=""):
+    timestamp = str(int(time.time()))
+    message = method + timestamp + path + query + payload
+    signature = hmac.new(secret.encode('utf-8'), message.encode('utf-8'), hashlib.sha256).hexdigest()
+    return signature, timestamp
 
-def init_db():
-    db("""CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, epoch REAL,
-        side TEXT, entry REAL, exit_price REAL, qty REAL, result TEXT, pnl REAL)""")
-    db("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT)")
-init_db()
+def get_headers(method, path, query="", payload=""):
+    sig, ts = generate_signature(API_SECRET, method, path, query, payload)
+    return {"api-key": API_KEY, "timestamp": ts, "signature": sig, "Content-Type": "application/json"}
 
-def get_state(k, default=None):
+def get_product_id():
     try:
-        r = db("SELECT value FROM state WHERE key=?", (k,), "one")
-        return json.loads(r[0]) if r else default
-    except Exception:
-        return default
+        res = requests.get(f"{BASE_URL}/v2/products", timeout=10).json()
+        if res.get("success"):
+            for p in res.get("result", []):
+                if p["symbol"] == SYMBOL:
+                    return p["id"]
+    except Exception as e:
+        bot_status["last_error"] = f"Product ID fetch error: {e}"
+    return None
 
-def set_state(k, v):
-    db("INSERT OR REPLACE INTO state (key,value) VALUES (?,?)", (k, json.dumps(v)))
-
-def send_alert(msg):
-    def _worker():
-        if not BOT_TOKEN or not CHAT_ID: return
-        try:
-            url = "https://api.telegram.org/bot" + str(BOT_TOKEN) + "/sendMessage"
-            payload = {"chat_id": str(CHAT_ID).strip(), "text": str(msg)}
-            requests.post(url, json=payload, timeout=4)
-        except Exception: pass
-    threading.Thread(target=_worker, daemon=True).start()
-
-def ema_series(v, p):
-    if len(v) < p: return v[-1] if v else 0.0
-    k = 2 / (p + 1)
-    out = [v[0]]
-    for x in v[1:]:
-        out.append(x * k + out[-1] * (1 - k))
-    return out
-
-def atr(c, p=14):
-    if len(c) < p + 1: return 0.0
-    trs = [max(c[i]["high"] - c[i]["low"], abs(c[i]["high"] - c[i - 1]["close"]),
-               abs(c[i]["low"] - c[i - 1]["close"])) for i in range(1, len(c))]
-    return sum(trs[-p:]) / max(1, min(p, len(trs)))
-
-def fetch_btc_klines(interval, limit=35):
+def has_open_position(product_id):
     try:
-        url = "https://data-api.binance.vision/api/v3/klines?symbol=" + SYMBOL + "&interval=" + interval + "&limit=" + str(limit)
-        r = requests.get(url, timeout=2.5)
-        if r.status_code == 200:
-            raw = r.json()
-            if isinstance(raw, list) and len(raw) >= 15:
-                closed = [{'time': int(d[0]), 'open': float(d[1]), 'high': float(d[2]),
-                           'low': float(d[3]), 'close': float(d[4]), 'vol': float(d[5])} for d in raw[:-1]]
-                live = {'time': int(raw[-1][0]), 'open': float(raw[-1][1]), 'high': float(raw[-1][2]),
-                        'low': float(raw[-1][3]), 'close': float(raw[-1][4]), 'vol': float(raw[-1][5])}
-                return closed, live
-    except Exception: pass
-    return None, None
+        headers = get_headers("GET", "/v2/positions")
+        res = requests.get(f"{BASE_URL}/v2/positions", headers=headers, timeout=10).json()
+        if res.get("success"):
+            for pos in res.get("result", []):
+                if pos.get("product_id") == product_id and abs(float(pos.get("size", 0))) > 0:
+                    return True
+    except Exception as e:
+        bot_status["last_error"] = f"Position check error: {e}"
+    return False
 
-def last_btc_price():
+def get_market_data(symbol, resolution="5m", limit=300):
     try:
-        url = "https://data-api.binance.vision/api/v3/ticker/price?symbol=" + SYMBOL
-        r = requests.get(url, timeout=2.0)
-        return float(r.json()["price"])
-    except Exception: return None
+        end_time = int(time.time())
+        start_time = end_time - (limit * 300)
+        url = f"{BASE_URL}/v2/chart/history?symbol={symbol}&resolution={resolution}&from={start_time}&to={end_time}"
+        res = requests.get(url, timeout=10).json()
+        
+        if not res.get("success") or not res.get("result"):
+            return None
 
-# ==============================================================================
-# ANALYSIS ENGINE (WITH ACTIVE-TRADE LOCK & DEDUPLICATION)
-# ==============================================================================
-def run_analysis_engine():
-    last_alerted_bar = None
+        df = pd.DataFrame(res["result"])
+        df['close'] = pd.to_numeric(df['close'])
+        df['high'] = pd.to_numeric(df['high'])
+        df['low'] = pd.to_numeric(df['low'])
+        
+        # --- TECHNICAL INDICATORS (TRIPLE FILTER) ---
+        df['ema_9'] = ta.ema(df['close'], length=9)
+        df['ema_21'] = ta.ema(df['close'], length=21)
+        df['ema_200'] = ta.ema(df['close'], length=200)
+        df['rsi'] = ta.rsi(df['close'], length=14)
+        df['atr'] = ta.atr(df['high'], df['low'], df['close'], length=14)
+        
+        return df
+    except Exception as e:
+        bot_status["last_error"] = f"Candle data error: {e}"
+        return None
+
+def place_bracket_order(product_id, side, entry_price, atr_value):
+    # Dynamic SL & TP based on volatility (1.5x ATR for SL, 3.0x ATR for TP)
+    sl_points = atr_value * 1.5
+    tp_points = atr_value * 3.0
+
+    if side == "buy":
+        sl_price = round(entry_price - sl_points, 1)
+        tp_price = round(entry_price + tp_points, 1)
+    else:
+        sl_price = round(entry_price + sl_points, 1)
+        tp_price = round(entry_price - tp_points, 1)
+
+    payload = {
+        "product_id": product_id,
+        "size": SIZE,
+        "side": side,
+        "order_type": "market_order",
+        "bracket_stop_loss_price": str(sl_price),
+        "bracket_take_profit_price": str(tp_price)
+    }
+
+    try:
+        payload_str = json.dumps(payload)
+        headers = get_headers("POST", "/v2/orders", payload=payload_str)
+        res = requests.post(f"{BASE_URL}/v2/orders", headers=headers, data=payload_str, timeout=10).json()
+        
+        if res.get("success"):
+            bot_status["last_trade"] = f"{side.upper()} @ {entry_price} | SL: {sl_price} | TP: {tp_price}"
+            bot_status["total_trades"] += 1
+            return True
+        else:
+            bot_status["last_error"] = f"Order failed: {res.get('error', 'Unknown Error')}"
+            return False
+    except Exception as e:
+        bot_status["last_error"] = f"Execution error: {e}"
+        return False
+
+# --- MAIN TRADING ENGINE ---
+def run_trading_bot():
+    global bot_status, last_trade_time
+    
+    prod_id = get_product_id()
+    while not prod_id:
+        time.sleep(10)
+        prod_id = get_product_id()
+
+    bot_status["status"] = "ACTIVE & SCANNING"
+    
     while True:
         try:
-            # RULE 1: Agar trade pehle se active hai, to PRE-SIGNAL bilkul mat bhejo
-            if get_state("active_trade") is not None:
-                time.sleep(3)
+            in_position = has_open_position(prod_id)
+            bot_status["active_position"] = in_position
+            
+            # Agar trade chal raha hai toh wait karo
+            if in_position:
+                time.sleep(15)
                 continue
 
-            c1h, _ = fetch_btc_klines("1h", 25)
-            htf_trend = "NEUTRAL"
-            if c1h and len(c1h) >= 20:
-                e20_1h = ema_series([x["close"] for x in c1h], 20)[-1]
-                htf_trend = "BULLISH" if c1h[-1]["close"] > e20_1h else "BEARISH"
+            df = get_market_data(SYMBOL)
+            
+            # Data enough nahi hai 200 EMA ke liye toh wait karo
+            if df is None or len(df) < 201:
+                time.sleep(10)
+                continue
 
-            c5, live = fetch_btc_klines("5m", 30)
-            if c5 and live:
-                closes = [x["close"] for x in c5]
-                e9 = ema_series(closes, 9)[-1]
-                e21 = ema_series(closes, 21)[-1]
-                curr_p = live["close"]
-                last_c = c5[-1]
-                current_bar_time = last_c["time"]
-                a_val = atr(c5, 14)
+            last = df.iloc[-1]
+            prev = df.iloc[-2]
+            current_time = last.name  # Assuming index is time or row number
+            
+            current_price = float(last['close'])
+            bot_status["last_price"] = current_price
+            
+            # Agar is candle par trade le chuke hain toh skip
+            if last_trade_time == current_time:
+                time.sleep(5)
+                continue
 
-                if a_val >= MIN_ATR_PTS:
-                    forming_long = (htf_trend == "BULLISH" and e9 > e21 and last_c["low"] <= e21 * 1.002)
-                    forming_short = (htf_trend == "BEARISH" and e9 < e21 and last_c["high"] >= e21 * 0.998)
+            # --- STRATEGY CONDITIONS ---
+            bullish_cross = prev['ema_9'] <= prev['ema_21'] and last['ema_9'] > last['ema_21']
+            bearish_cross = prev['ema_9'] >= prev['ema_21'] and last['ema_9'] < last['ema_21']
+            
+            up_trend = current_price > last['ema_200']
+            down_trend = current_price < last['ema_200']
+            
+            good_momentum_buy = last['rsi'] > 50
+            good_momentum_sell = last['rsi'] < 50
+            
+            current_atr = float(last['atr'])
 
-                    if forming_long:
-                        p_entry = round(last_c["high"], BTC_DEC)
-                        p_sl = round(p_entry * (1 - SL_PCT), BTC_DEC)
-                        p_tp = round(p_entry * (1 + TP_PCT), BTC_DEC)
-                        radar = {"type": "LONG", "entry": p_entry, "sl": p_sl, "tp": p_tp, "time": time.time()}
-                        set_state("btc_radar", radar)
+            # EXECUTE BUY
+            if bullish_cross and up_trend and good_momentum_buy:
+                success = place_bracket_order(prod_id, "buy", current_price, current_atr)
+                if success:
+                    last_trade_time = current_time
+                    time.sleep(300) # Wait 5 mins
 
-                        # RULE 2: Ek candle par sirf 1 pre-signal alert
-                        if last_alerted_bar != current_bar_time:
-                            msg = "👀 [PRE-SIGNAL] BTC LONG SETUP FORMING!\n\n" + \
-                                  "📍 Planned Entry: > ${:.1f}\n".format(p_entry) + \
-                                  "🛡️ Structure SL: ${:.1f} (-{:.1f}%)\n".format(p_sl, SL_PCT*100) + \
-                                  "🎯 Direct Mega TP: ${:.1f} (+{:.1f}%)\n".format(p_tp, TP_PCT*100) + \
-                                  "⏳ Waiting for 5M Breakout confirmation..."
-                            send_alert(msg)
-                            last_alerted_bar = current_bar_time
+            # EXECUTE SELL
+            elif bearish_cross and down_trend and good_momentum_sell:
+                success = place_bracket_order(prod_id, "sell", current_price, current_atr)
+                if success:
+                    last_trade_time = current_time
+                    time.sleep(300)
 
-                        if curr_p > p_entry and last_c["close"] > last_c["open"]:
-                            set_state("signal_ready", {"type": "LONG", "price": curr_p, "sl": p_sl, "tp": p_tp, "bar": live["time"]})
+            time.sleep(10) # 10 second delay for CPU efficiency
 
-                    elif forming_short:
-                        p_entry = round(last_c["low"], BTC_DEC)
-                        p_sl = round(p_entry * (1 + SL_PCT), BTC_DEC)
-                        p_tp = round(p_entry * (1 - TP_PCT), BTC_DEC)
-                        radar = {"type": "SHORT", "entry": p_entry, "sl": p_sl, "tp": p_tp, "time": time.time()}
-                        set_state("btc_radar", radar)
+        except Exception as e:
+            bot_status["last_error"] = f"Main Loop Crash Prevented: {e}"
+            time.sleep(10) # Crash hone par 10 sec wait karke restart
 
-                        if last_alerted_bar != current_bar_time:
-                            msg = "👀 [PRE-SIGNAL] BTC SHORT SETUP FORMING!\n\n" + \
-                                  "📍 Planned Entry: < ${:.1f}\n".format(p_entry) + \
-                                  "🛡️ Structure SL: ${:.1f} (+{:.1f}%)\n".format(p_sl, SL_PCT*100) + \
-                                  "🎯 Direct Mega TP: ${:.1f} (-{:.1f}%)\n".format(p_tp, TP_PCT*100) + \
-                                  "⏳ Waiting for 5M Breakdown confirmation..."
-                            send_alert(msg)
-                            last_alerted_bar = current_bar_time
+# Start background thread
+bot_thread = threading.Thread(target=run_trading_bot, daemon=True)
+bot_thread.start()
 
-                        if curr_p < p_entry and last_c["close"] < last_c["open"]:
-                            set_state("signal_ready", {"type": "SHORT", "price": curr_p, "sl": p_sl, "tp": p_tp, "bar": live["time"]})
-
-        except Exception: pass
-        time.sleep(2)
-
-# ==============================================================================
-# EXECUTION ENGINE
-# ==============================================================================
-def close_trade(t, exit_price, result):
-    if get_state("active_trade") is None: return
-    set_state("active_trade", None)
-    set_state("btc_radar", None)  # Clear pre-signal radar on close
-    set_state("last_exit_time", time.time())
-
-    d = 1 if t.get("type") == "LONG" else -1
-    gross = (exit_price - float(t.get("entry", 0))) * float(t.get("qty", 0.001)) * d
-    net = round(gross, 2)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    db("INSERT INTO trades (ts,epoch,side,entry,exit_price,qty,result,pnl) VALUES (?,?,?,?,?,?,?,?)",
-       (now_str, time.time(), t.get("type", "TRADE"), float(t.get("entry", 0)), float(exit_price), float(t.get("qty", 0.001)), str(result), float(net)))
-
-    status_icon = "🚀" if net > 0 else "🛑"
-    msg = status_icon + " [BTC EXIT] " + str(t.get("type", "")) + " " + str(result) + "\nPnL: " + "{:+.2f}$".format(net) + " \vert{} Exit: $" + "{:.1f}".format(float(exit_price))
-    send_alert(msg)
-
-def run_execution_engine():
-    while True:
-        try:
-            active = get_state("active_trade")
-            if active:
-                p = last_btc_price()
-                if p:
-                    long_ = (active.get("type") == "LONG")
-                    entry_val = float(active.get("entry", 0))
-                    sl_val = float(active.get("sl", 0))
-                    tp_val = float(active.get("tp", 0))
-
-                    if long_ and p >= entry_val * 1.01 and not active.get("trailed"):
-                        active["sl"] = round(entry_val * 1.002, BTC_DEC)
-                        active["trailed"] = True
-                        set_state("active_trade", active)
-                        send_alert("🛡️ BTC LONG SL Trailed to Breakeven (${:.1f})".format(active["sl"]))
-                    elif not long_ and p <= entry_val * 0.99 and not active.get("trailed"):
-                        active["sl"] = round(entry_val * 0.998, BTC_DEC)
-                        active["trailed"] = True
-                        set_state("active_trade", active)
-                        send_alert("🛡️ BTC SHORT SL Trailed to Breakeven (${:.1f})".format(active["sl"]))
-
-                    if (long_ and p >= tp_val) or (not long_ and p <= tp_val):
-                        close_trade(active, tp_val, "DIRECT MEGA TP 🔥")
-                    elif (long_ and p <= sl_val) or (not long_ and p >= sl_val):
-                        res = "TRAILED EXIT 🛡️" if active.get("trailed") else "SL HIT 🛑"
-                        close_trade(active, p, res)
-            else:
-                sig = get_state("signal_ready")
-                if sig and not get_state("kill_switch", False) and (time.time() - get_state("last_exit_time", 0) > 180):
-                    raw_qty = (MARGIN_USD * LEVERAGE) / float(sig["price"])
-                    qty = max(MIN_QTY, round(raw_qty, 3))
-
-                    trade = {
-                        "type": sig["type"], "entry": sig["price"],
-                        "sl": sig["sl"], "tp": sig["tp"], "qty": qty, "trailed": False
-                    }
-                    set_state("active_trade", trade)
-                    set_state("signal_ready", None)
-                    set_state("btc_radar", None)  # Pre-signal levels clear karo
-
-                    msg = "⚡ [BTC DIRECT SWING EXECUTED] " + str(sig["type"]) + "\n\n" + \
-                          "📍 Entry: ${:.1f}\n".format(float(sig["price"])) + \
-                          "🎯 Direct TP: ${:.1f}\n".format(float(sig["tp"])) + \
-                          "🛡️ Structure SL: ${:.1f}\n".format(float(sig["sl"])) + \
-                          "📦 Size: " + str(qty) + " BTC ($2.50 Margin @ 10x)"
-                    send_alert(msg)
-        except Exception: pass
-        time.sleep(1)
-
-@st.cache_resource
-def launch():
-    threading.Thread(target=run_analysis_engine, daemon=True).start()
-    threading.Thread(target=run_execution_engine, daemon=True).start()
-    return True
-launch()
-
-# ==============================================================================
-# UI INTERFACE
-# ==============================================================================
-st.set_page_config(page_title="BTC QUANT RADAR", layout="wide", initial_sidebar_state="collapsed")
-st.markdown("""<style>
-header, footer, #MainMenu { display: none !important; }
-.block-container { padding: 0 !important; margin: 0 !important; max-width: 100vw !important; }
-iframe { width: 100vw !important; height: calc(100vh - 5px) !important; border: none !important; }
-</style>""", unsafe_allow_html=True)
-
-if st.query_params.get("force_close") == "1":
-    t = get_state("active_trade")
-    if t:
-        p = last_btc_price() or t.get("entry")
-        close_trade(t, p, "MANUAL OVERRIDE ⚠️")
-    st.query_params.clear()
-    st.rerun()
-
-if st.query_params.get("toggle_kill") == "1":
-    k = get_state("kill_switch", False)
-    set_state("kill_switch", not k)
-    st.query_params.clear()
-    st.rerun()
-
-if st.query_params.get("clear_vault") == "1":
-    db("DELETE FROM trades")
-    set_state("active_trade", None)
-    set_state("btc_radar", None)
-    st.query_params.clear()
-    st.rerun()
-
-active_trade = get_state("active_trade")
-btc_radar = get_state("btc_radar")
-kill_active = get_state("kill_switch", False)
-
-history = db("SELECT ts, side, entry, exit_price, result, pnl FROM trades ORDER BY id DESC LIMIT 15", fetch="all") or []
-hist_json = [{"time": r[0].split(" ")[-1], "type": r[1], "entry": r[2], "exit": r[3], "result": r[4], "pnl": r[5]} for r in history]
-
-stats = db("SELECT COUNT(*), COALESCE(SUM(pnl),0), COALESCE(SUM(pnl>0),0) FROM trades", fetch="one")
-n, pnl_sum, wins = stats if stats else (0, 0.0, 0)
-wr = round((wins / n) * 100, 1) if n else 0.0
-
-raw_html = """<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        html, body { background: #080a0f; color: #d1d4dc; font-family: -apple-system, BlinkMacSystemFont, sans-serif; width: 100vw; height: 100vh; overflow: hidden; }
-        
-        .top-nav { display: flex; align-items: center; background: #0d111a; border-bottom: 1px solid #1a2336; padding: 0 8px; font-size: 11px; height: 38px; gap: 8px; overflow-x: auto; white-space: nowrap; }
-        .brand { font-weight: 800; color: #fff; font-size: 11px; display: flex; align-items: center; gap: 5px; }
-        .badge-live { background: #00e676; color: #000; font-size: 8px; padding: 2px 4px; border-radius: 3px; font-weight: 900; }
-        .stat-card { display: flex; flex-direction: column; min-width: 65px; }
-        .stat-label { font-size: 7px; color: #62697a; text-transform: uppercase; font-weight: 800; }
-        .stat-val { font-size: 10px; font-weight: 800; color: #fff; }
-        .btn-compact { background: #141c2c; color: #38bdf8; border: 1px solid #1f2a40; border-radius: 4px; padding: 3px 8px; font-size: 9px; font-weight: 800; cursor: pointer; }
-
-        .workspace { display: flex; flex-direction: column; width: 100vw; height: calc(100vh - 38px); }
-        #chart-zone { width: 100vw; height: 53vh; background: #080a0f; }
-
-        .trade-dock { width: 100vw; height: 38px; background: #0a0e17; border-top: 1px solid #1a2336; padding: 0 8px; display: flex; align-items: center; justify-content: space-between; font-size: 10px; }
-        .dock-group { display: flex; align-items: center; gap: 8px; }
-        .btn-override-danger { background: rgba(255, 59, 48, 0.2); color: #ff3b30; border: 1px solid #ff3b30; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
-        .btn-override-warn { background: rgba(240, 185, 11, 0.2); color: #f0b90b; border: 1px solid #f0b90b; border-radius: 4px; padding: 3px 6px; font-size: 9px; font-weight: 800; cursor: pointer; }
-
-        .bottom-bar { width: 100vw; height: 46px; background: #0d121c; border-top: 1px solid #1a2336; padding: 4px 8px; display: grid; grid-template-columns: 1fr 1fr 1fr 1.2fr; gap: 6px; align-items: center; }
-        .metric-cell { display: flex; flex-direction: column; justify-content: center; background: #101624; padding: 2px 6px; border-radius: 4px; border: 1px solid #192233; height: 36px; }
-        .cell-head { font-size: 7px; color: #62697a; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 2px; }
-        .cell-body { font-size: 9px; font-weight: 800; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-        .modal-bg { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.85); backdrop-filter: blur(5px); z-index: 999; align-items: center; justify-content: center; }
-        .modal-box { background: #0d121c; border: 1px solid #1f2a40; border-radius: 8px; width: 90vw; max-width: 400px; max-height: 80vh; display: flex; flex-direction: column; padding: 12px; }
-        .history-list { overflow-y: auto; max-height: 250px; font-size: 10px; }
-        .history-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #151d2b; }
-        .btn-modal-clear { margin-top: 10px; background: rgba(255, 59, 48, 0.25); color: #ff3b30; border: 1px solid rgba(255, 59, 48, 0.6); border-radius: 6px; padding: 10px; font-size: 11px; font-weight: 800; cursor: pointer; text-align: center; width: 100%; display: block; outline: none; }
-    </style>
-</head>
-<body>
-    <div class="top-nav">
-        <div class="brand">⚡ <span class="badge-live">BTCUSDT 5M</span></div>
-        <div class="stat-card"><div class="stat-label">STATUS</div><div id="disp-status" class="stat-val" style="color:#38bdf8;">SCANNING</div></div>
-        <div class="stat-card"><div class="stat-label">ENTRY LEVEL</div><div id="disp-entry" class="stat-val" style="color:#38bdf8;">--</div></div>
-        <div class="stat-card"><div class="stat-label">SL / TRAIL</div><div id="disp-sl" class="stat-val" style="color:#ff3b30;">--</div></div>
-        <div class="stat-card"><div class="stat-label">DIRECT TP</div><div id="disp-tp" class="stat-val" style="color:#00e676;">--</div></div>
-        <button class="btn-compact" onclick="toggleModal(true)">📜 VAULT (<span id="hist-count">0</span>)</button>
-        <button class="btn-compact" onclick="window.parent.location.reload()">🔄</button>
-    </div>
-
-    <div class="workspace">
-        <div id="chart-zone"></div>
-        
-        <div class="trade-dock">
-            <div class="dock-group">
-                <span style="color:#62697a; font-weight:800;">ACCOUNT:</span>
-                <b style="color:#00e676; font-size:10px;">$10.00 BASE</b>
-                <span style="color:#62697a;">| ALLOCATION:</span>
-                <b style="color:#38bdf8; font-size:10px;">$2.50 (10x LEV = $25 NOTIONAL)</b>
-            </div>
-            <div class="dock-group">
-                <button type="button" class="btn-override-warn" onclick="triggerForceClose()">⚡ FORCE CLOSE</button>
-                <button type="button" class="btn-override-danger" onclick="triggerKillToggle()" id="btn-kill">🚨 KILL SWITCH</button>
-            </div>
+# --- WEB DASHBOARD ---
+@app.route('/')
+def index():
+    color = "green" if bot_status['active_position'] else "gray"
+    html = f"""
+    <html>
+    <head>
+        <title>Delta Pro Bot V2</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body {{ font-family: -apple-system, sans-serif; background: #0f172a; color: #f8fafc; padding: 20px; }}
+            .card {{ background: #1e293b; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }}
+            .status {{ color: {color}; font-weight: bold; }}
+            .err {{ color: #ef4444; font-size: 0.9em; }}
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h2>🤖 Trade Bot Analytics</h2>
+            <p><b>Engine Status:</b> {bot_status['status']}</p>
+            <p><b>Live BTC Price:</b> ${bot_status['last_price']}</p>
+            <p><b>Active Trade Running:</b> <span class="status">{'YES' if bot_status['active_position'] else 'NO'}</span></p>
+            <p><b>Total Trades Taken:</b> {bot_status['total_trades']}</p>
+            <hr>
+            <p><b>Last Action:</b> {bot_status['last_trade']}</p>
+            <p class="err"><b>System Logs:</b> {bot_status['last_error']}</p>
         </div>
+    </body>
+    </html>
+    """
+    return html
 
-        <div class="bottom-bar">
-            <div class="metric-cell">
-                <span class="cell-head">THREAD 3 RISK</span>
-                <div class="cell-body" style="color:#00e676;">-$2.00 DRAWDOWN GUARD</div>
-            </div>
-            <div class="metric-cell">
-                <span class="cell-head">EXTRA FILTERS</span>
-                <div class="cell-body" style="color:#38bdf8;">ATR • OB • VOL • FUNDING</div>
-            </div>
-            <div class="metric-cell">
-                <span class="cell-head">TARGET PROFILE</span>
-                <div class="cell-body" style="color:#00e676;">100% DIRECT SWING TP</div>
-            </div>
-            <div class="metric-cell">
-                <span class="cell-head">RADAR SCANNER</span>
-                <div class="cell-body" id="val-setup" style="color:#38bdf8;">SCANNING BTC BREAKOUTS...</div>
-            </div>
-        </div>
-    </div>
+@app.route('/ping')
+def ping():
+    return "OK", 200
 
-    <div id="modal-bg" class="modal-bg" onclick="handleBgClick(event)">
-        <div class="modal-box">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-                <b style="color:#fff; font-size:11px;">BTC VAULT DATABASE</b>
-                <button onclick="toggleModal(false)" style="background:transparent; border:none; color:#888; font-size:16px; cursor:pointer;">✕</button>
-            </div>
-            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-bottom:10px;">
-                <div style="background:#131a26; padding:5px 8px; border-radius:4px; font-size:10px; display:flex; justify-content:space-between;">
-                    <span>Total Trades</span><b id="stat-total" style="color:#fff;">0</b>
-                </div>
-                <div style="background:#131a26; padding:5px 8px; border-radius:4px; font-size:10px; display:flex; justify-content:space-between;">
-                    <span>Win Rate</span><b id="stat-rate" style="color:#00e676;">0.0%</b>
-                </div>
-            </div>
-            <div id="history-container" class="history-list"></div>
-            <button type="button" class="btn-modal-clear" onclick="triggerVaultClear()">🗑️ ONE-CLICK CLEAR VAULT</button>
-        </div>
-    </div>
-
-    <script>
-        const IST_OFFSET = 5.5 * 3600;
-        let activeTrade = __ACTIVE_TRADE__;
-        let radarData = __RADAR_DATA__;
-        let tradeHistory = __HISTORY__;
-        let stats = __STATS__;
-        let killActive = __KILL__;
-
-        function toggleModal(show) { document.getElementById('modal-bg').style.display = show ? 'flex' : 'none'; }
-        function handleBgClick(e) { if (e.target.id === 'modal-bg') toggleModal(false); }
-
-        function triggerForceClose() {
-            if (!activeTrade) { alert("No active trade to close!"); return; }
-            if (confirm("Force close active BTC position?")) {
-                try { window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?force_close=1"; }
-                catch(e) { window.location.href = window.location.pathname + "?force_close=1"; }
-            }
-        }
-
-        function triggerKillToggle() {
-            let msg = killActive ? "Resume bot operations?" : "Activate Emergency Kill Switch?";
-            if (confirm(msg)) {
-                try { window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?toggle_kill=1"; }
-                catch(e) { window.location.href = window.location.pathname + "?toggle_kill=1"; }
-            }
-        }
-
-        function triggerVaultClear() {
-            if (confirm("Reset Vault Database?")) {
-                try { window.parent.location.href = window.parent.location.origin + window.parent.location.pathname + "?clear_vault=1"; }
-                catch(e) { window.location.href = window.location.pathname + "?clear_vault=1"; }
-            }
-        }
-
-        const chartZone = document.getElementById('chart-zone');
-        const chart = LightweightCharts.createChart(chartZone, {
-            width: chartZone.clientWidth, height: chartZone.clientHeight,
-            layout: { background: { color: '#080a0f' }, textColor: '#787b86' },
-            grid: { vertLines: { color: '#111622' }, horzLines: { color: '#111622' } },
-            rightPriceScale: { borderColor: '#192130', autoScale: true },
-            timeScale: { 
-                borderColor: '#192130', timeVisible: true, secondsVisible: false,
-                tickMarkFormatter: (t) => {
-                    const d = new Date((t + IST_OFFSET) * 1000);
-                    return d.getUTCHours().toString().padStart(2, '0') + ':' + d.getUTCMinutes().toString().padStart(2, '0');
-                }
-            }
-        });
-
-        const series = chart.addCandlestickSeries({
-            upColor: '#00E676', downColor: '#FF3B30',
-            borderUpColor: '#00E676', borderDownColor: '#FF3B30',
-            wickUpColor: '#00E676', wickDownColor: '#FF3B30'
-        });
-
-        let lineEntry = null, lineSL = null, lineTP = null;
-        function clearLines() {
-            if (lineEntry) { try { series.removePriceLine(lineEntry); } catch(e){} lineEntry = null; }
-            if (lineSL) { try { series.removePriceLine(lineSL); } catch(e){} lineSL = null; }
-            if (lineTP) { try { series.removePriceLine(lineTP); } catch(e){} lineTP = null; }
-        }
-
-        function renderMasterInterface() {
-            clearLines();
-            let source = activeTrade ? activeTrade : radarData;
-
-            if (source && source.entry) {
-                let isLive = !!activeTrade;
-                let titlePrefix = isLive ? "ACTIVE " : "PRE-SIGNAL ";
-                let lineStyle = isLive ? LightweightCharts.LineStyle.Solid : LightweightCharts.LineStyle.Dashed;
-
-                lineEntry = series.createPriceLine({ price: parseFloat(source.entry), color: '#38bdf8', lineWidth: 2, lineStyle: lineStyle, axisLabelVisible: true, title: titlePrefix + 'ENTRY' });
-                lineSL = series.createPriceLine({ price: parseFloat(source.sl), color: '#ff3b30', lineWidth: 2, lineStyle: lineStyle, axisLabelVisible: true, title: (source.trailed ? 'TRAILED SL' : titlePrefix + 'SL') });
-                lineTP = series.createPriceLine({ price: parseFloat(source.tp), color: '#00e676', lineWidth: 2, lineStyle: lineStyle, axisLabelVisible: true, title: titlePrefix + 'DIRECT TP' });
-
-                document.getElementById('disp-status').innerText = isLive ? ("ACTIVE " + source.type) : ("PRE-SIGNAL " + source.type);
-                document.getElementById('disp-status').style.color = (source.type === "LONG") ? "#00e676" : "#ff3b30";
-                document.getElementById('disp-entry').innerText = "$" + source.entry;
-                document.getElementById('disp-sl').innerText = "$" + source.sl;
-                document.getElementById('disp-tp').innerText = "$" + source.tp;
-
-                document.getElementById('val-setup').innerText = isLive ? ("RIDING BTC " + source.type + " 🚀") : ("WATCHING BTC " + source.type + " PRE-SIGNAL ⏳");
-                document.getElementById('val-setup').style.color = (source.type === "LONG") ? "#00e676" : "#ff3b30";
-            } else {
-                document.getElementById('disp-status').innerText = "SCANNING";
-                document.getElementById('disp-status').style.color = "#38bdf8";
-                document.getElementById('disp-entry').innerText = "--";
-                document.getElementById('disp-sl').innerText = "--";
-                document.getElementById('disp-tp').innerText = "--";
-                document.getElementById('val-setup').innerText = killActive ? "BOT STOPPED (KILL SWITCH)" : "SCANNING BTC REJECTIONS & BREAKOUTS...";
-                document.getElementById('val-setup').style.color = killActive ? "#ff3b30" : "#38bdf8";
-            }
-
-            document.getElementById('hist-count').innerText = stats.total;
-            document.getElementById('stat-total').innerText = stats.total;
-            document.getElementById('stat-rate').innerText = stats.win_rate + "%";
-
-            const histCont = document.getElementById('history-container');
-            if (tradeHistory.length > 0) {
-                histCont.innerHTML = "";
-                tradeHistory.forEach(item => {
-                    let resCol = item.result.includes("TP") || item.result.includes("TRAILED") ? "#00e676" : "#ff3b30";
-                    let typeCol = item.type === "LONG" ? "#00e676" : "#ff3b30";
-                    histCont.innerHTML += `
-                        <div class="history-item">
-                            <span><b>BTC</b> ${item.time} <b style="color:${typeCol};">${item.type}</b> @ $${item.entry}</span>
-                            <span><b style="color:${resCol};">${item.result}</b> (${item.pnl ? '$' + item.pnl : '$0.00'})</span>
-                        </div>`;
-                });
-            } else {
-                histCont.innerHTML = '<div style="color:#555; text-align:center; padding:15px 0;">Vault Clean (0 trades)...</div>';
-            }
-        }
-
-        let candleBuffer = [];
-        function syncCandles() {
-            fetch('https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=90')
-                .then(r => r.json())
-                .then(data => {
-                    candleBuffer = data.map(d => ({
-                        time: (d[0] - (d[0] % 300000)) / 1000,
-                        open: parseFloat(d[1]), high: parseFloat(d[2]),
-                        low: parseFloat(d[3]), close: parseFloat(d[4])
-                    }));
-                    series.setData(candleBuffer);
-                    chart.timeScale().fitContent();
-                    renderMasterInterface();
-                    startLiveStream();
-                }).catch(e => setTimeout(syncCandles, 2000));
-        }
-
-        function startLiveStream() {
-            const ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@kline_5m');
-            ws.onmessage = (e) => {
-                const k = JSON.parse(e.data).k;
-                const price = parseFloat(k.c);
-                const barTime = (k.t - (k.t % 300000)) / 1000;
-
-                if (candleBuffer.length > 0) {
-                    let last = candleBuffer[candleBuffer.length - 1];
-                    if (barTime === last.time) {
-                        last.close = price;
-                        if (price > last.high) last.high = price;
-                        if (price < last.low) last.low = price;
-                        series.update(last);
-                    } else if (barTime > last.time) {
-                        const newBar = { time: barTime, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: price };
-                        candleBuffer.push(newBar);
-                        series.update(newBar);
-                    }
-                }
-            };
-        }
-
-        syncCandles();
-        window.onresize = () => chart.applyOptions({ width: chartZone.clientWidth, height: chartZone.clientHeight });
-    </script>
-</body>
-</html>"""
-
-final_html = raw_html.replace("__ACTIVE_TRADE__", json.dumps(active_trade))\
-                     .replace("__RADAR_DATA__", json.dumps(btc_radar))\
-                     .replace("__HISTORY__", json.dumps(hist_json))\
-                     .replace("__STATS__", json.dumps({"total": n, "win_rate": wr}))\
-                     .replace("__KILL__", json.dumps(kill_active))
-
-components.html(final_html, height=710, scrolling=False)
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
