@@ -1,5 +1,5 @@
-streamlit>1.37
-yfinance
+streamlit
+requests
 pandas
 numpy
-pytz
+plotly
